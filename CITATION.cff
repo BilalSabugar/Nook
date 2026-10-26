@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use Nook in your research or application, please cite it as below."
+authors:
+  - name: "The Nook Contributors"
+title: "Nook: Autonomous AI Coworkers with Persistent Computers & Spaces"
+version: 1.0.0
+date-released: 2026-10-26
+url: "https://github.com/your-username/nook"
+license: "MIT"
+keywords:
+  - "artificial intelligence"
+  - "autonomous agents"
+  - "ai coworkers"
+  - "model context protocol"
+  - "copilotkit"
+  - "sandboxed execution"

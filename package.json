@@ -1,7 +1,29 @@
 {
   "name": "nook",
-  "version": "0.1.0",
-  "private": true,
+  "version": "1.0.0",
+  "description": "An open-source workspace for persistent AI coworkers with sandboxed computers, living spaces, and human-in-the-loop review safeguards.",
+  "license": "MIT",
+  "keywords": [
+    "ai",
+    "ai-coworkers",
+    "copilotkit",
+    "opendots",
+    "model-context-protocol",
+    "mcp",
+    "sandboxed-computer",
+    "autonomous-agents",
+    "nextjs",
+    "react-19",
+    "typescript"
+  ],
+  "homepage": "https://github.com/your-username/nook#readme",
+  "bugs": {
+    "url": "https://github.com/your-username/nook/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/nook.git"
+  },
   "scripts": {
     "dev": "node ./node_modules/next/dist/bin/next dev",
     "build": "node ./node_modules/next/dist/bin/next build",

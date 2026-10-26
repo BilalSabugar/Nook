@@ -17,19 +17,19 @@
     "react-19",
     "typescript"
   ],
-  "homepage": "https://github.com/your-username/nook#readme",
+  "homepage": "https://github.com/BilalSabugar/Nook#readme",
   "bugs": {
-    "url": "https://github.com/your-username/nook/issues"
+    "url": "https://github.com/BilalSabugar/Nook/issues"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/nook.git"
+    "url": "https://github.com/BilalSabugar/Nook.git"
   },
   "scripts": {
     "dev": "node ./node_modules/next/dist/bin/next dev",
     "build": "node ./node_modules/next/dist/bin/next build",
     "start": "node ./node_modules/next/dist/bin/next start",
-    "lint": "node ./node_modules/next/dist/bin/next lint",
+    "lint": "eslint .",
     "test": "node --experimental-strip-types --test src/__tests__/*.test.mjs"
   },
   "dependencies": {

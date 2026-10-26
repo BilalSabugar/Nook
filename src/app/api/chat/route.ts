@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
+  const auth = validateApiRequest(req);
+  if (!auth.authorized) {
+    return unauthorizedResponse(auth.error);
+  }
+
   try {
     const body = await req.json();
     const { agent, userMessage, history, settings } = body;

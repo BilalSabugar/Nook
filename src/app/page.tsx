@@ -70,57 +70,105 @@ export default function NookApp() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Load from LocalStorage if available with automatic legacy emoji migration
+  // Load durable server state on mount with LocalStorage fallback
   useEffect(() => {
-    try {
-      const storedSettings = localStorage.getItem('nook_settings');
-      if (storedSettings) setLlmSettings(JSON.parse(storedSettings));
+    let isMounted = true;
 
-      const storedAgents = localStorage.getItem('nook_agents');
-      if (storedAgents) {
-        const parsed: Agent[] = JSON.parse(storedAgents);
-        const migrated = parsed.map((a) => {
-          let av = a.avatar;
-          if (av === '🧭' || a.id === 'agent-scout') av = 'compass';
-          else if (av === '✍️' || a.id === 'agent-quill') av = 'pen-tool';
-          else if (av === '⚡' || a.id === 'agent-cipher') av = 'cpu';
-          else if (av === '👑' || a.id === 'agent-aura') av = 'sparkles';
-          return { ...a, avatar: av };
-        });
-        setAgents(migrated);
-      }
+    // 1. Fetch durable server state
+    fetch('/api/workspace/state')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((serverState) => {
+        if (!isMounted) return;
+        if (serverState?.hasDurableState && serverState?.data) {
+          const { agents: sAgents, spaces: sSpaces, computerStates: sComps, messages: sMsgs, settings: sSettings } = serverState.data;
+          if (Array.isArray(sAgents) && sAgents.length > 0) setAgents(sAgents);
+          if (Array.isArray(sSpaces) && sSpaces.length > 0) setSpaces(sSpaces);
+          if (sComps && typeof sComps === 'object') setComputerStates(sComps);
+          if (sMsgs && typeof sMsgs === 'object') setMessages(sMsgs);
+          if (sSettings) setLlmSettings(sSettings);
+          return;
+        }
 
-      const storedSpaces = localStorage.getItem('nook_spaces');
-      if (storedSpaces) {
-        const parsed: Space[] = JSON.parse(storedSpaces);
-        const migrated = parsed.map((s) => {
-          let ic = s.icon;
-          if (ic === '🚀' || s.id === 'space-launch') ic = 'layers';
-          else if (ic === '🔬' || s.id === 'space-research') ic = 'search';
-          else if (ic === '⚡' || s.id === 'space-engineering') ic = 'cpu';
-          const pages = (s.pages || []).map((p) => {
-            let pIc = p.icon;
-            if (pIc === '🏠') pIc = 'file-text';
-            else if (pIc === '🎨') pIc = 'palette';
-            else if (pIc === '📊') pIc = 'bar-chart';
-            else if (pIc === '🔌') pIc = 'plug';
-            return { ...p, icon: pIc };
-          });
-          return { ...s, icon: ic, pages };
-        });
-        setSpaces(migrated);
-      }
-    } catch (e) {
-      console.warn('LocalStorage retrieval bypassed', e);
-    }
+        // 2. Fallback to browser LocalStorage if server state was uninitialized
+        try {
+          const storedSettings = localStorage.getItem('nook_settings');
+          if (storedSettings) setLlmSettings(JSON.parse(storedSettings));
+
+          const storedAgents = localStorage.getItem('nook_agents');
+          if (storedAgents) {
+            const parsed: Agent[] = JSON.parse(storedAgents);
+            const migrated = parsed.map((a) => {
+              let av = a.avatar;
+              if (av === '🧭' || a.id === 'agent-scout') av = 'compass';
+              else if (av === '✍️' || a.id === 'agent-quill') av = 'pen-tool';
+              else if (av === '⚡' || a.id === 'agent-cipher') av = 'cpu';
+              else if (av === '👑' || a.id === 'agent-aura') av = 'sparkles';
+              return { ...a, avatar: av };
+            });
+            setAgents(migrated);
+          }
+
+          const storedSpaces = localStorage.getItem('nook_spaces');
+          if (storedSpaces) {
+            const parsed: Space[] = JSON.parse(storedSpaces);
+            const migrated = parsed.map((s) => {
+              let ic = s.icon;
+              if (ic === '🚀' || s.id === 'space-launch') ic = 'layers';
+              else if (ic === '🔬' || s.id === 'space-research') ic = 'search';
+              else if (ic === '⚡' || s.id === 'space-engineering') ic = 'cpu';
+              const pages = (s.pages || []).map((p) => {
+                let pIc = p.icon;
+                if (pIc === '🏠') pIc = 'file-text';
+                else if (pIc === '🎨') pIc = 'palette';
+                else if (pIc === '📊') pIc = 'bar-chart';
+                else if (pIc === '🔌') pIc = 'plug';
+                return { ...p, icon: pIc };
+              });
+              return { ...s, icon: ic, pages };
+            });
+            setSpaces(migrated);
+          }
+        } catch {
+          // ignore
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  // Save to LocalStorage helpers
+  // Sync state to durable server disk & localStorage
+  const syncServerPersistence = (payload: {
+    agents?: Agent[];
+    spaces?: Space[];
+    computerStates?: Record<string, ComputerState>;
+    messages?: Record<string, Message[]>;
+    settings?: LLMSettings;
+  }) => {
+    try {
+      fetch('/api/workspace/state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agents: payload.agents || agents,
+          spaces: payload.spaces || spaces,
+          computerStates: payload.computerStates || computerStates,
+          messages: payload.messages || messages,
+          settings: payload.settings || llmSettings,
+        }),
+      }).catch(() => {});
+    } catch {}
+  };
+
+  // State persistence helpers
   const persistAgents = (updated: Agent[]) => {
     setAgents(updated);
     try {
       localStorage.setItem('nook_agents', JSON.stringify(updated));
     } catch {}
+    syncServerPersistence({ agents: updated });
   };
 
   const persistSpaces = (updated: Space[]) => {
@@ -128,6 +176,7 @@ export default function NookApp() {
     try {
       localStorage.setItem('nook_spaces', JSON.stringify(updated));
     } catch {}
+    syncServerPersistence({ spaces: updated });
   };
 
   const persistSettings = (updated: LLMSettings) => {
@@ -135,6 +184,7 @@ export default function NookApp() {
     try {
       localStorage.setItem('nook_settings', JSON.stringify(updated));
     } catch {}
+    syncServerPersistence({ settings: updated });
   };
 
   // Switch to Space

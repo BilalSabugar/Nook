@@ -617,9 +617,9 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                       </div>
 
                       <div className="p-4 rounded-lg bg-[#0a0a0a] border border-white/[0.06] font-mono text-xs text-neutral-300 space-y-2">
-                        <p className="text-neutral-500">// Clone and launch</p>
+                        <p className="text-neutral-500"># Clone and launch</p>
                         <p className="text-white">git clone https://github.com/CopilotKit/OpenDots.git</p>
-                        <p className="text-neutral-500">// Install dependencies and run locally</p>
+                        <p className="text-neutral-500"># Install dependencies and run locally</p>
                         <p className="text-white">npm install &amp;&amp; npm run dev</p>
                       </div>
                     </div>

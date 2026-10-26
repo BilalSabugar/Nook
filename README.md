@@ -165,7 +165,7 @@ curl -X POST http://localhost:3000/api/mcp \
 
 ### 1. Clone & Install
 ```bash
-git clone https://github.com/your-username/nook.git
+git clone https://github.com/BilalSabugar/Nook.git
 cd nook
 npm install
 ```

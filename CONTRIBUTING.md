@@ -20,7 +20,7 @@ By participating in this project, you agree to abide by our [Code of Conduct](CO
 
 1. **Fork and Clone the Repository**:
    ```bash
-   git clone https://github.com/<your-username>/Nook.git
+   git clone https://github.com/BilalSabugar/Nook.git
    cd Nook
    ```
 

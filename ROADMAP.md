@@ -40,4 +40,4 @@ This document outlines the planned milestones, upcoming features, and architectu
 ---
 
 ## 💡 Submitting Ideas
-Have an idea or feature request? Please open a discussion or file a feature request using our [Issue Templates](https://github.com/your-username/nook/issues/new/choose).
+Have an idea or feature request? Please open a discussion or file a feature request using our [Issue Templates](https://github.com/BilalSabugar/Nook/issues/new/choose).

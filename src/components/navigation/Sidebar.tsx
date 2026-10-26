@@ -65,10 +65,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center shadow-md">
             <div className="w-2.5 h-2.5 rounded-full bg-black" />
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span className="font-semibold text-white tracking-tight text-sm">Nook</span>
             <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-white/[0.06] text-neutral-400 border border-white/[0.08]">
               v1.0
+            </span>
+            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20" title="Vibe-coded AI Coworker OS">
+              vibe-coded
             </span>
           </div>
         </div>

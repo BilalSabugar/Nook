@@ -4,10 +4,12 @@ export async function GET() {
   return NextResponse.json({
     status: 'ok',
     name: 'Nook Agent Operating System',
+    mode: 'vibe-coded',
     version: '1.0.0',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     features: {
+      vibeCoded: true,
       persistentAgents: true,
       agentComputerSandbox: true,
       spacesDocumentWorkspace: true,

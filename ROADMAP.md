@@ -2,6 +2,8 @@
 
 This document outlines the planned milestones, upcoming features, and architectural evolution for **Nook**.
 
+> **Note on Methodology**: Nook is developed via agile **vibe coding** — pairing creative human direction with agentic AI pairing to rapidly architect, test, and harden autonomous coworker capabilities.
+
 ---
 
 ## 📍 Version 1.0.0 (Current Release) — The Foundation

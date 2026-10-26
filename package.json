@@ -1,11 +1,13 @@
 {
   "name": "nook",
   "version": "1.0.0",
-  "description": "An open-source workspace for persistent AI coworkers with sandboxed computers, living spaces, and human-in-the-loop review safeguards.",
+  "description": "An open-source workspace for persistent AI coworkers with sandboxed computers, living spaces, and human-in-the-loop review safeguards (Vibe-coded with Next.js & MCP).",
   "license": "MIT",
   "type": "module",
   "keywords": [
     "ai",
+    "vibe-coded",
+    "vibe-coding",
     "ai-coworkers",
     "copilotkit",
     "opendots",

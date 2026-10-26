@@ -8,12 +8,13 @@
 [![React](https://img.shields.io/badge/React-19.0-white.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-white.svg?style=flat-square&logo=typescript&logoColor=black)](https://www.typescriptlang.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-JSON--RPC%202.0-white.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![Built With Vibe Coding](https://img.shields.io/badge/built%20with-vibe%20coding-8b5cf6.svg?style=flat-square)](README.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-white.svg?style=flat-square)](CONTRIBUTING.md)
 
 <p align="center">
   <b>An open-source sanctuary for persistent AI coworkers.</b><br/>
   Equipped with isolated computers (browser, shell & filesystem), collaborative living spaces, and human-in-the-loop review safeguards.<br/>
-  <i>Inspired by <a href="https://github.com/CopilotKit/OpenDots">CopilotKit / OpenDots</a> and modern minimalist design systems.</i>
+  <i>Crafted via high-velocity <b>vibe coding</b> with AI pair programmers, inspired by <a href="https://github.com/CopilotKit/OpenDots">CopilotKit / OpenDots</a> and modern minimalist design systems.</i>
 </p>
 
 [Quickstart](#-quickstart) • [Architecture](#-architecture) • [Features](#-core-features) • [MCP Protocol](#-model-context-protocol-mcp) • [Roadmap](ROADMAP.md) • [Contributing](CONTRIBUTING.md)
@@ -21,6 +22,9 @@
 </div>
 
 ---
+
+> [!NOTE]
+> **✨ Vibe Coded with AI**: Nook is a vibe-coded system built and iterated rapidly through collaborative human-AI pair programming. It pairs fast exploratory design and modern UI craft with a real execution architecture — including isolated sandbox environments, server-side approval gates, durable workspace persistence, and the Model Context Protocol.
 
 ## 🌟 Overview
 

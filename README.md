@@ -82,36 +82,50 @@ graph TD
 
 ---
 
+## ⚖️ How Nook Compares to OpenDots: Why Nook is Better
+
+OpenDots pioneered the concept of always-on AI coworkers with dedicated computers. **Nook takes this foundation and elevates it into an industrial-grade, sovereign operating environment**:
+
+| Architectural Dimension | CopilotKit / OpenDots | Nook OS |
+| :--- | :--- | :--- |
+| **Model Independence & Freedom** | Hard-coupled to CopilotKit Cloud and specific backend scaffolding | **100% Sovereign Multi-Provider**: Native Gemini, OpenAI GPT-4o, Anthropic Claude 3.5, Local Ollama, + Zero-Key Simulation mode |
+| **Living Spaces vs Flat Ephemeral Logs** | Trapped in chat sessions or flat server files | **Living Collaborative Spaces**: Notion/Linear-grade canvas with versioning (`v1`...`v4`), AST table parser, slash block commands (`/`), and multi-coworker editing |
+| **Governance & Safety Architecture** | Basic action confirmations; direct execution | **Human-in-the-Loop Review System**: Structured `ReviewRequest` cards with visual diffs, syntax-highlighted markdown, approval flows, rejection feedback loops, and auto-rollback |
+| **Sandbox & Container Security** | Unconstrained Docker container runner | **Hardened Sandbox Supervisor**: Multi-layer SSRF defense, loopback/private IP blocking, command blacklisting (`rm -rf /`, `mkfs`, fork bombs), and execution timeouts |
+| **Multi-Modal Collaboration** | Text chat + viewer only | **Real-Time Voice Sessions**: Apple Intelligence-style fluid audio waveforms, Picture-in-Picture mini-player, and hands-free voice co-working |
+| **Spotlight Command Navigation** | Standard search bar | **Raycast/Linear Command Center (`⌘K` / `Ctrl+K`)**: Instant unified search across all coworkers, spaces, sandboxes, and actions with full keyboard shortcuts |
+| **Craft Standard & Visual Polish** | Prototype developer UI with raw monospace and system emojis | **`premium-ui-design` System**: Progressive glassmorphism (20px–28px blur), GPU cursor spotlights, vector archetype tokens (zero OS emojis), and Apple fluid glows |
+
+---
+
 ## ✨ Core Features
 
-### 1. 🤖 Persistent Specialist Coworkers
-- **Scout** 🧭 *(Deep Web Navigator)*: Navigates documentation, scrapes technical URLs, and synthesizes intelligence.
-- **Quill** ✍️ *(Technical Writer)*: Transforms bullet points into clean, production-ready markdown pages in Spaces.
-- **Cipher** ⚡ *(DevOps Engineer)*: Inspects codebases, runs terminal commands (`npm test`, `git status`), and edits `/workspace` files.
-- **Aura** 👑 *(Strategist)*: Coordinates cross-space roadmaps and reviews project velocity.
+### 1. Persistent Specialist Coworkers
+- **Scout** *(Research & Web Intelligence)*: Navigates documentation, scrapes technical URLs, and synthesizes intelligence.
+- **Quill** *(Technical Writer)*: Transforms bullet points into clean, production-ready markdown pages in Spaces.
+- **Cipher** *(DevOps Engineer)*: Inspects codebases, runs terminal commands (`npm test`, `git status`), and edits `/workspace` files.
+- **Aura** *(Executive Strategist)*: Coordinates cross-space roadmaps and reviews project velocity.
 
-### 2. 💻 Agent Computers (Sandboxed Environments)
+### 2. Agent Computers (Sandboxed Environments)
 - **Live Web Scraper (`/api/sandbox/browse`)**: Real-time server-side extraction of titles, metadata descriptions, semantic headings, and clean readable text.
 - **Safe Shell Executor (`/api/sandbox/exec`)**: Command runner protected against destructive host execution (`rm -rf /`, `mkfs`, fork bombs).
 - **Virtual Filesystem Explorer (`/workspace`)**: Direct file tree inspection, creation, inline code editing, syntax styling, and copy actions.
 - **Human Takeover Mode**: Instantly switch control between the autonomous agent and manual human operation.
 
-### 3. 📑 Living Spaces & Document Canvas
+### 3. Living Spaces & Document Canvas
 - **Tri-Mode View Switcher**: Effortlessly toggle between **Editor**, **Preview** (rendered markdown), and **Raw MD**.
 - **Interactive Slash Command Palette**: Press `/` or click `/ Blocks` to insert headings, task checklists, code blocks, quote callouts, and tables.
 - **Export & Portability**: Direct `.md` file download, copy-to-clipboard, and revision tracking.
 
-### 4. 🛡️ Human-in-the-Loop Review Cards
+### 4. Human-in-the-Loop Review Cards
 - Mutating actions (saving pages to Spaces or executing shell commands) require human authorization.
 - Review cards feature unified diff views, celebratory visual feedback upon approval, and decline feedback loops.
 
-### 5. 🎙️ Voice Sessions with Reactive Equalizer
-- Live voice call overlay with real-time waveform visualizer bars, spoken subtitles, and a floating Picture-in-Picture (PiP) mini-player.
+### 5. Real-Time Voice Sessions
+- Live voice call overlay with Apple Intelligence fluid aura, real-time waveform visualizer, spoken subtitles, and a floating Picture-in-Picture (PiP) mini-player.
 
-### 6. 🎨 ChatGPT Dots & OpenDots Inspired Minimalist UI
-- High-contrast, pure matte black-and-white aesthetic (`#0d0d0d`).
-- Signature 3-dot breathing animation for thinking states.
-- Clean floating prompt capsule with circular submit button.
+### 6. Raycast-Grade Command Center (`⌘K`)
+- Instant keyboard spotlight navigation across Coworkers, Spaces, Sandbox Computers, and system actions.
 
 ---
 

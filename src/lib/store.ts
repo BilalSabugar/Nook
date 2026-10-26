@@ -444,20 +444,23 @@ export const INITIAL_MESSAGES: Record<string, Message[]> = {
           pageContent: `# OpenDots Architecture & Nook Roadmap
 
 ### Overview
-OpenDots provides an open-source template for persistent AI agents, each with its own computer. In Nook, we take this vision and streamline it into an autonomous coworker sanctuary:
+OpenDots by CopilotKit provided the foundational proof-of-concept for persistent AI agents with sandboxed computers. Nook advances this paradigm into a sovereign, production-grade coworker sanctuary.
 
-### Key Differences & Upgrades
-| Feature | OpenDots | Nook |
+### Key Differences & Architectural Upgrades
+| Feature & Capability | OpenDots | Nook OS |
 | :--- | :--- | :--- |
-| **LLM Provider** | Hosted CopilotKit Cloud / Docker | Multi-Provider (Gemini, OpenAI, Claude, Local Ollama) |
-| **Agent Computer** | Docker container requirement | Instant Interactive Sandbox + Live Web & Shell |
-| **Human Takeover** | Viewport stream | Instant one-click interactive browser takeover |
-| **Document Editor**| Markdown source / basic | Rich visual canvas with slash commands & autosave |
+| **Model Independence** | Hosted CopilotKit Cloud / Docker requirement | Multi-Provider Sovereign (Gemini, OpenAI, Claude, Local Ollama, Zero-Key Demo) |
+| **Living Spaces** | Ephemeral chat history or raw filesystem logs | Notion/Linear-grade Living Spaces with versioning, AST table parser & slash blocks |
+| **Governance & Safety** | Basic confirmation dialogs; direct writes | Human-in-the-Loop Review Cards with diff previews, approval flows & auto-rollback |
+| **Sandbox Security** | Standard unconstrained container runner | Hardened Sandbox Supervisor with multi-layer SSRF defense & command blacklists |
+| **Voice Collaboration** | Text chat + viewer only | Real-Time Voice Sessions with Apple fluid waveforms & Picture-in-Picture mini-player |
+| **Navigation & Control** | Basic search input | Raycast/Linear Command Center (⌘K) with keyboard shortcuts across all assets |
+| **Visual Craft & Design** | Developer prototype with OS emojis | premium-ui-design: 24px glassmorphism, GPU cursor spotlights, vector archetypes |
 
-### Recommendations
-1. Deploy persistent coworkers with explicit tool boundaries.
-2. Ensure every critical action triggers an interactive **Review Card** for human sign-off.
-3. Organize all project knowledge into modular **Spaces**.`,
+### Strategic Recommendations
+1. **Maintain Complete Provider Sovereignty**: Allow teams to switch between local private LLMs and cloud models with zero code modifications.
+2. **Strict Human-in-the-Loop Safeguards**: Keep mutating operations (page writes, dangerous shell executions) gated behind interactive Review Cards.
+3. **Continuous Craft Standards**: Enforce the \`premium-ui-design\` design system across all present and future modules.`,
         },
         status: 'pending',
         createdAt: new Date().toISOString(),

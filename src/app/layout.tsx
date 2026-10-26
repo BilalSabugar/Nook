@@ -15,8 +15,23 @@ const jetbrainsMono = JetBrains_Mono({
 export const metadata: Metadata = {
   title: 'Nook — Autonomous AI Coworkers with Persistent Computers & Spaces',
   description: 'An open-source workspace for persistent AI coworkers, each with its own sandboxed computer. Collaborate across documents, web browsing, shell execution, and human-in-the-loop review cards.',
+  manifest: '/manifest.json',
   icons: {
-    icon: '/favicon.ico',
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      { url: '/favicon.ico' },
+    ],
+  },
+  openGraph: {
+    title: 'Nook — Autonomous AI Coworkers',
+    description: 'Persistent AI coworkers with sandboxed computers, living spaces, and human-in-the-loop review safeguards.',
+    siteName: 'Nook OS',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Nook — Autonomous AI Coworkers',
+    description: 'Persistent AI coworkers with sandboxed computers, living spaces, and human-in-the-loop review safeguards.',
   },
 };
 

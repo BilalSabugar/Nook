@@ -12,6 +12,33 @@ export async function POST(req: NextRequest) {
       ? url 
       : `https://${url}`;
 
+    // SSRF Safeguard: Block loopback, private networks, and cloud instance metadata
+    try {
+      const parsedUrl = new URL(targetUrl);
+      const host = parsedUrl.hostname.toLowerCase();
+      
+      const isPrivateHost = 
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host.startsWith('127.') ||
+        host === '0.0.0.0' ||
+        host.startsWith('10.') ||
+        host.startsWith('192.168.') ||
+        host.startsWith('169.254.') || // Cloud metadata endpoints (AWS, GCP, Azure)
+        host === '::1' ||
+        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host);
+
+      if (isPrivateHost) {
+        return NextResponse.json({
+          error: 'Access to private or local network addresses is prohibited by Nook security policy.',
+          url: targetUrl,
+          status: 403,
+        }, { status: 403 });
+      }
+    } catch {
+      return NextResponse.json({ error: 'Malformed URL' }, { status: 400 });
+    }
+
     try {
       const response = await fetch(targetUrl, {
         headers: {

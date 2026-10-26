@@ -182,6 +182,20 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) (or `http://localhost:3001`) in your browser.
 
+### 4. Run via Docker Compose (Production Ready)
+Nook includes a multi-stage production Docker container and compose configuration:
+
+```bash
+# Build and start containerized production instance
+docker compose up -d --build
+
+# View container logs
+docker compose logs -f
+
+# Check health endpoint
+curl http://localhost:3000/api/health
+```
+
 ---
 
 ## 🧪 Testing & Verification

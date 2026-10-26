@@ -7,293 +7,185 @@
 [![Next.js](https://img.shields.io/badge/Next.js-16.4-white.svg?style=flat-square&logo=next.js&logoColor=black)](https://nextjs.org/)
 [![React](https://img.shields.io/badge/React-19.0-white.svg?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0-white.svg?style=flat-square&logo=typescript&logoColor=black)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-24%20LTS-white.svg?style=flat-square&logo=node.js&logoColor=black)](https://nodejs.org/)
 [![Model Context Protocol](https://img.shields.io/badge/MCP-JSON--RPC%202.0-white.svg?style=flat-square)](https://modelcontextprotocol.io/)
 [![Built With Vibe Coding](https://img.shields.io/badge/built%20with-vibe%20coding-8b5cf6.svg?style=flat-square)](README.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-white.svg?style=flat-square)](CONTRIBUTING.md)
 
 <p align="center">
-  <b>An open-source sanctuary for persistent AI coworkers.</b><br/>
-  Equipped with isolated computers (browser, shell & filesystem), collaborative living spaces, and human-in-the-loop review safeguards.<br/>
-  <i>Crafted via high-velocity <b>vibe coding</b> with AI pair programmers, inspired by <a href="https://github.com/CopilotKit/OpenDots">CopilotKit / OpenDots</a> and modern minimalist design systems.</i>
+  <b>A self-hosted, single-user workspace for persistent AI coworkers.</b><br/>
+  Featuring dedicated execution sandboxes, server-side approval gates, durable SQLite state, living spaces, and Model Context Protocol (MCP) tool calling.<br/>
+  <i>Developed through human-directed, AI-assisted "vibe coding" with high craft and rigorous security remediation.</i>
 </p>
 
-[Quickstart](#-quickstart) • [Architecture](#-architecture) • [Features](#-core-features) • [MCP Protocol](#-model-context-protocol-mcp) • [Roadmap](ROADMAP.md) • [Contributing](CONTRIBUTING.md)
+[Quickstart](#-quickstart) • [Architecture](#-architecture) • [Security & Isolation](#-security--isolation-model) • [Feature Matrix](#-feature-matrix--status) • [Roadmap](ROADMAP.md) • [Contributing](CONTRIBUTING.md)
 
 </div>
 
 ---
 
 > [!NOTE]
-> **✨ Vibe Coded with AI**: Nook is a vibe-coded system built and iterated rapidly through collaborative human-AI pair programming. It pairs fast exploratory design and modern UI craft with a real execution architecture — including isolated sandbox environments, server-side approval gates, durable workspace persistence, and the Model Context Protocol.
+> **✨ Methodology Disclosure**: Nook was created and developed through human-directed AI-assisted development ("vibe coding"). Every subsystem has undergone technical auditing, security remediation, and verification across authentication, server approvals, isolation boundaries, SSRF prevention, and transactional persistence.
 
 ## 🌟 Overview
 
-**Nook** solves the limitation of disposable, stateless AI chat boxes. In Nook, you don't just prompt an ephemeral bot — you collaborate with **persistent specialist coworkers** who each own an isolated virtual computer:
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                               NOOK OS                                  │
-├───────────────────┬────────────────────────────────────────────────────┤
-│  AI COWORKERS     │  ● Scout (Research)    ● Quill (Documentation)     │
-│                   │  ● Cipher (DevOps)     ● Aura (Strategy)           │
-├───────────────────┼────────────────────────────────────────────────────┤
-│  AGENT COMPUTERS  │  🌐 Web Browser Scraper with Human Takeover        │
-│                   │  💻 Safe Terminal Runner with Sandbox Filters      │
-│                   │  📁 Virtual /workspace File Tree & Inline Editor   │
-├───────────────────┼────────────────────────────────────────────────────┤
-│  LIVING SPACES    │  📑 Notion/Linear Document Canvas (Editor/Preview) │
-│                   │  ⚡ Interactive Slash Command Palette (/ Blocks)   │
-├───────────────────┼────────────────────────────────────────────────────┤
-│  GOVERNANCE       │  🛡️ Human-in-the-Loop Review Cards & Diff Previews │
-│                   │  🔌 Model Context Protocol (MCP JSON-RPC 2.0)      │
-│                   │  🎙️ Voice Sessions with Reactive Audio Waveforms   │
-└───────────────────┴────────────────────────────────────────────────────┘
-```
+**Nook** provides a dedicated, single-user operating environment for AI coworkers. Rather than disposable, stateless chat threads, Nook pairs each coworker with:
+- **Persistent Persona & Role**: Scout (Research), Quill (Technical Writing), Cipher (DevOps & Code), and Aura (Architecture & Strategy).
+- **Agent Computer**: An execution environment with shell execution, file synchronization, and web browsing.
+- **Living Spaces**: Markdown canvas with version tracking, immutable revision logs, and document rollbacks.
+- **Server-Side Governance**: Human-in-the-loop review cards requiring cryptographic single-use approvals before executing mutating actions.
 
 ---
 
 ## 🏗️ Architecture
 
-Nook is built on Next.js 16 (App Router), TypeScript, Tailwind CSS, and standard web APIs:
-
 ```mermaid
 graph TD
-  User([Human User]) <--> UI[Nook Desktop Interface]
+  User([Authenticated Single User]) <-->|Session Cookie / HMAC| Gateway[Next.js App & Security Middleware]
   
-  subgraph ClientWorkspace [Client-Side Workspace]
-    UI <--> Nav[Sidebar & Search]
-    UI <--> Chat[Agent Chat & ChatGPT Dots]
-    UI <--> Spaces[Living Spaces Canvas]
-    UI <--> Computer[Agent Computer Sandbox]
+  subgraph Frontend [Client Workspace]
+    Gateway <--> UI[Nook Desktop Interface]
+    UI <--> Chat[Coworker Chat & Review Cards]
+    UI <--> Spaces[Living Spaces Editor & Revisions]
+    UI <--> Computer[Agent Computer Modal]
   end
 
-  subgraph ServerAPI [Next.js Server API Routes]
-    Chat <--> APIChat[/api/chat - Multi-Provider Router/]
-    Computer <--> APISandboxExec[/api/sandbox/exec - Safe Shell/]
-    Computer <--> APISandboxBrowse[/api/sandbox/browse - Web Scraper/]
-    Spaces <--> APIMCP[/api/mcp - JSON-RPC 2.0 Protocol/]
-    Nav <--> APIHealth[/api/health - System Status/]
+  subgraph BackendEngine [Security & Execution Services]
+    Gateway <--> AuthRoute[/api/auth/session - HMAC Auth/]
+    Gateway <--> ApprRoute[/api/approvals - Atomic Single-Use Approvals/]
+    Gateway <--> ExecRoute[/api/sandbox/exec - Isolated Shell Runner/]
+    Gateway <--> BrowseRoute[/api/sandbox/browse - SSRF-Protected Fetch/]
+    Gateway <--> MCPRoute[/api/mcp - MCP JSON-RPC 2.0 Server/]
+    Gateway <--> JobsRoute[/api/jobs - Durable Background Queue/]
+    Gateway <--> ChatRoute[/api/chat - Multi-Model Router/]
   end
 
-  subgraph LLMProviders [Intelligence Engines]
-    APIChat <--> Sim[Zero-Key Autonomous Simulation]
-    APIChat <--> Gemini[Google Gemini 1.5]
-    APIChat <--> OpenAI[OpenAI GPT-4o]
-    APIChat <--> Claude[Anthropic Claude 3.5]
-    APIChat <--> Ollama[Local Ollama]
+  subgraph StorageEngine [Transactional Storage & Security Vault]
+    BackendEngine <--> SQLite[(Node 24 SQLite WAL Database)]
+    BackendEngine <--> Vault[AES-256-GCM Encrypted Secrets Vault]
+    BackendEngine <--> Sandboxes[Agent Sandboxes .nook_sandboxes/]
   end
 ```
 
 ---
 
-## ⚖️ How Nook Compares to OpenDots: Why Nook is Better
+## 🛡️ Security & Isolation Model
 
-OpenDots pioneered the concept of always-on AI coworkers with dedicated computers. **Nook takes this foundation and elevates it into an industrial-grade, sovereign operating environment**:
+Security and correctness take strict precedence over release claims or cosmetic features:
 
-| Architectural Dimension | CopilotKit / OpenDots | Nook OS |
+1. **Authentication & Session Security**:
+   - Cryptographically signed HMAC-SHA256 session tokens (`<sessionId>.<expiry>.<hmacSignature>`).
+   - Secure `HttpOnly`, `SameSite=Lax` cookies with strict CSRF origin verification on mutating requests.
+   - Sliding-window in-memory rate limiting and request body payload limits (5MB max).
+   - Fails closed on missing or unauthorized access.
+
+2. **Server-Side Approval Gates**:
+   - Every mutating terminal execution requires an explicit server-side approval record.
+   - Enforces exact command and agent binding: an approval for command `A` cannot authorize command `B`.
+   - Atomic single-use token consumption preventing replay attacks and race conditions.
+   - Reusable authorization tokens are redacted from general API listings.
+
+3. **Filesystem & Execution Isolation**:
+   - Per-agent isolated sandboxes (`.nook_sandboxes/<agentId>`).
+   - Rejection of path traversal (`../`, absolute paths, null bytes) during file synchronization.
+   - Host secrets and provider API keys are stripped from execution child process environments.
+   - Destructive commands (`rm -rf /`, fork bombs, mkfs) are blocked before execution.
+
+4. **Centralized SSRF Defense Engine**:
+   - Comprehensive outbound URL validator blocking IPv4/IPv6 private ranges (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254` cloud metadata, `::1`, link-local).
+   - DNS pre-resolution and hop-by-hop revalidation on HTTP redirects (max 5 hops).
+   - Stream byte limits (max 2MB) to prevent buffer exhaustion.
+
+5. **Encrypted Secrets Vault**:
+   - Provider API keys stored on server disk encrypted with AES-256-GCM using keys derived from the master secret.
+   - Client bodies cannot override server-configured keys.
+   - Raw secrets are never exposed in workspace state exports, logs, or UI responses.
+
+---
+
+## 📊 Feature Matrix & Status
+
+| Subsystem | Implementation Status | Verification Details |
 | :--- | :--- | :--- |
-| **Model Independence & Freedom** | Hard-coupled to CopilotKit Cloud and specific backend scaffolding | **100% Sovereign Multi-Provider**: Native Gemini, OpenAI GPT-4o, Anthropic Claude 3.5, Local Ollama, + Zero-Key Simulation mode |
-| **Living Spaces vs Flat Ephemeral Logs** | Trapped in chat sessions or flat server files | **Living Collaborative Spaces**: Notion/Linear-grade canvas with versioning (`v1`...`v4`), AST table parser, slash block commands (`/`), and multi-coworker editing |
-| **Governance & Safety Architecture** | Basic action confirmations; direct execution | **Human-in-the-Loop Review System**: Structured `ReviewRequest` cards with visual diffs, syntax-highlighted markdown, approval flows, rejection feedback loops, and auto-rollback |
-| **Sandbox & Container Security** | Unconstrained Docker container runner | **Hardened Sandbox Supervisor**: Multi-layer SSRF defense, loopback/private IP blocking, command blacklisting (`rm -rf /`, `mkfs`, fork bombs), and execution timeouts |
-| **Multi-Modal Collaboration** | Text chat + viewer only | **Real-Time Voice Sessions**: Apple Intelligence-style fluid audio waveforms, Picture-in-Picture mini-player, and hands-free voice co-working |
-| **Spotlight Command Navigation** | Standard search bar | **Raycast/Linear Command Center (`⌘K` / `Ctrl+K`)**: Instant unified search across all coworkers, spaces, sandboxes, and actions with full keyboard shortcuts |
-| **Craft Standard & Visual Polish** | Prototype developer UI with raw monospace and system emojis | **`premium-ui-design` System**: Progressive glassmorphism (20px–28px blur), GPU cursor spotlights, vector archetype tokens (zero OS emojis), and Apple fluid glows |
-
----
-
-## ✨ Core Features
-
-### 1. Persistent Specialist Coworkers
-- **Scout** *(Research & Web Intelligence)*: Navigates documentation, scrapes technical URLs, and synthesizes intelligence.
-- **Quill** *(Technical Writer)*: Transforms bullet points into clean, production-ready markdown pages in Spaces.
-- **Cipher** *(DevOps Engineer)*: Inspects codebases, runs terminal commands (`npm test`, `git status`), and edits `/workspace` files.
-- **Aura** *(Executive Strategist)*: Coordinates cross-space roadmaps and reviews project velocity.
-
-### 2. Agent Computers (Sandboxed Environments)
-- **Live Web Scraper (`/api/sandbox/browse`)**: Real-time server-side extraction of titles, metadata descriptions, semantic headings, and clean readable text.
-- **Safe Shell Executor (`/api/sandbox/exec`)**: Command runner protected against destructive host execution (`rm -rf /`, `mkfs`, fork bombs).
-- **Virtual Filesystem Explorer (`/workspace`)**: Direct file tree inspection, creation, inline code editing, syntax styling, and copy actions.
-- **Human Takeover Mode**: Instantly switch control between the autonomous agent and manual human operation.
-
-### 3. Living Spaces & Document Canvas
-- **Tri-Mode View Switcher**: Effortlessly toggle between **Editor**, **Preview** (rendered markdown), and **Raw MD**.
-- **Interactive Slash Command Palette**: Press `/` or click `/ Blocks` to insert headings, task checklists, code blocks, quote callouts, and tables.
-- **Export & Portability**: Direct `.md` file download, copy-to-clipboard, and revision tracking.
-
-### 4. Human-in-the-Loop Review Cards
-- Mutating actions (saving pages to Spaces or executing shell commands) require human authorization.
-- Review cards feature unified diff views, celebratory visual feedback upon approval, and decline feedback loops.
-
-### 5. Real-Time Voice Sessions
-- Live voice call overlay with Apple Intelligence fluid aura, real-time waveform visualizer, spoken subtitles, and a floating Picture-in-Picture (PiP) mini-player.
-
-### 6. Raycast-Grade Command Center (`⌘K`)
-- Instant keyboard spotlight navigation across Coworkers, Spaces, Sandbox Computers, and system actions.
-
----
-
-## 🔌 Model Context Protocol (MCP)
-
-Nook implements the **Model Context Protocol (MCP)** specification via a standard JSON-RPC 2.0 endpoint at `/api/mcp`:
-
-### 1. List Available Tools (`tools/list`)
-```bash
-curl -X POST http://localhost:3000/api/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
-```
-
-### 2. Execute an MCP Tool (`tools/call`)
-```bash
-curl -X POST http://localhost:3000/api/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "tools/call",
-    "params": {
-      "name": "calculate",
-      "arguments": { "expression": "2 * 3.14159 * 10" }
-    },
-    "id": 2
-  }'
-```
+| **Authentication & Sessions** | **Implemented & Verified** | HMAC-SHA256 tokens, HttpOnly cookies, CSRF protection, fails closed. |
+| **Server-Side Approvals** | **Implemented & Verified** | Atomic SQLite transitions, single-use tokens, exact command matching. |
+| **Filesystem & Path Traversal Guard** | **Implemented & Verified** | `path.resolve` containment checks, sanitized basenames, size limits. |
+| **SSRF Defense Engine** | **Implemented & Verified** | Blocks loopback, cloud metadata, private CIDRs, DNS rebinding. |
+| **Encrypted Secrets Vault** | **Implemented & Verified** | AES-256-GCM encryption with 0600 file permissions and masked UI display. |
+| **Model Provider Router** | **Implemented & Verified** | Gemini, OpenAI, Claude, local Ollama; fails loud with HTTP 502 on provider errors. |
+| **Model Context Protocol (MCP)** | **Implemented & Verified** | JSON-RPC 2.0 (`web_search`, `fetch_url`, `calculate`, `format_document`). |
+| **Living Spaces Persistence** | **Implemented & Verified** | SQLite WAL engine, version increments (`v1`...`vN`), immutable revisions, rollback. |
+| **Background Worker Queue** | **Implemented & Verified** | Queue claiming, step progress persistence, real task execution, cancellation. |
+| **Terminal Execution** | **Implemented & Verified** | Sandboxed shell runner with clean environment and process timeouts. |
+| **Browser / Web Scraper** | **Implemented & Verified** | SSRF-validated web content extraction and readable text generation. |
+| **Voice Calls** | **Simulation** | UI demonstration with reactive Web Audio API waveforms and captions. |
+| **Interactive Headless Browser** | **Planned (Roadmap)** | Remote interactive Playwright / WebRTC container streaming. |
 
 ---
 
 ## 🚀 Quickstart
 
 ### Prerequisites
-- **Node.js**: `v18.18+`, `v20+`, or `v24+` (Node 24 tested)
-- **npm**: `v9+` (or pnpm / yarn / bun)
+- **Node.js**: `v24.x LTS` (Node 24 is standardized across development, CI, and Docker)
+- **npm**: `v10.x` or higher
 
-### 1. Clone & Install
+### Local Installation
+
 ```bash
+# 1. Clone repository
 git clone https://github.com/BilalSabugar/Nook.git
-cd nook
-npm install
-```
+cd Nook
 
-### 2. Configure Environment (Optional)
-Nook works immediately out of the box in **Autonomous Demo Mode** with zero API keys. To connect real LLM providers:
+# 2. Clean install dependencies
+npm ci
 
-```bash
-cp .env.example .env.local
-```
+# 3. Run validation checks
+npm test               # Runs 21 unit & integration security tests
+npm run typecheck      # Verifies TypeScript types with zero errors
+npm run lint           # Runs ESLint checks
+npm run build          # Builds production bundle
 
-Populate your keys in `.env.local`:
-```env
-# Optional LLM API Keys
-GEMINI_API_KEY=your_gemini_api_key
-OPENAI_API_KEY=your_openai_api_key
-ANTHROPIC_API_KEY=your_anthropic_api_key
-
-# Optional Local Ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
-```
-
-### 3. Run Development Server
-```bash
+# 4. Start development server
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) (or `http://localhost:3001`) in your browser.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### 4. Run via Docker Compose (Production Ready)
-Nook includes a multi-stage production Docker container and compose configuration:
+### Docker Deployment
 
 ```bash
-# Build and start containerized production instance
+# Run with Docker Compose
 docker compose up -d --build
 
-# View container logs
-docker compose logs -f
-
-# Check health endpoint
-curl http://localhost:3000/api/health
+# View container status and healthcheck
+docker compose ps
 ```
+
+The container runs as non-root user `nextjs:nodejs` on port 3000 with persistent storage mounted to volume `nook_data`.
 
 ---
 
 ## 🧪 Testing & Verification
 
-Nook uses the built-in Node.js test runner with TypeScript type-stripping (`node --test`):
+Nook includes a test suite covering security, approvals, isolation, and persistence:
 
 ```bash
-# Run unit test suite
 npm test
-
-# Build production bundle
-npm run build
 ```
 
----
-
-## 📁 Repository Structure
-
-```text
-nook/
-├── src/
-│   ├── app/
-│   │   ├── api/
-│   │   │   ├── chat/route.ts           # Multi-provider LLM router
-│   │   │   ├── health/route.ts         # Runtime system health check
-│   │   │   ├── mcp/route.ts            # Model Context Protocol JSON-RPC 2.0
-│   │   │   ├── sandbox/browse/route.ts # Web scraper & reader endpoint
-│   │   │   └── sandbox/exec/route.ts   # Safe container command runner
-│   │   ├── layout.tsx                  # Root layout & monochrome design tokens
-│   │   ├── page.tsx                    # Primary state & view coordinator
-│   │   └── globals.css                 # Minimalist styles & ChatGPT dots animations
-│   ├── components/
-│   │   ├── chat/                       # AgentChat & VoiceCallModal
-│   │   ├── computer/                   # NookComputer (Browser, Terminal, Files)
-│   │   ├── navigation/                 # Sidebar & Quick Search
-│   │   ├── review/                     # ReviewCard (Human-in-the-Loop)
-│   │   ├── spaces/                     # SpaceWorkspace, MarkdownViewer & SlashPalette
-│   │   ├── tools/                      # McpManager
-│   │   └── ui/                         # Toast Notifications
-│   ├── lib/
-│   │   ├── mcp-registry.ts             # Shared MCP tool definitions
-│   │   ├── store.ts                    # Seed state (Agents, Spaces, Sandbox files)
-│   │   └── llm-service.ts              # Agent reasoning & multi-turn executor
-│   └── types/
-│       └── index.ts                    # TypeScript domain definitions
-├── .github/
-│   ├── workflows/ci.yml                # Automated CI pipeline
-│   ├── ISSUE_TEMPLATE/                 # Bug report & feature request templates
-│   └── pull_request_template.md        # Standard PR review template
-├── CHANGELOG.md                        # Version release notes
-├── CITATION.cff                        # Academic research citation
-├── CODE_OF_CONDUCT.md                  # Contributor Covenant Code of Conduct
-├── CONTRIBUTING.md                     # Contribution guidelines & dev workflow
-├── LICENSE                             # MIT License
-├── ROADMAP.md                          # Upcoming releases and architectural milestones
-├── package.json                        # Dependencies, metadata & scripts
-└── tsconfig.json                       # TypeScript compiler options
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are warmly welcomed! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before opening a Pull Request.
-
-1. Fork the repo and create your feature branch: `git checkout -b feat/my-new-feature`
-2. Commit your changes: `git commit -m 'feat: add support for custom sandbox runtimes'`
-3. Verify test suite passes: `npm test`
-4. Push to your branch: `git push origin feat/my-new-feature`
-5. Open a Pull Request!
+Key verified test suites:
+- `Auth: Anonymous and invalid token requests are strictly denied`
+- `Auth: Legitimate cryptographic session tokens succeed`
+- `Approvals: Shell execution without approval is rejected`
+- `Approvals: Full lifecycle, exact command matching, single-use, and replay protection`
+- `Approvals: Expired authorization tokens are rejected`
+- `SSRF: Outbound URL validator strictly blocks internal/private targets`
+- `Living Spaces: Document revision tracking and version rollback`
+- `Background Worker: Queue claiming, genuine step execution, and cancellation`
+- `Secrets: AES-256-GCM encryption, decryption, masking, and model whitelisting`
 
 ---
 
 ## 📄 License
 
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for more details.
-
----
-
-<div align="center">
-  <b>Built with care for open-source AI developer communities.</b><br/>
-  Star ⭐ this repo if you find Nook inspiring!
-</div>
+This project is licensed under the [MIT License](LICENSE).

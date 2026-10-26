@@ -520,6 +520,33 @@ export default function NookApp() {
     });
 
     try {
+      let activeApprovalId = approvalId;
+      let activeApprovalToken = approvalToken;
+
+      if (!activeApprovalId || !activeApprovalToken) {
+        try {
+          const apprRes = await fetch('/api/approvals', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'create_and_approve',
+              agentId,
+              agentName: 'Terminal Session',
+              type: 'run_command',
+              title: `Interactive Execute: ${command.slice(0, 40)}`,
+              payload: { command },
+            }),
+          });
+          if (apprRes.ok) {
+            const apprData = await apprRes.json();
+            activeApprovalId = apprData.approval?.id;
+            activeApprovalToken = apprData.approval?.singleUseToken;
+          }
+        } catch {
+          // handled below if exec denies
+        }
+      }
+
       const activeFiles = (computerStates[agentId] || currentComp).files;
       const res = await fetch('/api/sandbox/exec', {
         method: 'POST',
@@ -528,8 +555,8 @@ export default function NookApp() {
           command,
           agentId,
           virtualFiles: activeFiles,
-          approvalId,
-          approvalToken,
+          approvalId: activeApprovalId,
+          approvalToken: activeApprovalToken,
         }),
       });
       const data = await res.json();

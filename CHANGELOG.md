@@ -7,16 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-10-27
+
+### Security Remediation & Architecture Upgrades
+- **Authentication System**:
+  - Removed arbitrary-token acceptance and Host header bypasses.
+  - Implemented cryptographic HMAC-SHA256 session token generation and verification.
+  - Added single-user session bootstrap (`/api/auth/session`) issuing `HttpOnly`, `SameSite=Lax` cookies.
+  - Added strict CSRF validation on mutating requests using session cookies.
+  - Implemented in-memory sliding-window rate limiting (120 reqs/min) and 5MB payload limits.
+- **Server Approvals & Replay Protection**:
+  - Migrated approvals to transactional SQLite database (`.nook_storage/nook.db`).
+  - Enforced mandatory single-use authorization token and exact command/agent matching.
+  - Redacted reusable approval tokens in general GET listings (`/api/approvals`).
+  - Atomic status transitions (`pending` -> `approved` -> `consumed`).
+- **Filesystem & Execution Sandboxing**:
+  - Required valid server approvals for shell command execution (`/api/sandbox/exec`).
+  - Added path traversal prevention (`../` and absolute paths blocked) in file synchronization.
+  - Stripped host environment secrets and API keys from child process execution environments.
+  - Enforced 10-second timeout and 512KB output buffer limits.
+- **Centralized SSRF Defense Engine**:
+  - Implemented `safeFetch` and `validateOutboundUrl` in `@/lib/ssrf`.
+  - Blocked IPv4/IPv6 loopback, link-local, cloud metadata (`169.254.169.254`), and private networks.
+  - Integrated SSRF checks into browser fetch and MCP `fetch_url`.
+- **Encrypted Secrets Vault**:
+  - Implemented AES-256-GCM encryption for stored API keys (`.nook_storage/secrets.enc`).
+  - Added automatic migration from legacy plaintext `secrets.json`.
+  - Enforced model whitelisting and local loopback restrictions for Ollama endpoints.
+- **Durable Storage & Living Spaces**:
+  - Built transactional SQLite engine using Node 24 native `node:sqlite`.
+  - Added document versioning (`v1`...`vN`), immutable revision history, and rollback endpoints.
+- **Autonomous Background Worker**:
+  - Implemented worker engine with atomic job claiming, progress persistence, and cancellation support.
+- **Testing & Tooling**:
+  - Standardized on Node 24 across development, Dockerfile, and GitHub Actions CI.
+  - Regenerated lockfile for Node 24 (`npm ci` clean with 0 vulnerabilities).
+  - Added comprehensive security test suite (`src/__tests__/security-and-isolation.test.mjs`).
+
+---
+
 ## [1.0.0] - 2026-10-26
 
 ### Added
-- **Persistent AI Coworkers**: 4 specialized agents (`Scout`, `Quill`, `Cipher`, `Aura`) with customizable system prompts, assigned tools, and persistent status.
-- **Agent Computers**: Isolated sandboxes with live Web Scraper (`/api/sandbox/browse`), Bash command runner with safety sandbox policies (`/api/sandbox/exec`), and `/workspace` virtual filesystem editor.
-- **Living Spaces**: Collaborative document workspace with Editor, Preview, and Raw Markdown modes, word & character counters, and `.md` file export.
-- **Slash Command Palette**: Interactive palette (`/h1`, `/h2`, `/task`, `/code`, `/quote`, `/table`, `/ask`) accessible via `/ Blocks`.
-- **Model Context Protocol (MCP)**: JSON-RPC 2.0 compliant server route (`/api/mcp`) implementing `tools/list` and `tools/call` for `web_search`, `fetch_url`, `calculate`, and `format_document`.
-- **Human-in-the-Loop Review Cards**: Unified diff preview and quick decline reason chips for approving/declining document saves and shell executions.
-- **Voice Sessions**: Real-time simulated audio call with reactive waveforms, spoken captions, and a picture-in-picture mini-player.
-- **Multi-Provider Intelligence**: Built-in support for Google Gemini, OpenAI GPT-4o, Anthropic Claude 3.5, and local Ollama, alongside an autonomous zero-key simulation fallback.
-- **Monochrome Minimalist UI**: High-contrast, black-and-white aesthetic inspired by ChatGPT dots and CopilotKit OpenDots.
-- **Unit Test Suite**: Built-in Node test runner verifying agents, spaces, MCP schemas, sandbox security policies, and document utilities.
+- **Initial Prototype**: 4 specialist agents (`Scout`, `Quill`, `Cipher`, `Aura`).
+- **Living Spaces**: Document canvas with editor, preview, and markdown modes.
+- **MCP Protocol**: JSON-RPC 2.0 tool definitions.
+- **UI System**: High-contrast minimalist desktop design with command palette (`⌘K`).

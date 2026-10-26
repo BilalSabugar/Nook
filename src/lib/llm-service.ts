@@ -74,31 +74,31 @@ export async function executeAgentTurn({
     `Agent context: ${agent.name} (${agent.role}) • Tool budget: 3 calls max`,
   ];
 
-  // 1. Attempt server-side LLM call if non-simulation provider selected
+  // 1. Server-side LLM call if non-simulation provider selected
   if (settings.provider !== 'simulation') {
-    try {
-      const serverRes = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agent,
-          userMessage,
-          history,
-          settings,
-        }),
-      });
+    const serverRes = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent,
+        userMessage,
+        history,
+        settings,
+      }),
+    });
 
-      if (serverRes.ok) {
-        const data = await serverRes.json();
-        if (data.reply) {
-          return {
-            reply: data.reply,
-            thoughtProcess: data.thoughtProcess || [`Routed to ${settings.provider} model engine`, 'Generated model response with server credentials'],
-          };
-        }
-      }
-    } catch (err) {
-      console.warn('Server chat route error, falling back to autonomous agent engine', err);
+    const data = await serverRes.json().catch(() => ({}));
+
+    if (!serverRes.ok || data.error) {
+      // Security & Correctness: Never hide real provider failures behind simulated success
+      throw new Error(data.error || `Model provider [${settings.provider}] failed with HTTP ${serverRes.status}`);
+    }
+
+    if (data.reply) {
+      return {
+        reply: data.reply,
+        thoughtProcess: data.thoughtProcess || [`Routed to ${settings.provider} model engine`, 'Generated model response with server credentials'],
+      };
     }
   }
 

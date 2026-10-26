@@ -54,6 +54,7 @@ export const McpManager: React.FC<McpManagerProps> = ({
       enabled: true,
       requiresApproval: true,
       category: newCategory,
+      parameters: [],
     };
 
     onAddCustomTool(tool);

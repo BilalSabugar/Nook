@@ -1,7 +1,7 @@
 # Multi-stage production Dockerfile for Nook
 # Lightweight, secure non-root alpine container
 
-FROM node:20-alpine AS base
+FROM node:24-alpine AS base
 
 # Step 1: Dependencies cache layer
 FROM base AS deps
@@ -32,7 +32,9 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 RUN addgroup --system --gid 1001 nodejs && \
-    adduser --system --uid 1001 nextjs
+    adduser --system --uid 1001 nextjs && \
+    mkdir -p /app/.nook_storage /app/.nook_sandboxes && \
+    chown -R nextjs:nodejs /app/.nook_storage /app/.nook_sandboxes
 
 # Copy build artifacts and dependencies
 COPY --from=builder /app/public ./public

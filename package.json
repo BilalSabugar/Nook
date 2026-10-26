@@ -32,6 +32,7 @@
     "build": "node ./node_modules/next/dist/bin/next build",
     "start": "node ./node_modules/next/dist/bin/next start",
     "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test src/__tests__/*.test.mjs"
   },
   "engines": {
@@ -49,7 +50,7 @@
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/canvas-confetti": "^1.9.0",
-    "@types/node": "^20",
+    "@types/node": "^24.19.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",

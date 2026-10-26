@@ -4,83 +4,62 @@ import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { verifyAndConsumeApproval, recordApprovalExecutionResult, logAuditEvent } from '@/lib/db';
 
 const execPromise = util.promisify(exec);
 
 interface VirtualFileContext {
-  path: string;
-  name: string;
-  content: string;
+  path?: string;
+  name?: string;
+  content?: string;
   size?: string;
-  updatedAt?: string;
 }
 
 const DEFAULT_VIRTUAL_FILES: Record<string, string> = {
   'deploy.sh': `#!/bin/bash\necho "Building Nook container..."\nnpm run build\necho "Deploying to production supervisor..."`,
-  'notes.md': `# Agent Coworker Notes\n\n- Completed OpenDots architecture review\n- Hardened sandbox execution safeguards\n- Integrated Model Context Protocol (MCP)`,
-  'metrics.log': `[INFO] Supervisor uptime: 99.98%\n[INFO] Active persistent coworkers: 4\n[INFO] Memory usage: 142 MB / 512 MB`,
+  'notes.md': `# Agent Coworker Notes\n\n- Real model-driven agent tool execution\n- Isolated sandbox filesystem boundaries\n- Model Context Protocol (MCP) tool engine`,
+  'metrics.log': `[INFO] Supervisor uptime: 99.99%\n[INFO] Active persistent coworkers: 4\n[INFO] Isolated sandboxes: active`,
 };
 
 export async function POST(req: NextRequest) {
-  // 1. Authorization check
+  // 1. Authentication check
   const auth = validateApiRequest(req);
   if (!auth.authorized) {
     return unauthorizedResponse(auth.error);
   }
 
   try {
-    const { command, agentId, virtualFiles, approvalId, approvalToken } = await req.json();
+    const body = await req.json();
+    const { command, agentId, virtualFiles, approvalId, approvalToken } = body;
 
     if (!command || typeof command !== 'string') {
       return NextResponse.json({ error: 'Command string is required' }, { status: 400 });
     }
 
-    // 2. Server-side approval verification if command was submitted under approval requirement
-    if (approvalId) {
-      const approvalsPath = path.join(process.cwd(), '.nook_storage', 'approvals.json');
-      let approvals: Record<string, any> = {};
-      try {
-        const raw = await fs.readFile(approvalsPath, 'utf8');
-        approvals = JSON.parse(raw);
-      } catch {}
+    const cleanCmd = command.trim();
+    const safeAgentId = (agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
 
-      const record = approvals[approvalId];
-      if (!record) {
-        return NextResponse.json({
-          error: `Execution denied: Server approval record ${approvalId} not found.`,
-          exitCode: 1,
-        }, { status: 403 });
-      }
-
-      if (record.status !== 'approved') {
-        return NextResponse.json({
-          error: `Execution denied: Server approval is '${record.status}'. Action requires an 'approved' state.`,
-          exitCode: 1,
-        }, { status: 403 });
-      }
-
-      if (approvalToken && record.singleUseToken && record.singleUseToken !== approvalToken) {
-        return NextResponse.json({
-          error: 'Execution denied: Invalid single-use approval authorization token.',
-          exitCode: 1,
-        }, { status: 403 });
-      }
-
-      if (Date.now() > Date.parse(record.expiresAt)) {
-        record.status = 'declined';
-        await fs.writeFile(approvalsPath, JSON.stringify(approvals, null, 2), 'utf8');
-        return NextResponse.json({
-          error: 'Execution denied: Authorization approval has expired.',
-          exitCode: 1,
-        }, { status: 403 });
-      }
-
-      // Mark single-use token as consumed
-      record.status = 'consumed';
-      await fs.writeFile(approvalsPath, JSON.stringify(approvals, null, 2), 'utf8');
+    // 2. Mandatory Server-Side Approval and Single-Use Token Verification
+    // Every mutating or privileged shell execution strictly requires an active, matching, unexpired server approval.
+    if (!approvalId || !approvalToken) {
+      logAuditEvent('SHELL_EXEC_DENIED', `Attempted execution without approval token: "${cleanCmd}"`, 'denied', safeAgentId);
+      return NextResponse.json({
+        error: 'Execution denied: Mandatory server-side approval and single-use authorization token required for shell execution.',
+        exitCode: 1,
+      }, { status: 403 });
     }
 
-    // 2. Strict Safety policy: Disallow destructive host system manipulations
+    // Atomic consumption from transactional database
+    const verification = verifyAndConsumeApproval(approvalId, approvalToken, cleanCmd, safeAgentId);
+    if (!verification.authorized) {
+      logAuditEvent('SHELL_EXEC_DENIED', `Approval rejected (${verification.error}) for: "${cleanCmd}"`, 'denied', safeAgentId);
+      return NextResponse.json({
+        error: `Execution denied: ${verification.error}`,
+        exitCode: 1,
+      }, { status: 403 });
+    }
+
+    // 3. Defense-in-depth safety filters: Disallow destructive host system manipulation
     const forbiddenSubstrings = [
       'rm -rf /',
       'rm -rf /*',
@@ -97,45 +76,75 @@ export async function POST(req: NextRequest) {
       /\|\s*(ba)?sh/i,
       />\s*\/dev\/(sda|nvme)/i,
     ];
-    const isForbidden = 
-      forbiddenSubstrings.some((f) => command.includes(f)) ||
-      forbiddenPatterns.some((pattern) => pattern.test(command));
+    const isForbidden =
+      forbiddenSubstrings.some((f) => cleanCmd.includes(f)) ||
+      forbiddenPatterns.some((pattern) => pattern.test(cleanCmd));
 
     if (isForbidden) {
+      logAuditEvent('SHELL_EXEC_BLOCKED', `Safety filter blocked dangerous command: "${cleanCmd}"`, 'blocked', safeAgentId);
       return NextResponse.json({
-        output: `Error: Command rejected by Nook sandbox safety policy. Potentially destructive operation blocked.`,
+        output: 'Error: Command rejected by Nook sandbox safety policy. Destructive host manipulation blocked.',
         exitCode: 1,
         timestamp: new Date().toISOString(),
       }, { status: 403 });
     }
 
-    const cleanCmd = command.trim();
-
-    // 3. Setup real isolated sandbox directory on the server
-    const safeAgentId = (agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const sandboxDir = path.join(process.cwd(), '.nook_sandboxes', safeAgentId);
+    // 4. Setup isolated agent workspace directory
+    const sandboxDir = path.resolve(process.cwd(), '.nook_sandboxes', safeAgentId);
     await fs.mkdir(sandboxDir, { recursive: true });
 
-    // 4. Synchronize virtual files onto the sandbox disk
+    // 5. File safety and path traversal protection for virtual files
     const fileMap: Record<string, string> = { ...DEFAULT_VIRTUAL_FILES };
     if (Array.isArray(virtualFiles)) {
-      virtualFiles.forEach((f: VirtualFileContext) => {
-        if (f.name && typeof f.content === 'string') {
-          fileMap[f.name] = f.content;
-        }
-      });
-    }
+      for (const f of virtualFiles) {
+        const rawName = f.name || f.path;
+        if (rawName && typeof f.content === 'string') {
+          // Prevent path traversal: reject absolute paths, null bytes, and traversal patterns
+          if (rawName.includes('..') || path.isAbsolute(rawName) || rawName.includes('\0')) {
+            logAuditEvent('PATH_TRAVERSAL_BLOCKED', `Attempted file traversal: "${rawName}"`, 'blocked', safeAgentId);
+            return NextResponse.json({
+              error: `Security violation: Path traversal detected in filename '${rawName}'. Access denied.`,
+              exitCode: 1,
+            }, { status: 400 });
+          }
 
-    for (const [filename, content] of Object.entries(fileMap)) {
-      const filePath = path.join(sandboxDir, filename);
-      try {
-        await fs.writeFile(filePath, content, 'utf8');
-      } catch {
-        // ignore disk write race
+          // Use strict basename to guarantee placement inside sandbox directory
+          const sanitizedBasename = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
+          if (!sanitizedBasename) continue;
+
+          // Enforce 512KB size limit per virtual file
+          if (Buffer.byteLength(f.content, 'utf8') > 512 * 1024) {
+            return NextResponse.json({
+              error: `File payload exceeds maximum size limit (512 KB): '${sanitizedBasename}'`,
+              exitCode: 1,
+            }, { status: 400 });
+          }
+
+          fileMap[sanitizedBasename] = f.content;
+        }
       }
     }
 
-    // Initialize local git repository in sandbox if not present
+    // Write sanitized files to sandbox directory
+    for (const [filename, content] of Object.entries(fileMap)) {
+      const targetPath = path.resolve(sandboxDir, filename);
+      // Double check sandbox boundary
+      if (!targetPath.startsWith(sandboxDir + path.sep) && targetPath !== sandboxDir) {
+        logAuditEvent('PATH_TRAVERSAL_BLOCKED', `Target path escaped sandbox: "${targetPath}"`, 'blocked', safeAgentId);
+        return NextResponse.json({
+          error: `Security violation: Target file path '${filename}' resolves outside sandbox boundary.`,
+          exitCode: 1,
+        }, { status: 400 });
+      }
+
+      try {
+        await fs.writeFile(targetPath, content, 'utf8');
+      } catch {
+        // ignore disk race
+      }
+    }
+
+    // Initialize local isolated git repository if absent
     const gitDir = path.join(sandboxDir, '.git');
     try {
       await fs.access(gitDir);
@@ -150,26 +159,29 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 5. Real Shell Execution via OS child process
+    // 6. Isolated Shell Execution with Clean Low-Privilege Environment
+    // Critical: Do NOT leak host secrets or API keys into the execution environment.
+    const isWin = process.platform === 'win32';
+    const cleanEnv: Record<string, string | undefined> = {
+      PATH: process.env.PATH,
+      SYSTEMROOT: process.env.SYSTEMROOT,
+      TEMP: process.env.TEMP || (isWin ? 'C:\\Temp' : '/tmp'),
+      TMP: process.env.TMP || (isWin ? 'C:\\Temp' : '/tmp'),
+      HOME: sandboxDir,
+      USER: `nook-${safeAgentId}`,
+      NODE_ENV: 'sandbox',
+    };
+
     let stdout = '';
     let exitCode = 0;
 
-    // Cross-platform shell execution
-    const isWin = process.platform === 'win32';
-    const shellCommand = cleanCmd;
-
     try {
-      const execResult = await execPromise(shellCommand, {
+      const execResult = await execPromise(cleanCmd, {
         cwd: sandboxDir,
-        timeout: 6000,
-        maxBuffer: 1024 * 512,
+        timeout: 10000, // 10 second timeout limit
+        maxBuffer: 1024 * 512, // 512KB buffer limit
         shell: isWin ? 'powershell.exe' : '/bin/sh',
-        env: {
-          PATH: process.env.PATH,
-          USER: `nook-${safeAgentId}`,
-          HOME: sandboxDir,
-          NODE_ENV: 'development',
-        },
+        env: cleanEnv as NodeJS.ProcessEnv,
       });
 
       stdout = execResult.stdout || execResult.stderr || '[Command finished with no output]';
@@ -179,7 +191,17 @@ export async function POST(req: NextRequest) {
       exitCode = execErr.code || 1;
     }
 
-    // Check if any files were created/modified in sandbox
+    // 7. Record execution outcome on approval record and audit log
+    recordApprovalExecutionResult(approvalId, {
+      success: exitCode === 0,
+      executedAt: new Date().toISOString(),
+      output: stdout.slice(0, 2000),
+      exitCode,
+    });
+
+    logAuditEvent('SHELL_EXEC_COMPLETE', `Executed: "${cleanCmd}" (exit: ${exitCode})`, exitCode === 0 ? 'success' : 'failed', safeAgentId);
+
+    // List available files in sandbox
     let updatedFiles: string[] = [];
     try {
       const currentDirFiles = await fs.readdir(sandboxDir);
@@ -197,6 +219,6 @@ export async function POST(req: NextRequest) {
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message || 'Sandbox execution error' }, { status: 500 });
   }
 }

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { loadEncryptedSecrets, SUPPORTED_MODELS } from '@/lib/secrets';
+import { logAuditEvent } from '@/lib/db';
 
 export async function POST(req: NextRequest) {
   const auth = validateApiRequest(req);
@@ -15,25 +17,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'userMessage is required' }, { status: 400 });
     }
 
-    let serverSecrets: Record<string, string> = {};
-    try {
-      const fs = await import('fs/promises');
-      const path = await import('path');
-      const raw = await fs.readFile(path.join(process.cwd(), '.nook_storage', 'secrets.json'), 'utf8');
-      serverSecrets = JSON.parse(raw);
-    } catch {}
+    // Load server-side encrypted vault keys
+    const serverSecrets = await loadEncryptedSecrets();
 
-    // Server-side fallback API keys if provided via .env or server secrets
-    const geminiKey = process.env.GEMINI_API_KEY || serverSecrets.geminiApiKey || settings?.geminiApiKey;
-    const openaiKey = process.env.OPENAI_API_KEY || serverSecrets.openaiApiKey || settings?.openaiApiKey;
-    const anthropicKey = process.env.ANTHROPIC_API_KEY || serverSecrets.anthropicApiKey || settings?.anthropicApiKey;
-    const ollamaUrl = process.env.OLLAMA_BASE_URL || settings?.ollamaEndpoint || 'http://localhost:11434';
+    // Server-side authoritative keys: client bodies CANNOT override configured server credentials
+    const geminiKey = serverSecrets.geminiApiKey || process.env.GEMINI_API_KEY || settings?.geminiApiKey;
+    const openaiKey = serverSecrets.openaiApiKey || process.env.OPENAI_API_KEY || settings?.openaiApiKey;
+    const anthropicKey = serverSecrets.anthropicApiKey || process.env.ANTHROPIC_API_KEY || settings?.anthropicApiKey;
+    const ollamaUrl = serverSecrets.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || settings?.ollamaEndpoint || 'http://localhost:11434';
 
+    const provider = settings?.provider || 'simulation';
+
+    // ----------------------------------------------------
     // 1. Google Gemini Provider
-    if (geminiKey && (settings?.provider === 'gemini' || process.env.GEMINI_API_KEY)) {
+    // ----------------------------------------------------
+    if (provider === 'gemini') {
+      if (!geminiKey) {
+        return NextResponse.json({
+          error: 'Gemini API key is not configured on the server. Please configure it in Settings.',
+        }, { status: 400 });
+      }
+
+      const model = settings?.model || 'gemini-1.5-flash';
+      if (!SUPPORTED_MODELS.gemini.includes(model)) {
+        return NextResponse.json({
+          error: `Model '${model}' is not a recognized Gemini model. Supported: ${SUPPORTED_MODELS.gemini.join(', ')}`,
+        }, { status: 400 });
+      }
+
       try {
         const geminiRes = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`,
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`,
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -52,21 +66,47 @@ export async function POST(req: NextRequest) {
           }
         );
 
-        if (geminiRes.ok) {
-          const data = await geminiRes.json();
-          const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response from model.';
+        if (!geminiRes.ok) {
+          const errText = await geminiRes.text();
+          logAuditEvent('LLM_PROVIDER_FAIL', `Gemini HTTP ${geminiRes.status}: ${errText.slice(0, 200)}`, 'error', agent?.id);
           return NextResponse.json({
-            reply,
-            thoughtProcess: ['Dispatched to Gemini 1.5 Flash via server API route', 'Evaluated system instructions and returned output'],
-          });
+            error: `Gemini API error (HTTP ${geminiRes.status}): ${errText.slice(0, 300)}`,
+          }, { status: 502 });
         }
-      } catch (err) {
-        console.error('Server-side Gemini call error:', err);
+
+        const data = await geminiRes.json();
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response from model.';
+        return NextResponse.json({
+          reply,
+          provider: 'gemini',
+          model,
+          thoughtProcess: [`Dispatched to Gemini (${model}) via secure server API`, 'Evaluated system instructions and returned output'],
+        });
+      } catch (err: any) {
+        logAuditEvent('LLM_NETWORK_FAIL', `Gemini network error: ${err.message}`, 'error', agent?.id);
+        return NextResponse.json({
+          error: `Failed to connect to Google Gemini service: ${err.message}`,
+        }, { status: 502 });
       }
     }
 
+    // ----------------------------------------------------
     // 2. OpenAI Provider
-    if (openaiKey && (settings?.provider === 'openai' || process.env.OPENAI_API_KEY)) {
+    // ----------------------------------------------------
+    if (provider === 'openai') {
+      if (!openaiKey) {
+        return NextResponse.json({
+          error: 'OpenAI API key is not configured on the server. Please configure it in Settings.',
+        }, { status: 400 });
+      }
+
+      const model = settings?.model || 'gpt-4o-mini';
+      if (!SUPPORTED_MODELS.openai.includes(model)) {
+        return NextResponse.json({
+          error: `Model '${model}' is not a recognized OpenAI model. Supported: ${SUPPORTED_MODELS.openai.join(', ')}`,
+        }, { status: 400 });
+      }
+
       try {
         const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -75,7 +115,7 @@ export async function POST(req: NextRequest) {
             Authorization: `Bearer ${openaiKey}`,
           },
           body: JSON.stringify({
-            model: settings?.model || 'gpt-4o-mini',
+            model,
             messages: [
               { role: 'system', content: agent?.systemPrompt || 'You are an AI coworker' },
               ...(history || []).slice(-6).map((m: any) => ({
@@ -87,21 +127,47 @@ export async function POST(req: NextRequest) {
           }),
         });
 
-        if (openaiRes.ok) {
-          const data = await openaiRes.json();
-          const reply = data.choices?.[0]?.message?.content || 'No response from model.';
+        if (!openaiRes.ok) {
+          const errText = await openaiRes.text();
+          logAuditEvent('LLM_PROVIDER_FAIL', `OpenAI HTTP ${openaiRes.status}: ${errText.slice(0, 200)}`, 'error', agent?.id);
           return NextResponse.json({
-            reply,
-            thoughtProcess: ['Dispatched to OpenAI via server API route', 'Evaluated context and returned output'],
-          });
+            error: `OpenAI API error (HTTP ${openaiRes.status}): ${errText.slice(0, 300)}`,
+          }, { status: 502 });
         }
-      } catch (err) {
-        console.error('Server-side OpenAI call error:', err);
+
+        const data = await openaiRes.json();
+        const reply = data.choices?.[0]?.message?.content || 'No response from model.';
+        return NextResponse.json({
+          reply,
+          provider: 'openai',
+          model,
+          thoughtProcess: [`Dispatched to OpenAI (${model}) via secure server API`, 'Evaluated context and returned output'],
+        });
+      } catch (err: any) {
+        logAuditEvent('LLM_NETWORK_FAIL', `OpenAI network error: ${err.message}`, 'error', agent?.id);
+        return NextResponse.json({
+          error: `Failed to connect to OpenAI service: ${err.message}`,
+        }, { status: 502 });
       }
     }
 
+    // ----------------------------------------------------
     // 3. Anthropic Claude Provider
-    if (anthropicKey && (settings?.provider === 'anthropic' || process.env.ANTHROPIC_API_KEY)) {
+    // ----------------------------------------------------
+    if (provider === 'anthropic') {
+      if (!anthropicKey) {
+        return NextResponse.json({
+          error: 'Anthropic API key is not configured on the server. Please configure it in Settings.',
+        }, { status: 400 });
+      }
+
+      const model = settings?.model || 'claude-3-5-sonnet-20241022';
+      if (!SUPPORTED_MODELS.anthropic.includes(model)) {
+        return NextResponse.json({
+          error: `Model '${model}' is not a recognized Anthropic model. Supported: ${SUPPORTED_MODELS.anthropic.join(', ')}`,
+        }, { status: 400 });
+      }
+
       try {
         const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
@@ -111,7 +177,7 @@ export async function POST(req: NextRequest) {
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify({
-            model: settings?.model || 'claude-3-5-sonnet-20241022',
+            model,
             max_tokens: 2048,
             system: agent?.systemPrompt || 'You are an autonomous AI coworker.',
             messages: [
@@ -124,27 +190,41 @@ export async function POST(req: NextRequest) {
           }),
         });
 
-        if (anthropicRes.ok) {
-          const data = await anthropicRes.json();
-          const reply = data.content?.[0]?.text || 'No response from model.';
+        if (!anthropicRes.ok) {
+          const errText = await anthropicRes.text();
+          logAuditEvent('LLM_PROVIDER_FAIL', `Anthropic HTTP ${anthropicRes.status}: ${errText.slice(0, 200)}`, 'error', agent?.id);
           return NextResponse.json({
-            reply,
-            thoughtProcess: ['Dispatched to Anthropic Claude via server API route', 'Synthesized reply with safety guidelines'],
-          });
+            error: `Anthropic API error (HTTP ${anthropicRes.status}): ${errText.slice(0, 300)}`,
+          }, { status: 502 });
         }
-      } catch (err) {
-        console.error('Server-side Anthropic call error:', err);
+
+        const data = await anthropicRes.json();
+        const reply = data.content?.[0]?.text || 'No response from model.';
+        return NextResponse.json({
+          reply,
+          provider: 'anthropic',
+          model,
+          thoughtProcess: [`Dispatched to Anthropic (${model}) via secure server API`, 'Synthesized reply with safety guidelines'],
+        });
+      } catch (err: any) {
+        logAuditEvent('LLM_NETWORK_FAIL', `Anthropic network error: ${err.message}`, 'error', agent?.id);
+        return NextResponse.json({
+          error: `Failed to connect to Anthropic service: ${err.message}`,
+        }, { status: 502 });
       }
     }
 
+    // ----------------------------------------------------
     // 4. Local Ollama Provider
-    if (settings?.provider === 'ollama') {
+    // ----------------------------------------------------
+    if (provider === 'ollama') {
+      const model = settings?.model || 'llama3.2';
       try {
         const ollamaRes = await fetch(`${ollamaUrl}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: settings?.model || 'llama3.2',
+            model,
             stream: false,
             messages: [
               { role: 'system', content: agent?.systemPrompt || 'You are an AI coworker' },
@@ -157,23 +237,38 @@ export async function POST(req: NextRequest) {
           }),
         });
 
-        if (ollamaRes.ok) {
-          const data = await ollamaRes.json();
-          const reply = data.message?.content || 'No response from local Ollama.';
+        if (!ollamaRes.ok) {
+          const errText = await ollamaRes.text();
+          logAuditEvent('LLM_PROVIDER_FAIL', `Ollama HTTP ${ollamaRes.status}: ${errText.slice(0, 200)}`, 'error', agent?.id);
           return NextResponse.json({
-            reply,
-            thoughtProcess: ['Dispatched to Local Ollama endpoint', 'Generated local inference response'],
-          });
+            error: `Ollama inference error (HTTP ${ollamaRes.status}): ${errText.slice(0, 300)}`,
+          }, { status: 502 });
         }
-      } catch (err) {
-        console.error('Server-side Ollama call error:', err);
+
+        const data = await ollamaRes.json();
+        const reply = data.message?.content || 'No response from local Ollama.';
+        return NextResponse.json({
+          reply,
+          provider: 'ollama',
+          model,
+          thoughtProcess: [`Dispatched to local Ollama (${model})`, 'Generated local inference response'],
+        });
+      } catch (err: any) {
+        logAuditEvent('LLM_NETWORK_FAIL', `Ollama network error: ${err.message}`, 'error', agent?.id);
+        return NextResponse.json({
+          error: `Failed to connect to local Ollama daemon at ${ollamaUrl}: ${err.message}`,
+        }, { status: 502 });
       }
     }
 
-    // Default acknowledgment for autonomous client fallback
+    // ----------------------------------------------------
+    // 5. Simulation / Autonomous Engine (Explicitly Marked)
+    // ----------------------------------------------------
     return NextResponse.json({
       status: 'ok',
       engine: 'autonomous_client_engine',
+      isSimulation: true,
+      simulationNotice: 'Running in zero-key demonstration mode. Real model calls require configuring provider keys in Settings.',
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message || 'Server error' }, { status: 500 });

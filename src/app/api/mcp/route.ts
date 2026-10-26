@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { REGISTERED_MCP_TOOLS } from '@/lib/mcp-registry';
 import type { MCPToolDefinition } from '@/lib/mcp-registry';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { safeFetch } from '@/lib/ssrf';
+import { logAuditEvent } from '@/lib/db';
 
 export type { MCPToolDefinition };
 export { REGISTERED_MCP_TOOLS };
@@ -59,95 +61,146 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({
           jsonrpc: '2.0',
           id: id || 1,
-          error: { code: -32602, message: 'Tool name is required' },
+          error: { code: -32602, message: 'Tool name is required in params' },
         }, { status: 400 });
       }
 
-      // Execute tool: web_search (Queries live encyclopedic search API)
-      if (name === 'web_search') {
-        const query = args?.query || '';
-        let searchResultsText = '';
-
-        try {
-          // Query Wikipedia OpenSearch API for real live encyclopedic search results
-          const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=4&namespace=0&format=json`;
-          const res = await fetch(searchUrl, {
-            headers: { 'User-Agent': 'NookBot/1.0 (https://github.com/BilalSabugar/Nook)' },
-            signal: AbortSignal.timeout(5000),
-          });
-
-          if (res.ok) {
-            const data = await res.json();
-            const titles: string[] = data[1] || [];
-            const descriptions: string[] = data[2] || [];
-            const links: string[] = data[3] || [];
-
-            if (titles.length > 0) {
-              const formattedResults = titles.map((title, i) => {
-                const desc = descriptions[i] ? ` - ${descriptions[i]}` : '';
-                const link = links[i] ? `\n   Source: ${links[i]}` : '';
-                return `${i + 1}. **${title}**${desc}${link}`;
-              }).join('\n\n');
-              searchResultsText = `Search Results for "${query}":\n\n${formattedResults}`;
-            }
-          }
-        } catch {
-          // Fallback if offline
-        }
-
-        if (!searchResultsText) {
-          searchResultsText = `Search Results for "${query}":\n\n1. **${query} Technical Overview**\n   Synthesized architecture principles, domain models, and developer specifications.\n   Source: https://en.wikipedia.org/wiki/${encodeURIComponent(query)}\n2. **Related Technical Documentation**\n   Implementation patterns and protocol definitions.`;
-        }
-
+      // Check if tool is known
+      const toolDef = REGISTERED_MCP_TOOLS.find((t) => t.name === name);
+      if (!toolDef) {
+        logAuditEvent('MCP_UNKNOWN_TOOL', `Attempted call to unknown MCP tool: "${name}"`, 'error');
         return NextResponse.json({
           jsonrpc: '2.0',
           id: id || 1,
-          result: {
-            content: [{ type: 'text', text: searchResultsText }],
+          error: {
+            code: -32601,
+            message: `Unknown or unsupported MCP tool: "${name}". Valid tools are: ${REGISTERED_MCP_TOOLS.map((t) => t.name).join(', ')}`,
           },
-        });
+        }, { status: 404 });
       }
 
-      // Execute tool: fetch_url (Real URL fetch and readable text extractor)
-      if (name === 'fetch_url') {
-        const targetUrl = args?.url || '';
-        if (!targetUrl) {
+      // ----------------------------------------------------
+      // Tool: web_search
+      // Queries Wikipedia OpenSearch API. Never fabricates citations.
+      // ----------------------------------------------------
+      if (name === 'web_search') {
+        const query = (args?.query || '').trim();
+        if (!query) {
           return NextResponse.json({
             jsonrpc: '2.0',
             id: id || 1,
             result: {
-              content: [{ type: 'text', text: 'Error: URL parameter is required' }],
+              content: [{ type: 'text', text: 'Error: Search query cannot be empty.' }],
               isError: true,
             },
           });
         }
 
         try {
-          const res = await fetch(targetUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 NookBot/1.0 (https://github.com/BilalSabugar/Nook)',
-              'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
-            },
-            signal: AbortSignal.timeout(6000),
+          const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=5&namespace=0&format=json`;
+          const fetchResult = await safeFetch(searchUrl, {
+            headers: { 'User-Agent': 'NookBot/1.0 (https://github.com/BilalSabugar/Nook)' },
+            timeoutMs: 6000,
           });
 
-          if (!res.ok) {
+          if (!fetchResult.ok) {
             return NextResponse.json({
               jsonrpc: '2.0',
               id: id || 1,
               result: {
-                content: [{ type: 'text', text: `Failed to fetch URL: HTTP ${res.status} ${res.statusText}` }],
+                content: [{ type: 'text', text: `Search API returned HTTP ${fetchResult.status}: ${fetchResult.statusText}` }],
                 isError: true,
               },
             });
           }
 
-          const rawText = await res.text();
-          // Extract title
+          const data = JSON.parse(fetchResult.bodyText);
+          const titles: string[] = data[1] || [];
+          const descriptions: string[] = data[2] || [];
+          const links: string[] = data[3] || [];
+
+          if (titles.length === 0) {
+            return NextResponse.json({
+              jsonrpc: '2.0',
+              id: id || 1,
+              result: {
+                content: [{ type: 'text', text: `No search results found for "${query}".` }],
+              },
+            });
+          }
+
+          const formattedResults = titles.map((title, i) => {
+            const desc = descriptions[i] ? ` - ${descriptions[i]}` : '';
+            const link = links[i] ? `\n   Source: ${links[i]}` : '';
+            return `${i + 1}. **${title}**${desc}${link}`;
+          }).join('\n\n');
+
+          logAuditEvent('MCP_TOOL_EXEC', `web_search for "${query}" returned ${titles.length} results`, 'success');
+
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            id: id || 1,
+            result: {
+              content: [{ type: 'text', text: `Search Results for "${query}":\n\n${formattedResults}` }],
+            },
+          });
+        } catch (searchErr: any) {
+          // Authentic error reporting - no fabricated results
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            id: id || 1,
+            result: {
+              content: [{ type: 'text', text: `Live web search failed: ${searchErr.message || 'Network error'}` }],
+              isError: true,
+            },
+          });
+        }
+      }
+
+      // ----------------------------------------------------
+      // Tool: fetch_url
+      // Must use centralized SSRF defense engine (safeFetch)
+      // ----------------------------------------------------
+      if (name === 'fetch_url') {
+        const targetUrl = (args?.url || '').trim();
+        if (!targetUrl) {
+          return NextResponse.json({
+            jsonrpc: '2.0',
+            id: id || 1,
+            result: {
+              content: [{ type: 'text', text: 'Error: URL parameter is required.' }],
+              isError: true,
+            },
+          });
+        }
+
+        try {
+          // Centralized SSRF protection: blocks private IPs, metadata, loopback, port scanning
+          const fetchResult = await safeFetch(targetUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 NookBot/1.0 (https://github.com/BilalSabugar/Nook)',
+              'Accept': 'text/html,application/xhtml+xml,text/plain,*/*',
+            },
+            timeoutMs: 8000,
+            maxBytes: 1024 * 1024, // 1MB max
+          });
+
+          if (!fetchResult.ok) {
+            return NextResponse.json({
+              jsonrpc: '2.0',
+              id: id || 1,
+              result: {
+                content: [{ type: 'text', text: `Failed to fetch URL: HTTP ${fetchResult.status} ${fetchResult.statusText}` }],
+                isError: true,
+              },
+            });
+          }
+
+          const rawText = fetchResult.bodyText;
           const titleMatch = rawText.match(/<title[^>]*>([^<]+)<\/title>/i);
           const pageTitle = titleMatch ? titleMatch[1].trim() : targetUrl;
 
-          // Strip tags and clean whitespace
+          // Strip HTML tags and clean whitespace
           const cleanText = rawText
             .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ')
             .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ')
@@ -156,6 +209,8 @@ export async function POST(req: NextRequest) {
             .trim()
             .slice(0, 3000);
 
+          logAuditEvent('MCP_TOOL_EXEC', `fetch_url fetched: "${targetUrl}"`, 'success');
+
           return NextResponse.json({
             jsonrpc: '2.0',
             id: id || 1,
@@ -163,24 +218,27 @@ export async function POST(req: NextRequest) {
               content: [
                 {
                   type: 'text',
-                  text: `# ${pageTitle}\n\n**Source:** ${targetUrl}\n\n${cleanText}`,
+                  text: `# ${pageTitle}\n\n**Source:** ${fetchResult.finalUrl}\n\n${cleanText}`,
                 },
               ],
             },
           });
         } catch (fetchErr: any) {
+          logAuditEvent('MCP_TOOL_EXEC', `fetch_url blocked/failed for "${targetUrl}": ${fetchErr.message}`, 'error');
           return NextResponse.json({
             jsonrpc: '2.0',
             id: id || 1,
             result: {
-              content: [{ type: 'text', text: `Fetch error for ${targetUrl}: ${fetchErr.message}` }],
+              content: [{ type: 'text', text: `URL fetch error: ${fetchErr.message}` }],
               isError: true,
             },
           });
         }
       }
 
-      // Execute tool: calculate
+      // ----------------------------------------------------
+      // Tool: calculate
+      // ----------------------------------------------------
       if (name === 'calculate') {
         const expr = String(args?.expression || '');
         if (!/^[0-9+\-*/().\s^%]+$/.test(expr)) {
@@ -188,7 +246,7 @@ export async function POST(req: NextRequest) {
             jsonrpc: '2.0',
             id: id || 1,
             result: {
-              content: [{ type: 'text', text: 'Error: Invalid math expression' }],
+              content: [{ type: 'text', text: 'Error: Invalid mathematical expression.' }],
               isError: true,
             },
           });
@@ -207,14 +265,16 @@ export async function POST(req: NextRequest) {
             jsonrpc: '2.0',
             id: id || 1,
             result: {
-              content: [{ type: 'text', text: 'Error evaluating math expression' }],
+              content: [{ type: 'text', text: 'Error evaluating math expression.' }],
               isError: true,
             },
           });
         }
       }
 
-      // Execute tool: format_document
+      // ----------------------------------------------------
+      // Tool: format_document
+      // ----------------------------------------------------
       if (name === 'format_document') {
         const title = args?.title || 'Draft Document';
         const notes = args?.rawNotes || '';
@@ -230,21 +290,12 @@ export async function POST(req: NextRequest) {
           },
         });
       }
-
-      // Fallback for unknown tool
-      return NextResponse.json({
-        jsonrpc: '2.0',
-        id: id || 1,
-        result: {
-          content: [{ type: 'text', text: `Executed MCP tool "${name}" with args: ${JSON.stringify(args)}` }],
-        },
-      });
     }
 
     return NextResponse.json({
       jsonrpc: '2.0',
       id: id || 1,
-      error: { code: -32601, message: `Method "${method}" not found` },
+      error: { code: -32601, message: `Method "${method}" not found.` },
     }, { status: 404 });
   } catch (err: any) {
     return NextResponse.json({

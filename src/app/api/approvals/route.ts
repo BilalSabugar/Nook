@@ -1,60 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs/promises';
-import path from 'path';
-import crypto from 'crypto';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-
-const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
-const APPROVALS_FILE = path.join(STORAGE_DIR, 'approvals.json');
-
-export interface ServerApprovalRecord {
-  id: string;
-  agentId: string;
-  agentName: string;
-  type: 'run_command' | 'save_page' | 'mcp_action';
-  title: string;
-  description: string;
-  targetSpaceId?: string;
-  payload: {
-    command?: string;
-    pageTitle?: string;
-    pageContent?: string;
-    toolName?: string;
-    toolArgs?: Record<string, unknown>;
-  };
-  status: 'pending' | 'approved' | 'declined' | 'consumed' | 'rolled_back';
-  createdAt: string;
-  expiresAt: string;
-  singleUseToken: string;
-  decisionAt?: string;
-  decisionReason?: string;
-  executionResult?: {
-    success: boolean;
-    executedAt: string;
-    output?: string;
-    exitCode?: number;
-  };
-}
-
-async function loadApprovals(): Promise<Record<string, ServerApprovalRecord>> {
-  try {
-    const raw = await fs.readFile(APPROVALS_FILE, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-async function saveApprovals(records: Record<string, ServerApprovalRecord>): Promise<void> {
-  await fs.mkdir(STORAGE_DIR, { recursive: true });
-  const tempFile = `${APPROVALS_FILE}.${Date.now()}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(records, null, 2), 'utf8');
-  await fs.rename(tempFile, APPROVALS_FILE);
-}
+import {
+  createApproval,
+  listApprovals,
+  decideApproval,
+  verifyAndConsumeApproval,
+  getApprovalById,
+  logAuditEvent,
+} from '@/lib/db';
 
 /**
  * GET /api/approvals
  * Returns active and pending server approvals.
+ * Critical security requirement: Never reveals reusable single-use tokens in ordinary listing responses.
  */
 export async function GET(req: NextRequest) {
   const auth = validateApiRequest(req);
@@ -62,9 +20,11 @@ export async function GET(req: NextRequest) {
     return unauthorizedResponse(auth.error);
   }
 
-  const approvals = await loadApprovals();
+  // Redact single-use tokens in general listings
+  const approvals = listApprovals(false);
+
   return NextResponse.json({
-    approvals: Object.values(approvals),
+    approvals,
     timestamp: new Date().toISOString(),
   });
 }
@@ -74,7 +34,8 @@ export async function GET(req: NextRequest) {
  * Handles approval lifecycle:
  * - action="create": registers a new pending approval on the server with TTL and single-use token
  * - action="decide": user authorizes or declines an approval
- * - action="verify": execution service verifies and consumes single-use approval
+ * - action="verify_and_consume": execution service verifies and atomically consumes single-use approval
+ * - action="create_and_approve": interactive user session authoring
  */
 export async function POST(req: NextRequest) {
   const auth = validateApiRequest(req);
@@ -85,121 +46,93 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action } = body;
-    const approvals = await loadApprovals();
 
-    // 1. Create a new approval request on server
+    // 1. Create a new approval request on server (pending user decision)
     if (action === 'create' || !action) {
       const { agentId, agentName, type, title, description, targetSpaceId, payload, id: customId } = body;
 
-      const approvalId = customId || `appr-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-      const token = crypto.randomBytes(16).toString('hex');
-      const now = Date.now();
-      const expiresAt = new Date(now + 15 * 60 * 1000).toISOString(); // 15 minute TTL
-
-      const record: ServerApprovalRecord = {
-        id: approvalId,
-        agentId: agentId || 'unknown-agent',
-        agentName: agentName || 'Specialist',
+      const record = createApproval({
+        id: customId,
+        agentId: agentId || 'agent-system',
+        agentName: agentName || 'System',
         type: type || 'run_command',
         title: title || 'Action Authorization Request',
         description: description || '',
         targetSpaceId,
         payload: payload || {},
-        status: 'pending',
-        createdAt: new Date(now).toISOString(),
-        expiresAt,
-        singleUseToken: token,
-      };
-
-      approvals[approvalId] = record;
-      await saveApprovals(approvals);
+      });
 
       return NextResponse.json({
         success: true,
-        approval: record,
+        approval: {
+          ...record,
+          // Token is kept on server until decision or returned for pending confirmation
+        },
       }, { status: 201 });
     }
 
-    // 2. Decide: User approves or declines
+    // 2. Decide: User authorizes or declines
     if (action === 'decide') {
       const { approvalId, decision, reason } = body;
-      const record = approvals[approvalId];
 
-      if (!record) {
-        return NextResponse.json({ error: `Approval ${approvalId} not found` }, { status: 404 });
+      if (!approvalId || !decision) {
+        return NextResponse.json({ error: 'approvalId and decision are required' }, { status: 400 });
       }
 
-      if (record.status !== 'pending') {
-        return NextResponse.json({
-          error: `Approval ${approvalId} is already in '${record.status}' state and cannot be modified.`,
-        }, { status: 400 });
+      const outcome = decideApproval(approvalId, decision === 'approve' ? 'approve' : 'decline', reason);
+      if (!outcome.success) {
+        const status = outcome.error?.includes('expired') ? 410 : 400;
+        return NextResponse.json({ error: outcome.error }, { status });
       }
-
-      // Check expiration
-      if (Date.now() > Date.parse(record.expiresAt)) {
-        record.status = 'declined';
-        record.decisionReason = 'Expired authorization window';
-        await saveApprovals(approvals);
-        return NextResponse.json({ error: 'Approval request has expired' }, { status: 410 });
-      }
-
-      record.status = decision === 'approve' ? 'approved' : 'declined';
-      record.decisionAt = new Date().toISOString();
-      record.decisionReason = reason;
-
-      await saveApprovals(approvals);
 
       return NextResponse.json({
         success: true,
-        approval: record,
+        approval: outcome.approval,
       });
     }
 
-    // 3. Verify & Consume (called by server-side execution services)
+    // 3. User interactive direct session execution: creates and authorizes in one step
+    if (action === 'create_and_approve') {
+      const { agentId, agentName, type, title, description, targetSpaceId, payload } = body;
+      const record = createApproval({
+        agentId: agentId || 'user',
+        agentName: agentName || 'User Session',
+        type: type || 'run_command',
+        title: title || 'User Interactive Execution',
+        description: description || 'Executed directly by authenticated user',
+        targetSpaceId,
+        payload: payload || {},
+      });
+
+      const outcome = decideApproval(record.id, 'approve', 'Authorized directly in authenticated interactive terminal');
+      return NextResponse.json({
+        success: true,
+        approval: outcome.approval,
+      }, { status: 201 });
+    }
+
+    // 4. Verify & Atomically Consume (called by server-side execution services)
     if (action === 'verify_and_consume') {
-      const { approvalId, token, command, type } = body;
-      const record = approvals[approvalId];
+      const { approvalId, token, command, agentId } = body;
 
-      if (!record) {
-        return NextResponse.json({ error: 'Authorization error: No matching server approval record' }, { status: 403 });
-      }
-
-      if (record.status !== 'approved') {
+      if (!approvalId || !token) {
         return NextResponse.json({
-          error: `Authorization rejected: Approval is in '${record.status}' state (requires 'approved').`,
+          authorized: false,
+          error: 'Execution denied: Mandatory approvalId and single-use authorization token required.',
         }, { status: 403 });
       }
 
-      // Token verification
-      if (token && record.singleUseToken !== token) {
-        return NextResponse.json({ error: 'Invalid single-use authorization token' }, { status: 403 });
-      }
-
-      // Action type and command verification
-      if (type && record.type !== type) {
-        return NextResponse.json({ error: `Approval type mismatch: expected ${record.type}, received ${type}` }, { status: 403 });
-      }
-
-      if (command && record.payload.command && record.payload.command.trim() !== command.trim()) {
+      const outcome = verifyAndConsumeApproval(approvalId, token, command, agentId);
+      if (!outcome.authorized) {
         return NextResponse.json({
-          error: `Authorization mismatch: Approved command does not match requested command.`,
+          authorized: false,
+          error: outcome.error,
         }, { status: 403 });
       }
-
-      // Check TTL
-      if (Date.now() > Date.parse(record.expiresAt)) {
-        record.status = 'declined';
-        await saveApprovals(approvals);
-        return NextResponse.json({ error: 'Authorization rejected: Approval has expired' }, { status: 403 });
-      }
-
-      // Single-use enforcement: mark as consumed
-      record.status = 'consumed';
-      await saveApprovals(approvals);
 
       return NextResponse.json({
         authorized: true,
-        approval: record,
+        approval: outcome.approval,
       });
     }
 

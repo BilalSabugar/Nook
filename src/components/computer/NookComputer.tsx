@@ -28,6 +28,7 @@ import {
   Monitor
 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
+import { AgentArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
 
 interface NookComputerProps {
@@ -257,14 +258,14 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   return (
     <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d] text-neutral-200 overflow-hidden">
       {/* Computer Top Header */}
-      <div className="h-14 px-4 border-b border-white/[0.08] bg-[#0d0d0d] flex items-center justify-between shrink-0">
+      <div className="h-14 px-4 border-b border-white/[0.08] bg-[#0a0a0d] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">{currentAgent.avatar}</span>
+          <div className="flex items-center gap-2.5">
+            <AgentArchetypeIcon name={currentAgent.name} avatarKey={currentAgent.avatar} size="md" />
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-white text-sm">{currentAgent.name}&apos;s Computer</span>
-                <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-white/[0.06] text-neutral-300 border border-white/[0.08] flex items-center gap-1.5">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.06] text-neutral-300 border border-white/[0.08] flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
                   sandbox/{currentAgent.id}
                 </span>
@@ -273,18 +274,18 @@ export const NookComputer: React.FC<NookComputerProps> = ({
           </div>
 
           {/* Agent Switcher Quick Dropdown */}
-          <div className="flex items-center gap-1 bg-[#141414] p-1 rounded-lg border border-white/[0.08] ml-4">
+          <div className="flex items-center gap-1 bg-[#121216] p-1 rounded-xl border border-white/[0.08] ml-4">
             {agents.map((agent) => (
               <button
                 key={agent.id}
                 onClick={() => onSelectAgent(agent.id)}
-                className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1.5 ${
+                className={`px-2.5 py-1 rounded-lg text-xs transition-all flex items-center gap-2 ${
                   agent.id === currentAgent.id
                     ? 'bg-white/[0.12] text-white font-medium shadow-sm'
                     : 'text-neutral-400 hover:text-white hover:bg-white/[0.05]'
                 }`}
               >
-                <span>{agent.avatar}</span>
+                <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="xs" />
                 <span>{agent.name}</span>
               </button>
             ))}

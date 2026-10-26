@@ -19,8 +19,15 @@ export const SpaceModal: React.FC<SpaceModalProps> = ({
 }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [icon, setIcon] = useState('📁');
+  const [icon, setIcon] = useState('layers');
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>(availableAgents.map((a) => a.id));
+
+  const spaceIcons = [
+    { key: 'layers', label: 'Product' },
+    { key: 'search', label: 'Research' },
+    { key: 'cpu', label: 'DevOps' },
+    { key: 'folder', label: 'General' },
+  ];
 
   if (!isOpen) return null;
 
@@ -32,7 +39,7 @@ export const SpaceModal: React.FC<SpaceModalProps> = ({
       id: `space-${Date.now()}`,
       name: name.trim(),
       description: description.trim() || 'Collaborative project space for documents and agent knowledge.',
-      icon: icon.trim() || '📁',
+      icon: icon.trim() || 'layers',
       color: '#ffffff',
       pages: [],
       assignedAgentIds: selectedAgentIds,
@@ -50,8 +57,8 @@ export const SpaceModal: React.FC<SpaceModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-2xl bg-[#141414] border border-white/[0.1] p-6 shadow-2xl space-y-4 text-neutral-200 font-sans">
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+      <div className="w-full max-w-md rounded-2xl glass-card apple-fluid-glow p-6 shadow-2xl space-y-4 text-neutral-200 font-sans animate-scale-in">
         <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-white/[0.08] text-white border border-white/[0.1] flex items-center justify-center">
@@ -66,29 +73,36 @@ export const SpaceModal: React.FC<SpaceModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
-          <div className="grid grid-cols-4 gap-3">
-            <div className="col-span-1">
-              <label className="block text-neutral-300 mb-1 font-medium">Icon</label>
-              <input
-                type="text"
-                value={icon}
-                onChange={(e) => setIcon(e.target.value)}
-                placeholder="📁"
-                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-center text-lg outline-none focus:border-white/40"
-              />
+          <div>
+            <label className="block text-neutral-300 mb-1.5 font-medium">Space Category Icon</label>
+            <div className="flex items-center gap-2">
+              {spaceIcons.map((ic) => (
+                <button
+                  key={ic.key}
+                  type="button"
+                  onClick={() => setIcon(ic.key)}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-mono transition-all flex items-center gap-1.5 ${
+                    icon === ic.key
+                      ? 'bg-white text-black font-semibold border-white shadow-sm'
+                      : 'bg-white/[0.04] text-neutral-400 border-white/[0.08] hover:text-white hover:bg-white/[0.08]'
+                  }`}
+                >
+                  <span>{ic.label}</span>
+                </button>
+              ))}
             </div>
+          </div>
 
-            <div className="col-span-3">
-              <label className="block text-neutral-300 mb-1 font-medium">Space Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Architecture, Research Q4"
-                required
-                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none focus:border-white/40"
-              />
-            </div>
+          <div>
+            <label className="block text-neutral-300 mb-1 font-medium">Space Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Architecture, Research Q4"
+              required
+              className="w-full px-3 py-2 rounded-xl bg-[#09090c] border border-white/[0.1] text-white outline-none focus:border-white/40"
+            />
           </div>
 
           <div>

@@ -31,8 +31,7 @@ import {
 import { MarkdownViewer } from '@/components/spaces/MarkdownViewer';
 import { SlashCommandPalette } from '@/components/spaces/SlashCommandPalette';
 import { useToast } from '@/components/ui/Toast';
-
-
+import { AgentArchetypeIcon, SpaceArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
 interface SpaceWorkspaceProps {
   space: Space;
@@ -99,9 +98,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d] text-neutral-200 overflow-hidden">
+    <div className="flex-1 flex flex-col h-screen bg-[#09090b] text-neutral-200 overflow-hidden font-sans">
       {/* Top Header Bar */}
-      <div className="h-14 px-6 border-b border-white/[0.08] bg-[#0d0d0d] flex items-center justify-between shrink-0">
+      <div className="h-14 px-6 border-b border-white/[0.08] glass-panel flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           {activePage && (
             <button
@@ -113,31 +112,33 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
             </button>
           )}
 
-          <span className="text-xl">{space.icon}</span>
+          <div className="w-8 h-8 rounded-xl bg-white/[0.06] border border-white/[0.08] flex items-center justify-center shrink-0">
+            <SpaceArchetypeIcon iconKey={space.icon} name={space.name} className="w-4 h-4 text-white" />
+          </div>
           <div>
             <div className="flex items-center gap-2">
               <h2 className="font-semibold text-white text-sm tracking-tight">{space.name}</h2>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-white/[0.06] text-neutral-300 border border-white/[0.08]">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.06] text-neutral-300 border border-white/[0.08]">
                 {space.pages.length} Pages
               </span>
             </div>
-            <p className="text-[11px] text-neutral-500 mt-0.5 leading-none">{space.description}</p>
+            <p className="text-[11px] text-neutral-400 mt-0.5 leading-none">{space.description}</p>
           </div>
         </div>
 
         {/* Assigned Coworkers & Actions */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 bg-[#141414] px-2.5 py-1 rounded-lg border border-white/[0.08]">
-            <span className="text-[11px] text-neutral-400">Team:</span>
-            <div className="flex -space-x-1.5">
+          <div className="flex items-center gap-1.5 glass-card px-2.5 py-1 rounded-xl border border-white/[0.08]">
+            <span className="text-[11px] text-neutral-400 font-mono">Team:</span>
+            <div className="flex -space-x-1">
               {assignedAgents.map((agent) => (
-                <span
+                <div
                   key={agent.id}
                   title={`${agent.name} (${agent.role})`}
-                  className="w-5 h-5 rounded-full bg-[#1e1e1e] border border-white/[0.1] flex items-center justify-center text-xs cursor-pointer hover:scale-110 transition-transform"
+                  className="hover:scale-110 transition-transform"
                 >
-                  {agent.avatar}
-                </span>
+                  <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="xs" />
+                </div>
               ))}
             </div>
           </div>
@@ -402,7 +403,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                       className="w-full text-left p-2 rounded-lg bg-[#18181b] hover:bg-white/[0.08] border border-white/[0.06] flex items-center justify-between group transition-colors"
                     >
                       <div className="flex items-center gap-2">
-                        <span>{agent.avatar}</span>
+                        <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="xs" />
                         <div>
                           <p className="font-medium text-white text-xs">{agent.name}</p>
                           <p className="text-[10px] text-neutral-400">{agent.role}</p>
@@ -469,11 +470,13 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <div
                   key={page.id}
                   onClick={() => onSelectPage(page.id)}
-                  className="group p-5 rounded-2xl bg-[#141414] hover:bg-[#18181b] border border-white/[0.08] hover:border-white/20 shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between hover:-translate-y-0.5 animate-slide-up"
+                  className="group p-5 rounded-2xl glass-card glass-card-hover border border-white/[0.08] shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between animate-slide-up"
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-2xl">{page.icon || '📄'}</span>
+                      <div className="w-8 h-8 rounded-xl bg-white/[0.06] border border-white/[0.08] flex items-center justify-center shrink-0">
+                        <SpaceArchetypeIcon iconKey={page.icon} className="w-4 h-4 text-white" />
+                      </div>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-neutral-400 border border-white/[0.06]">
                         v{page.version}
                       </span>
@@ -484,13 +487,21 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                         {page.title}
                       </h3>
                       <p className="text-xs text-neutral-400 line-clamp-2 mt-1 leading-relaxed">
-                        {page.excerpt || page.content.slice(0, 100)}...
+                        {page.excerpt || (
+                          page.content
+                            .replace(/^#+\s+/gm, '')
+                            .replace(/[*_`~[\]]/g, '')
+                            .replace(/\|.*?\|/g, '')
+                            .replace(/\n+/g, ' ')
+                            .trim()
+                            .slice(0, 110) + '...'
+                        )}
                       </p>
                     </div>
                   </div>
 
-                  <div className="pt-4 mt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-neutral-400">
-                    <div className="flex items-center gap-1">
+                  <div className="pt-4 mt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-neutral-400 font-mono">
+                    <div className="flex items-center gap-1 font-sans">
                       {page.tags.slice(0, 2).map((t) => (
                         <span key={t} className="px-1.5 py-0.5 rounded bg-white/[0.04] text-neutral-300 text-[10px] border border-white/[0.04]">
                           #{t}
@@ -504,7 +515,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
             </div>
           ) : (
             /* List View */
-            <div className="rounded-xl border border-white/[0.08] bg-[#141414] overflow-hidden">
+            <div className="rounded-xl border border-white/[0.08] glass-card overflow-hidden">
               <table className="w-full text-left text-xs">
                 <thead className="bg-[#18181b] border-b border-white/[0.08] text-neutral-400 font-medium">
                   <tr>
@@ -522,14 +533,14 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                       className="hover:bg-white/[0.04] cursor-pointer transition-colors"
                     >
                       <td className="py-3 px-4 font-medium text-white flex items-center gap-2.5">
-                        <span className="text-base">{page.icon || '📄'}</span>
+                        <SpaceArchetypeIcon iconKey={page.icon} className="w-4 h-4 text-neutral-300" />
                         <span>{page.title}</span>
                       </td>
                       <td className="py-3 px-4 text-neutral-400">
                         {page.tags.join(', ')}
                       </td>
                       <td className="py-3 px-4 font-mono text-neutral-400">v{page.version}</td>
-                      <td className="py-3 px-4 text-neutral-400">
+                      <td className="py-3 px-4 text-neutral-400 font-mono">
                         {new Date(page.updatedAt).toLocaleDateString()}
                       </td>
                     </tr>

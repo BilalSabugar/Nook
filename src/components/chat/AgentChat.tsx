@@ -19,6 +19,8 @@ import {
   Command
 } from 'lucide-react';
 import { VoiceCallModal } from '@/components/chat/VoiceCallModal';
+import { RichMarkdown } from '@/components/ui/RichMarkdown';
+import { AgentArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
 interface AgentChatProps {
   agent: Agent;
@@ -81,25 +83,23 @@ export const AgentChat: React.FC<AgentChatProps> = ({
   ];
 
   return (
-    <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d] text-neutral-200 overflow-hidden relative">
-      {/* Header Bar — Minimalist monochrome */}
-      <div className="h-14 px-6 border-b border-white/[0.08] bg-[#0d0d0d] flex items-center justify-between shrink-0 z-10">
+    <div className="flex-1 flex flex-col h-screen bg-[#09090b] text-neutral-200 overflow-hidden relative">
+      {/* Header Bar — Minimalist glassmorphic header */}
+      <div className="h-14 px-6 border-b border-white/[0.08] glass-panel flex items-center justify-between shrink-0 z-10">
         <div className="flex items-center gap-3">
           <div className="relative">
-            <div className="w-8 h-8 rounded-lg bg-[#171717] border border-white/[0.08] flex items-center justify-center text-base">
-              {agent.avatar}
-            </div>
-            <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-[#0d0d0d]" />
+            <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="lg" />
+            <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-[#09090b]" />
           </div>
 
           <div>
             <div className="flex items-center gap-2">
               <h2 className="font-semibold text-white text-sm tracking-tight">{agent.name}</h2>
-              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-white/[0.06] text-neutral-400 border border-white/[0.08]">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.06] text-neutral-300 border border-white/[0.08]">
                 {agent.role}
               </span>
             </div>
-            <p className="text-[11px] text-neutral-500 leading-none mt-0.5">
+            <p className="text-[11px] text-neutral-400 leading-none mt-0.5">
               {agent.statusMessage || 'Always-on coworker'}
             </p>
           </div>
@@ -109,7 +109,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setIsCallModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-all"
           >
             <Phone className="w-3.5 h-3.5" />
             <span>Call</span>
@@ -118,7 +118,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
           {agent.computerEnabled && (
             <button
               onClick={onSwitchToComputer}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-colors"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-all"
             >
               <Monitor className="w-3.5 h-3.5" />
               <span>Computer</span>
@@ -144,19 +144,19 @@ export const AgentChat: React.FC<AgentChatProps> = ({
               className={`flex gap-3 max-w-3xl group animate-slide-up ${isUser ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}
             >
               {/* Avatar Icon */}
-              <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs transition-transform group-hover:scale-105 ${
-                isUser 
-                  ? 'bg-white text-black font-semibold' 
-                  : 'bg-[#171717] border border-white/[0.08] text-sm'
-              }`}>
-                {isUser ? 'U' : agent.avatar}
-              </div>
+              {isUser ? (
+                <div className="w-8 h-8 rounded-lg bg-white text-black font-semibold flex items-center justify-center shrink-0 text-xs shadow-md">
+                  U
+                </div>
+              ) : (
+                <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="lg" />
+              )}
 
               {/* Message Bubble & Content */}
               <div className={`space-y-2 max-w-[85%] ${isUser ? 'items-end' : 'items-start'}`}>
                 {/* Reasoning Thought Trace Accordion */}
                 {!isUser && msg.thoughtProcess && msg.thoughtProcess.length > 0 && (
-                  <div className="rounded-lg bg-[#141414] border border-white/[0.08] p-2.5 text-xs text-neutral-400">
+                  <div className="rounded-xl glass-card p-3 text-xs text-neutral-400">
                     <button
                       onClick={() => toggleThoughts(msg.id)}
                       className="flex items-center gap-1.5 font-mono text-[11px] text-neutral-300 hover:text-white w-full text-left transition-colors"
@@ -197,18 +197,18 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                   </div>
                 )}
 
-                {/* Text Bubble */}
-                <div className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap relative transition-all ${
+                {/* Text Bubble with Rich Markdown Formatting */}
+                <div className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed relative transition-all ${
                   isUser
-                    ? 'bg-[#27272a] text-white border border-white/[0.08] rounded-tr-sm shadow-sm hover:border-white/20'
-                    : 'bg-[#141414] border border-white/[0.08] text-neutral-200 rounded-tl-sm shadow-sm hover:border-white/20'
+                    ? 'bg-[#27272a] text-white border border-white/[0.1] rounded-tr-sm shadow-md'
+                    : 'glass-card text-neutral-200 rounded-tl-sm shadow-md'
                 }`}>
-                  {msg.content}
+                  <RichMarkdown content={msg.content} />
 
                   {/* Copy button on hover */}
                   <button
                     onClick={() => copyMessage(msg.id, msg.content)}
-                    className="absolute -bottom-2 -right-2 p-1 rounded-md bg-[#1f1f1f] border border-white/[0.1] text-neutral-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-sm"
+                    className="absolute -bottom-2 -right-2 p-1 rounded-md bg-[#1f1f24] border border-white/[0.12] text-neutral-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-md"
                     title="Copy message"
                   >
                     {copiedMessageId === msg.id ? (
@@ -229,7 +229,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                   />
                 )}
 
-                <div className="flex items-center gap-2 px-1 text-[10px] text-neutral-500">
+                <div className="flex items-center gap-2 px-1 text-[10px] text-neutral-500 font-mono">
                   <span>{msg.timestamp}</span>
                 </div>
               </div>
@@ -240,16 +240,14 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         {/* Signature ChatGPT & OpenDots Thinking Dots */}
         {isLoading && (
           <div className="flex gap-3 items-center text-xs text-neutral-400 mr-auto py-1 animate-fade-in">
-            <div className="w-7 h-7 rounded-lg bg-[#171717] border border-white/[0.08] flex items-center justify-center text-sm">
-              {agent.avatar}
-            </div>
-            <div className="flex items-center gap-2.5 bg-[#141414] border border-white/[0.08] px-3.5 py-2 rounded-xl">
+            <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="lg" />
+            <div className="flex items-center gap-2.5 glass-card px-4 py-2.5 rounded-xl border border-white/[0.1]">
               <div className="flex items-center gap-1.5 py-0.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-white chatgpt-dot-1" />
                 <span className="w-1.5 h-1.5 rounded-full bg-white chatgpt-dot-2" />
                 <span className="w-1.5 h-1.5 rounded-full bg-white chatgpt-dot-3" />
               </div>
-              <span className="text-neutral-400 text-xs font-mono">{agent.name} is thinking...</span>
+              <span className="text-neutral-300 text-xs font-mono font-medium">{agent.name} is thinking...</span>
             </div>
           </div>
         )}
@@ -258,9 +256,9 @@ export const AgentChat: React.FC<AgentChatProps> = ({
       </div>
 
       {/* Quick Prompts Bar */}
-      <div className="px-6 py-2 bg-[#0d0d0d] border-t border-white/[0.05] flex items-center gap-2 overflow-x-auto scrollbar-none">
-        <span className="text-[11px] text-neutral-500 font-medium uppercase tracking-wider shrink-0 flex items-center gap-1">
-          <Command className="w-3 h-3" /> Suggestions:
+      <div className="px-6 py-2.5 bg-[#09090b]/80 border-t border-white/[0.06] backdrop-blur-md flex items-center gap-2 overflow-x-auto scrollbar-none">
+        <span className="text-[11px] text-neutral-400 font-medium tracking-wide uppercase shrink-0 flex items-center gap-1 font-mono">
+          <Command className="w-3 h-3" /> Focus:
         </span>
         {quickPrompts.map((p, idx) => {
           const Icon = p.icon;
@@ -268,7 +266,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
             <button
               key={idx}
               onClick={() => onSendMessage(p.text)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#141414] hover:bg-white/[0.08] text-neutral-400 hover:text-white border border-white/[0.08] text-xs transition-colors shrink-0"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full glass-card hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs transition-all shrink-0 active:scale-95"
             >
               <Icon className="w-3 h-3 text-neutral-400" />
               <span>{p.label}</span>
@@ -277,11 +275,11 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         })}
       </div>
 
-      {/* Message Input Bar — Signature ChatGPT capsule */}
-      <div className="p-4 bg-[#0d0d0d] border-t border-white/[0.08]">
+      {/* Message Input Bar — Apple Intelligence-style glass capsule */}
+      <div className="p-4 bg-[#09090b] border-t border-white/[0.08]">
         <form onSubmit={handleSubmit} className="flex items-center gap-2 max-w-3xl mx-auto">
-          <div className="flex-1 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl bg-[#171717] border border-white/[0.1] focus-within:border-white/30 transition-colors">
-            <span className="text-neutral-500 text-xs flex items-center gap-1 font-mono">
+          <div className="flex-1 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl glass-input apple-active-capsule transition-all">
+            <span className="text-neutral-400 text-xs flex items-center gap-1 font-mono">
               <AtSign className="w-3.5 h-3.5" />
             </span>
             <input
@@ -290,15 +288,15 @@ export const AgentChat: React.FC<AgentChatProps> = ({
               onChange={(e) => setInputText(e.target.value)}
               placeholder={`Message ${agent.name} or type @Agent to collaborate...`}
               disabled={isLoading}
-              className="bg-transparent border-none outline-none text-white placeholder:text-neutral-500 w-full text-xs sm:text-sm"
+              className="bg-transparent border-none outline-none text-white placeholder:text-neutral-500 w-full text-xs sm:text-sm font-sans"
             />
             <button
               type="submit"
               disabled={!inputText.trim() || isLoading}
-              className="w-7 h-7 rounded-full bg-white hover:bg-neutral-200 disabled:opacity-20 disabled:bg-neutral-800 disabled:text-neutral-500 text-black font-semibold transition-all flex items-center justify-center shrink-0"
+              className="w-7 h-7 rounded-full bg-white hover:bg-neutral-200 disabled:opacity-20 disabled:bg-neutral-800 disabled:text-neutral-500 text-black font-semibold transition-all flex items-center justify-center shrink-0 shadow-md active:scale-90"
               title="Send message"
             >
-              <ArrowUp className="w-4 h-4" />
+              <ArrowUp className="w-4 h-4 stroke-[2.5]" />
             </button>
           </div>
         </form>

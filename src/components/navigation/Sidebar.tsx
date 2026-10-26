@@ -14,6 +14,7 @@ import {
   Layers,
   Circle
 } from 'lucide-react';
+import { AgentArchetypeIcon, SpaceArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
 interface SidebarProps {
   spaces: Space[];
@@ -54,12 +55,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   );
 
   return (
-    <aside className="w-64 bg-[#0d0d0d] border-r border-white/[0.08] flex flex-col h-screen select-none shrink-0 text-neutral-300">
+    <aside className="w-64 bg-[#0a0a0d] border-r border-white/[0.08] flex flex-col h-screen select-none shrink-0 text-neutral-300">
       {/* Brand Header — Minimalist OpenDots & ChatGPT aesthetic */}
       <div className="h-14 px-4 border-b border-white/[0.08] flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           {/* Signature OpenDots monochrome emblem */}
-          <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center font-bold text-sm tracking-tight shadow-sm">
+          <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center font-bold text-sm tracking-tight shadow-md">
             <span>●</span>
           </div>
           <div className="flex items-center gap-2">
@@ -81,7 +82,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Minimalist Search Bar */}
       <div className="px-3 pt-3">
-        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-[#141414] border border-white/[0.08] focus-within:border-white/20 text-xs text-neutral-400 transition-colors">
+        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl bg-[#121216] border border-white/[0.08] focus-within:border-white/20 text-xs text-neutral-400 transition-colors">
           <Search className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
           <input 
             type="text" 
@@ -108,7 +109,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* SPACES SECTION */}
         <div>
           <div className="flex items-center justify-between px-2 mb-1">
-            <span className="text-[11px] font-medium tracking-wide text-neutral-500 flex items-center gap-1.5 uppercase">
+            <span className="text-[11px] font-medium tracking-wide text-neutral-500 flex items-center gap-1.5 uppercase font-mono">
               <FolderKanban className="w-3.5 h-3.5 text-neutral-400" />
               Spaces
             </span>
@@ -128,19 +129,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   key={space.id}
                   onClick={() => onSelectSpace(space.id)}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between group transition-colors ${
+                  className={`w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center justify-between group transition-all ${
                     isSelected
-                      ? 'bg-white/[0.1] text-white font-medium border border-white/[0.12]'
+                      ? 'bg-white/[0.1] text-white font-medium border border-white/[0.12] shadow-sm'
                       : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-sm shrink-0 opacity-80 group-hover:opacity-100">{space.icon}</span>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <SpaceArchetypeIcon iconKey={space.icon} name={space.name} className={isSelected ? 'text-white' : 'text-neutral-400'} />
                     <span className="truncate">{space.name}</span>
                   </div>
-                  <span className={`text-[10px] font-mono shrink-0 px-1.5 py-0.2 rounded ${
+                  <span className={`text-[10px] font-mono shrink-0 px-1.5 py-0.2 rounded-full ${
                     isSelected 
-                      ? 'text-neutral-300 bg-white/[0.08]' 
+                      ? 'text-neutral-200 bg-white/[0.1]' 
                       : 'text-neutral-500 bg-white/[0.03]'
                   }`}>
                     {space.pages.length}
@@ -154,7 +155,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* COWORKERS SECTION */}
         <div>
           <div className="flex items-center justify-between px-2 mb-1">
-            <span className="text-[11px] font-medium tracking-wide text-neutral-500 flex items-center gap-1.5 uppercase">
+            <span className="text-[11px] font-medium tracking-wide text-neutral-500 flex items-center gap-1.5 uppercase font-mono">
               <Bot className="w-3.5 h-3.5 text-neutral-400" />
               Coworkers
             </span>
@@ -176,32 +177,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <button
                   key={agent.id}
                   onClick={() => onSelectAgent(agent.id)}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center justify-between group transition-colors ${
+                  className={`w-full text-left px-2.5 py-2 rounded-xl text-xs flex items-center justify-between group transition-all ${
                     isSelected
-                      ? 'bg-white/[0.1] text-white font-medium border border-white/[0.12]'
+                      ? 'bg-white/[0.1] text-white font-medium border border-white/[0.12] shadow-sm'
                       : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
                   }`}
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div className="relative shrink-0 flex items-center justify-center">
-                      <span className="text-sm opacity-85 group-hover:opacity-100">{agent.avatar}</span>
+                      <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="sm" />
                       {/* Signature OpenDots minimal presence indicator */}
-                      <span className={`absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ${
+                      <span className={`absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full border border-[#0a0a0d] ${
                         isThinking 
                           ? 'bg-white animate-pulse' 
                           : 'bg-emerald-500'
                       }`} />
                     </div>
                     <div className="min-w-0">
-                      <p className="truncate text-xs leading-none mb-0.5 text-neutral-200 group-hover:text-white">{agent.name}</p>
-                      <p className="truncate text-[10px] text-neutral-500 leading-none">{agent.role}</p>
+                      <p className="truncate text-xs font-medium leading-none mb-1 text-neutral-200 group-hover:text-white">{agent.name}</p>
+                      <p className="truncate text-[10px] text-neutral-400 leading-none">{agent.role}</p>
                     </div>
                   </div>
 
                   {agent.computerEnabled && (
                     <span 
                       title="Persistent Computer Sandbox"
-                      className="text-[9px] font-mono px-1 py-0.2 rounded bg-white/[0.04] text-neutral-400 border border-white/[0.06] shrink-0"
+                      className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-white/[0.05] text-neutral-400 border border-white/[0.08] shrink-0"
                     >
                       PC
                     </span>

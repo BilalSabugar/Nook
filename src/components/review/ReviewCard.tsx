@@ -15,6 +15,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
+import { RichMarkdown } from '@/components/ui/RichMarkdown';
 
 interface ReviewCardProps {
   review: ReviewRequest;
@@ -60,45 +61,45 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
   ];
 
   return (
-    <div className={`mt-3 mb-2 rounded-xl border transition-all duration-200 overflow-hidden shadow-sm ${
+    <div className={`mt-3 mb-2 rounded-2xl border transition-all duration-300 overflow-hidden shadow-xl ${
       review.status === 'approved'
-        ? 'bg-[#141414] border-white/20 text-neutral-200'
+        ? 'glass-card border-white/20 text-neutral-200'
         : review.status === 'declined'
-        ? 'bg-[#141414] border-white/10 text-neutral-400'
-        : 'bg-[#171717] border-white/[0.12] text-neutral-200 shadow-md'
+        ? 'glass-card border-white/10 text-neutral-400 opacity-60'
+        : 'glass-card apple-fluid-glow border-white/[0.14] text-neutral-200 shadow-2xl'
     }`}>
       {/* Header Bar */}
-      <div className="p-3.5 flex items-center justify-between border-b border-white/[0.08] bg-black/20">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-white/[0.08] text-neutral-300 flex items-center justify-center shrink-0 border border-white/[0.06]">
+      <div className="p-4 flex items-center justify-between border-b border-white/[0.08] bg-black/30 backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-xl bg-white/[0.08] text-white flex items-center justify-center shrink-0 border border-white/[0.1] shadow-inner">
             {review.type === 'save_page' ? (
-              <FileText className="w-4 h-4" />
+              <FileText className="w-4 h-4 text-white" />
             ) : (
-              <Terminal className="w-4 h-4" />
+              <Terminal className="w-4 h-4 text-white" />
             )}
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold tracking-wide text-white">
+              <span className="text-xs font-semibold tracking-tight text-white">
                 Human-in-the-Loop Review
               </span>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase tracking-wider font-medium ${
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase tracking-wider font-semibold ${
                 review.status === 'approved'
-                  ? 'bg-white/10 text-white border border-white/20'
+                  ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                   : review.status === 'declined'
                   ? 'bg-white/5 text-neutral-400 border border-white/10'
-                  : 'bg-white text-black font-semibold'
+                  : 'bg-white text-black shadow-sm font-bold'
               }`}>
                 {review.status === 'pending' ? 'Needs Approval' : review.status}
               </span>
             </div>
-            <p className="text-[11px] text-neutral-400 mt-0.5">{review.title}</p>
+            <p className="text-[11px] text-neutral-400 mt-0.5 font-mono">{review.title}</p>
           </div>
         </div>
 
         <button
           onClick={() => setIsExpanded(!isExpanded)}
-          className="text-neutral-400 hover:text-white p-1 rounded hover:bg-white/[0.05]"
+          className="text-neutral-400 hover:text-white p-1.5 rounded-lg hover:bg-white/[0.06] transition-colors"
         >
           {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
@@ -106,24 +107,24 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
 
       {/* Expandable Preview Body */}
       {isExpanded && (
-        <div className="p-3.5 space-y-3">
+        <div className="p-4 space-y-3.5">
           <p className="text-xs text-neutral-300 leading-relaxed">{review.description}</p>
 
           {/* Page Save Preview & Diff Toggle */}
           {review.type === 'save_page' && review.payload.pageContent && (
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[11px] font-medium text-neutral-300 flex items-center gap-1.5 font-mono">
                   <Sparkles className="w-3.5 h-3.5 text-neutral-400" />
                   Target: {review.payload.pageTitle}
                 </span>
 
-                <div className="flex items-center bg-black/40 p-0.5 rounded-md border border-white/[0.06] text-[10px]">
+                <div className="flex items-center bg-black/60 p-0.5 rounded-lg border border-white/[0.08] text-[10px]">
                   <button
                     onClick={() => setPreviewTab('content')}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2.5 py-1 rounded-md transition-colors ${
                       previewTab === 'content'
-                        ? 'bg-white text-black font-semibold'
+                        ? 'bg-white text-black font-semibold shadow-sm'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
@@ -131,9 +132,9 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
                   </button>
                   <button
                     onClick={() => setPreviewTab('diff')}
-                    className={`px-2 py-0.5 rounded ${
+                    className={`px-2.5 py-1 rounded-md transition-colors ${
                       previewTab === 'diff'
-                        ? 'bg-white text-black font-semibold'
+                        ? 'bg-white text-black font-semibold shadow-sm'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
@@ -142,15 +143,15 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
                 </div>
               </div>
 
-              <div className="rounded-lg bg-black/40 border border-white/[0.08] p-3 text-xs font-mono max-h-56 overflow-y-auto scrollbar-thin text-neutral-300">
+              <div className="rounded-xl bg-[#09090c]/90 border border-white/[0.08] p-4 text-xs max-h-72 overflow-y-auto scrollbar-thin text-neutral-200 shadow-inner">
                 {previewTab === 'content' ? (
-                  <pre className="whitespace-pre-wrap leading-relaxed">{review.payload.pageContent}</pre>
+                  <RichMarkdown content={review.payload.pageContent} />
                 ) : (
-                  <div className="space-y-0.5">
+                  <div className="space-y-1 font-mono text-xs">
                     {review.payload.pageContent.split('\n').map((line, lIdx) => (
-                      <div key={lIdx} className="bg-white/[0.04] text-neutral-200 pl-2 py-0.5 border-l-2 border-white/60">
-                        <span className="text-neutral-400 select-none mr-2">+</span>
-                        <span>{line}</span>
+                      <div key={lIdx} className="bg-emerald-500/[0.08] text-emerald-300 pl-3 py-0.5 border-l-2 border-emerald-500/60 flex items-start gap-2">
+                        <span className="text-emerald-500/60 select-none font-bold">+</span>
+                        <span className="flex-1 whitespace-pre-wrap">{line}</span>
                       </div>
                     ))}
                   </div>

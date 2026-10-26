@@ -56,17 +56,46 @@ export default function NookApp() {
   const [isSpaceModalOpen, setIsSpaceModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
 
-  // Load from LocalStorage if available
+  // Load from LocalStorage if available with automatic legacy emoji migration
   useEffect(() => {
     try {
       const storedSettings = localStorage.getItem('nook_settings');
       if (storedSettings) setLlmSettings(JSON.parse(storedSettings));
 
       const storedAgents = localStorage.getItem('nook_agents');
-      if (storedAgents) setAgents(JSON.parse(storedAgents));
+      if (storedAgents) {
+        const parsed: Agent[] = JSON.parse(storedAgents);
+        const migrated = parsed.map((a) => {
+          let av = a.avatar;
+          if (av === '🧭' || a.id === 'agent-scout') av = 'compass';
+          else if (av === '✍️' || a.id === 'agent-quill') av = 'pen-tool';
+          else if (av === '⚡' || a.id === 'agent-cipher') av = 'cpu';
+          else if (av === '👑' || a.id === 'agent-aura') av = 'sparkles';
+          return { ...a, avatar: av };
+        });
+        setAgents(migrated);
+      }
 
       const storedSpaces = localStorage.getItem('nook_spaces');
-      if (storedSpaces) setSpaces(JSON.parse(storedSpaces));
+      if (storedSpaces) {
+        const parsed: Space[] = JSON.parse(storedSpaces);
+        const migrated = parsed.map((s) => {
+          let ic = s.icon;
+          if (ic === '🚀' || s.id === 'space-launch') ic = 'layers';
+          else if (ic === '🔬' || s.id === 'space-research') ic = 'search';
+          else if (ic === '⚡' || s.id === 'space-engineering') ic = 'cpu';
+          const pages = (s.pages || []).map((p) => {
+            let pIc = p.icon;
+            if (pIc === '🏠') pIc = 'file-text';
+            else if (pIc === '🎨') pIc = 'palette';
+            else if (pIc === '📊') pIc = 'bar-chart';
+            else if (pIc === '🔌') pIc = 'plug';
+            return { ...p, icon: pIc };
+          });
+          return { ...s, icon: ic, pages };
+        });
+        setSpaces(migrated);
+      }
     } catch (e) {
       console.warn('LocalStorage retrieval bypassed', e);
     }

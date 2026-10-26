@@ -20,13 +20,21 @@ export const AgentModal: React.FC<AgentModalProps> = ({
   availableSpaces,
 }) => {
   const [name, setName] = useState('');
-  const [avatar, setAvatar] = useState('🤖');
+  const [avatar, setAvatar] = useState('compass');
   const [role, setRole] = useState<AgentRole>('Custom Specialist');
   const [description, setDescription] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [computerEnabled, setComputerEnabled] = useState(true);
   const [selectedTools, setSelectedTools] = useState<string[]>(['tool-web-search', 'tool-save-page']);
   const [selectedSpaces, setSelectedSpaces] = useState<string[]>(availableSpaces.map((s) => s.id));
+
+  const archetypeIcons = [
+    { key: 'compass', label: 'Research' },
+    { key: 'pen-tool', label: 'Writing' },
+    { key: 'cpu', label: 'DevOps' },
+    { key: 'sparkles', label: 'Strategy' },
+    { key: 'bot', label: 'Custom' },
+  ];
 
   if (!isOpen) return null;
 
@@ -37,7 +45,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
     const newAgent: Agent = {
       id: `agent-${Date.now()}`,
       name: name.trim(),
-      avatar: avatar.trim() || '🤖',
+      avatar: avatar.trim() || 'compass',
       role,
       description: description.trim() || `Specialized AI coworker in ${role}.`,
       systemPrompt: systemPrompt.trim() || `You are ${name}, a persistent specialist AI coworker at Nook. Your role is ${role}.`,
@@ -61,8 +69,8 @@ export const AgentModal: React.FC<AgentModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-xl rounded-2xl bg-[#141414] border border-white/[0.1] p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto scrollbar-thin text-neutral-200 font-sans">
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+      <div className="w-full max-w-xl rounded-2xl glass-card apple-fluid-glow p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto scrollbar-thin text-neutral-200 font-sans animate-scale-in">
         <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-white/[0.08] text-white border border-white/[0.1] flex items-center justify-center">
@@ -77,29 +85,36 @@ export const AgentModal: React.FC<AgentModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
-          <div className="grid grid-cols-4 gap-3">
-            <div className="col-span-1">
-              <label className="block text-neutral-300 mb-1 font-medium">Avatar Icon</label>
-              <input
-                type="text"
-                value={avatar}
-                onChange={(e) => setAvatar(e.target.value)}
-                placeholder="🧭"
-                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-center text-lg outline-none focus:border-white/40"
-              />
+          <div>
+            <label className="block text-neutral-300 mb-1.5 font-medium">Archetype Vector Emblem</label>
+            <div className="flex items-center gap-2">
+              {archetypeIcons.map((ic) => (
+                <button
+                  key={ic.key}
+                  type="button"
+                  onClick={() => setAvatar(ic.key)}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-mono transition-all flex items-center gap-1.5 ${
+                    avatar === ic.key
+                      ? 'bg-white text-black font-semibold border-white shadow-sm'
+                      : 'bg-white/[0.04] text-neutral-400 border-white/[0.08] hover:text-white hover:bg-white/[0.08]'
+                  }`}
+                >
+                  <span>{ic.label}</span>
+                </button>
+              ))}
             </div>
+          </div>
 
-            <div className="col-span-3">
-              <label className="block text-neutral-300 mb-1 font-medium">Coworker Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Helix, Sentinel, Nova"
-                required
-                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none focus:border-white/40"
-              />
-            </div>
+          <div>
+            <label className="block text-neutral-300 mb-1 font-medium">Coworker Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Helix, Sentinel, Nova"
+              required
+              className="w-full px-3 py-2 rounded-xl bg-[#09090c] border border-white/[0.1] text-white outline-none focus:border-white/40"
+            />
           </div>
 
           <div>

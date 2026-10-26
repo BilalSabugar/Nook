@@ -13,6 +13,7 @@ import {
   Sparkles,
   Waves
 } from 'lucide-react';
+import { AgentArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
 interface VoiceCallModalProps {
   isOpen: boolean;
@@ -64,9 +65,9 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   // Minimized Picture-in-Picture Mini-Player
   if (isMinimized) {
     return (
-      <div className="fixed bottom-6 right-6 z-50 bg-[#141414] border border-white/[0.1] p-3 rounded-2xl shadow-2xl flex items-center gap-3 text-neutral-200 animate-in fade-in slide-in-from-bottom-4">
+      <div className="fixed bottom-6 right-6 z-50 glass-card p-3 rounded-2xl shadow-2xl flex items-center gap-3 text-neutral-200 animate-slide-up">
         <div className="relative">
-          <span className="text-xl">{agent.avatar}</span>
+          <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="md" />
           <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-[#141414]" />
         </div>
 
@@ -115,7 +116,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   // Full Call Screen Overlay
   return (
     <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
-      <div className="w-full max-w-lg rounded-3xl bg-[#0d0d0d] border border-white/[0.12] p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden animate-scale-in">
+      <div className="w-full max-w-lg rounded-3xl glass-card apple-fluid-glow p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden animate-scale-in">
         {/* Top Header */}
         <div className="w-full flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -141,9 +142,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
             <div className={`absolute -inset-4 rounded-full bg-white/10 blur-xl transition-all duration-700 ${
               agentSpeaking ? 'scale-125 opacity-100' : 'scale-95 opacity-20'
             }`} />
-            <div className="w-24 h-24 rounded-full bg-[#171717] border border-white/[0.15] flex items-center justify-center text-4xl shadow-2xl relative z-10">
-              {agent.avatar}
-            </div>
+            <AgentArchetypeIcon name={agent.name} avatarKey={agent.avatar} size="xl" />
           </div>
 
           <div className="text-center space-y-1">

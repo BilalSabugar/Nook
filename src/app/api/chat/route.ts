@@ -15,10 +15,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'userMessage is required' }, { status: 400 });
     }
 
-    // Server-side fallback API keys if provided via .env
-    const geminiKey = process.env.GEMINI_API_KEY || settings?.geminiApiKey;
-    const openaiKey = process.env.OPENAI_API_KEY || settings?.openaiApiKey;
-    const anthropicKey = process.env.ANTHROPIC_API_KEY || settings?.anthropicApiKey;
+    let serverSecrets: Record<string, string> = {};
+    try {
+      const fs = await import('fs/promises');
+      const path = await import('path');
+      const raw = await fs.readFile(path.join(process.cwd(), '.nook_storage', 'secrets.json'), 'utf8');
+      serverSecrets = JSON.parse(raw);
+    } catch {}
+
+    // Server-side fallback API keys if provided via .env or server secrets
+    const geminiKey = process.env.GEMINI_API_KEY || serverSecrets.geminiApiKey || settings?.geminiApiKey;
+    const openaiKey = process.env.OPENAI_API_KEY || serverSecrets.openaiApiKey || settings?.openaiApiKey;
+    const anthropicKey = process.env.ANTHROPIC_API_KEY || serverSecrets.anthropicApiKey || settings?.anthropicApiKey;
     const ollamaUrl = process.env.OLLAMA_BASE_URL || settings?.ollamaEndpoint || 'http://localhost:11434';
 
     // 1. Google Gemini Provider

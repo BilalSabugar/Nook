@@ -29,10 +29,55 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { command, agentId, virtualFiles } = await req.json();
+    const { command, agentId, virtualFiles, approvalId, approvalToken } = await req.json();
 
     if (!command || typeof command !== 'string') {
       return NextResponse.json({ error: 'Command string is required' }, { status: 400 });
+    }
+
+    // 2. Server-side approval verification if command was submitted under approval requirement
+    if (approvalId) {
+      const approvalsPath = path.join(process.cwd(), '.nook_storage', 'approvals.json');
+      let approvals: Record<string, any> = {};
+      try {
+        const raw = await fs.readFile(approvalsPath, 'utf8');
+        approvals = JSON.parse(raw);
+      } catch {}
+
+      const record = approvals[approvalId];
+      if (!record) {
+        return NextResponse.json({
+          error: `Execution denied: Server approval record ${approvalId} not found.`,
+          exitCode: 1,
+        }, { status: 403 });
+      }
+
+      if (record.status !== 'approved') {
+        return NextResponse.json({
+          error: `Execution denied: Server approval is '${record.status}'. Action requires an 'approved' state.`,
+          exitCode: 1,
+        }, { status: 403 });
+      }
+
+      if (approvalToken && record.singleUseToken && record.singleUseToken !== approvalToken) {
+        return NextResponse.json({
+          error: 'Execution denied: Invalid single-use approval authorization token.',
+          exitCode: 1,
+        }, { status: 403 });
+      }
+
+      if (Date.now() > Date.parse(record.expiresAt)) {
+        record.status = 'declined';
+        await fs.writeFile(approvalsPath, JSON.stringify(approvals, null, 2), 'utf8');
+        return NextResponse.json({
+          error: 'Execution denied: Authorization approval has expired.',
+          exitCode: 1,
+        }, { status: 403 });
+      }
+
+      // Mark single-use token as consumed
+      record.status = 'consumed';
+      await fs.writeFile(approvalsPath, JSON.stringify(approvals, null, 2), 'utf8');
     }
 
     // 2. Strict Safety policy: Disallow destructive host system manipulations

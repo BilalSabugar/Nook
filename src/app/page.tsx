@@ -180,9 +180,16 @@ export default function NookApp() {
   };
 
   const persistSettings = (updated: LLMSettings) => {
+    // Sanitize: never store plaintext API keys in client localStorage
+    const sanitized = {
+      provider: updated.provider,
+      model: updated.model,
+      temperature: updated.temperature,
+      ollamaEndpoint: updated.ollamaEndpoint,
+    };
     setLlmSettings(updated);
     try {
-      localStorage.setItem('nook_settings', JSON.stringify(updated));
+      localStorage.setItem('nook_settings', JSON.stringify(sanitized));
     } catch {}
     syncServerPersistence({ settings: updated });
   };
@@ -291,7 +298,7 @@ export default function NookApp() {
   };
 
   // Handle Review Approvals (Human-in-the-Loop)
-  const handleApproveReview = (reviewId: string) => {
+  const handleApproveReview = async (reviewId: string) => {
     // 1. Locate the review in the messages
     const currentAgentMsgs = messages[activeAgentId] || [];
     let targetReview: ReviewRequest | undefined;
@@ -310,6 +317,26 @@ export default function NookApp() {
     setMessages((prev) => ({ ...prev, [activeAgentId]: updatedMsgs }));
 
     if (!targetReview) return;
+
+    // Server-side approval registration and decision
+    let approvalToken: string | undefined;
+    try {
+      const resp = await fetch('/api/approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'decide',
+          approvalId: reviewId,
+          decision: 'approve',
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        approvalToken = data.approval?.singleUseToken;
+      }
+    } catch {
+      // Local fallback handled gracefully
+    }
 
     // 2. Perform the approved action
     if (targetReview.type === 'save_page' && targetReview.targetSpaceId && targetReview.payload.pageTitle) {
@@ -367,13 +394,28 @@ export default function NookApp() {
         [activeAgentId]: [...finalApprovedMsgs, followUpMsg],
       }));
     } else if (targetReview.type === 'run_command' && targetReview.payload.command) {
-      // Execute command in Computer Sandbox
-      handleExecuteTerminalCommand(targetReview.agentId, targetReview.payload.command);
+      // Execute command in Computer Sandbox with verified server authorization token
+      handleExecuteTerminalCommand(targetReview.agentId, targetReview.payload.command, reviewId, approvalToken);
     }
   };
 
   // Handle Review Declines
-  const handleDeclineReview = (reviewId: string, feedback?: string) => {
+  const handleDeclineReview = async (reviewId: string, feedback?: string) => {
+    try {
+      await fetch('/api/approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'decide',
+          approvalId: reviewId,
+          decision: 'decline',
+          reason: feedback,
+        }),
+      });
+    } catch {
+      // Graceful offline fallback
+    }
+
     const currentAgentMsgs = messages[activeAgentId] || [];
     const updatedMsgs = currentAgentMsgs.map((m) => {
       if (m.reviewRequest && m.reviewRequest.id === reviewId) {
@@ -455,7 +497,12 @@ export default function NookApp() {
   };
 
   // Execute Command in Computer Sandbox
-  const handleExecuteTerminalCommand = async (agentId: string, command: string) => {
+  const handleExecuteTerminalCommand = async (
+    agentId: string,
+    command: string,
+    approvalId?: string,
+    approvalToken?: string
+  ) => {
     const currentComp = computerStates[agentId] || INITIAL_COMPUTER_STATES[agentId];
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -477,7 +524,13 @@ export default function NookApp() {
       const res = await fetch('/api/sandbox/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, agentId, virtualFiles: activeFiles }),
+        body: JSON.stringify({
+          command,
+          agentId,
+          virtualFiles: activeFiles,
+          approvalId,
+          approvalToken,
+        }),
       });
       const data = await res.json();
       const outputText = data.output || (data.error ? `Error: ${data.error}` : `Command executed. Exit code: ${data.exitCode ?? 0}`);
@@ -508,16 +561,13 @@ export default function NookApp() {
           },
         };
       });
-    } catch {
-      // Offline fallback
-      let fallbackOutput = `Executed "${command}". Exit code: 0`;
-      if (command.includes('ls')) {
-        fallbackOutput = currentComp.files.map((f) => `-rw-r--r-- 1 nook nook ${f.size} ${f.name}`).join('\n');
-      }
+    } catch (err: any) {
+      // Honest error reporting: never fabricate command execution success
+      const errorText = `Execution error: Failed to communicate with sandbox supervisor (${err?.message || 'Network error'}). Command was not executed.`;
       const outputEntry = {
-        id: `term-${Date.now()}-out`,
-        type: 'output' as const,
-        text: fallbackOutput,
+        id: `term-${Date.now()}-err`,
+        type: 'error' as const,
+        text: errorText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       };
       setComputerStates((prev) => {

@@ -32,6 +32,9 @@
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test src/__tests__/*.test.mjs"
   },
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "dependencies": {
     "canvas-confetti": "^1.9.4",
     "clsx": "^2.1.1",

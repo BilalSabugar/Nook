@@ -39,6 +39,7 @@ export interface ReviewRequest {
     toolArgs?: Record<string, unknown>;
   };
   status: 'pending' | 'approved' | 'declined';
+  createdPageId?: string;
   feedback?: string;
   createdAt: string;
 }

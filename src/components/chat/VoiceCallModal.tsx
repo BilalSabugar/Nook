@@ -114,8 +114,8 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
   // Full Call Screen Overlay
   return (
-    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="w-full max-w-lg rounded-3xl bg-[#0d0d0d] border border-white/[0.12] p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+      <div className="w-full max-w-lg rounded-3xl bg-[#0d0d0d] border border-white/[0.12] p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden animate-scale-in">
         {/* Top Header */}
         <div className="w-full flex items-center justify-between">
           <div className="flex items-center gap-2">

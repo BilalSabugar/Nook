@@ -241,6 +241,21 @@ export default function NookApp() {
 
       persistSpaces(updatedSpaces);
 
+      // Save createdPageId on the review request in messages
+      const finalApprovedMsgs = updatedMsgs.map((m) => {
+        if (m.reviewRequest && m.reviewRequest.id === reviewId) {
+          return {
+            ...m,
+            reviewRequest: {
+              ...m.reviewRequest,
+              status: 'approved' as const,
+              createdPageId: newPage.id,
+            },
+          };
+        }
+        return m;
+      });
+
       // Feedback message in chat
       const followUpMsg: Message = {
         id: `msg-follow-${Date.now()}`,
@@ -250,7 +265,7 @@ export default function NookApp() {
       };
       setMessages((prev) => ({
         ...prev,
-        [activeAgentId]: [...(prev[activeAgentId] || []), followUpMsg],
+        [activeAgentId]: [...finalApprovedMsgs, followUpMsg],
       }));
     } else if (targetReview.type === 'run_command' && targetReview.payload.command) {
       // Execute command in Computer Sandbox
@@ -294,40 +309,81 @@ export default function NookApp() {
   };
 
   // Execute Command in Computer Sandbox
-  const handleExecuteTerminalCommand = (agentId: string, command: string) => {
+  const handleExecuteTerminalCommand = async (agentId: string, command: string) => {
     const currentComp = computerStates[agentId] || INITIAL_COMPUTER_STATES[agentId];
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-    let simulatedOutput = `Executed "${command}". Exit code: 0`;
-    if (command.includes('ls')) {
-      simulatedOutput = currentComp.files.map((f) => `-rw-r--r-- 1 nook staff ${f.size} ${f.name}`).join('\n');
-    } else if (command.includes('npm test')) {
-      simulatedOutput = 'PASS src/__tests__/review-card.test.ts\nPASS src/__tests__/mcp-connector.test.ts\nAll tests passed successfully.';
-    } else if (command.includes('build')) {
-      simulatedOutput = 'Compiled Next.js client and server modules in 2.1s (0 errors)';
+    // Append input command immediately to terminal
+    const inputEntry = { id: `term-${Date.now()}-in`, type: 'input' as const, text: command, timestamp };
+    setComputerStates((prev) => {
+      const prevComp = prev[agentId] || currentComp;
+      return {
+        ...prev,
+        [agentId]: {
+          ...prevComp,
+          terminalLogs: [...prevComp.terminalLogs, inputEntry],
+        },
+      };
+    });
+
+    try {
+      const res = await fetch('/api/sandbox/exec', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, agentId }),
+      });
+      const data = await res.json();
+      const outputText = data.output || (data.error ? `Error: ${data.error}` : `Command executed. Exit code: ${data.exitCode ?? 0}`);
+      const isError = res.status !== 200 || data.exitCode !== 0;
+
+      const outputEntry = {
+        id: `term-${Date.now()}-out`,
+        type: (isError ? 'error' : 'output') as 'error' | 'output',
+        text: outputText,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+
+      const newActivity = {
+        id: `act-${Date.now()}`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+        action: 'Shell Execution',
+        details: `$ ${command} (exit: ${data.exitCode ?? (isError ? 1 : 0)})`,
+      };
+
+      setComputerStates((prev) => {
+        const prevComp = prev[agentId] || currentComp;
+        return {
+          ...prev,
+          [agentId]: {
+            ...prevComp,
+            terminalLogs: [...prevComp.terminalLogs, outputEntry],
+            activityLogs: [newActivity, ...prevComp.activityLogs],
+          },
+        };
+      });
+    } catch {
+      // Offline fallback
+      let fallbackOutput = `Executed "${command}". Exit code: 0`;
+      if (command.includes('ls')) {
+        fallbackOutput = currentComp.files.map((f) => `-rw-r--r-- 1 nook nook ${f.size} ${f.name}`).join('\n');
+      }
+      const outputEntry = {
+        id: `term-${Date.now()}-out`,
+        type: 'output' as const,
+        text: fallbackOutput,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      };
+      setComputerStates((prev) => {
+        const prevComp = prev[agentId] || currentComp;
+        return {
+          ...prev,
+          [agentId]: {
+            ...prevComp,
+            terminalLogs: [...prevComp.terminalLogs, outputEntry],
+          },
+        };
+      });
     }
-
-    const newLogs = [
-      ...currentComp.terminalLogs,
-      { id: `term-${Date.now()}-in`, type: 'input' as const, text: command, timestamp },
-      { id: `term-${Date.now()}-out`, type: 'output' as const, text: simulatedOutput, timestamp },
-    ];
-
-    const newActivity = {
-      id: `act-${Date.now()}`,
-      timestamp,
-      action: 'Shell Run',
-      details: `$ ${command}`,
-    };
-
-    setComputerStates((prev) => ({
-      ...prev,
-      [agentId]: {
-        ...currentComp,
-        terminalLogs: newLogs,
-        activityLogs: [newActivity, ...currentComp.activityLogs],
-      },
-    }));
   };
 
   // Update Computer State
@@ -433,7 +489,7 @@ export default function NookApp() {
       />
 
       {/* Main Viewport Container */}
-      <main className="flex-1 flex overflow-hidden">
+      <main key={activeView} className="flex-1 flex overflow-hidden view-enter">
         {/* VIEW 1: AGENT CONVERSATION */}
         {activeView === 'agent' && (
           <AgentChat

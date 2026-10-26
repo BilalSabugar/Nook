@@ -141,10 +141,10 @@ export const AgentChat: React.FC<AgentChatProps> = ({
           return (
             <div
               key={msg.id}
-              className={`flex gap-3 max-w-3xl group ${isUser ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}
+              className={`flex gap-3 max-w-3xl group animate-slide-up ${isUser ? 'ml-auto flex-row-reverse' : 'mr-auto'}`}
             >
               {/* Avatar Icon */}
-              <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs ${
+              <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 text-xs transition-transform group-hover:scale-105 ${
                 isUser 
                   ? 'bg-white text-black font-semibold' 
                   : 'bg-[#171717] border border-white/[0.08] text-sm'
@@ -159,7 +159,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                   <div className="rounded-lg bg-[#141414] border border-white/[0.08] p-2.5 text-xs text-neutral-400">
                     <button
                       onClick={() => toggleThoughts(msg.id)}
-                      className="flex items-center gap-1.5 font-mono text-[11px] text-neutral-300 hover:text-white w-full text-left"
+                      className="flex items-center gap-1.5 font-mono text-[11px] text-neutral-300 hover:text-white w-full text-left transition-colors"
                     >
                       {expandedThoughts[msg.id] ? (
                         <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
@@ -170,7 +170,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                     </button>
 
                     {expandedThoughts[msg.id] && (
-                      <ul className="mt-2 space-y-1 pl-3 border-l border-white/[0.1] text-[11px] text-neutral-400 font-mono">
+                      <ul className="mt-2 space-y-1 pl-3 border-l border-white/[0.1] text-[11px] text-neutral-400 font-mono animate-fade-in">
                         {msg.thoughtProcess.map((step, idx) => (
                           <li key={idx} className="flex items-start gap-1.5">
                             <span className="text-neutral-500 font-bold">{idx + 1}.</span>
@@ -184,7 +184,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
 
                 {/* Tool Invocations Card */}
                 {!isUser && msg.toolCall && (
-                  <div className="rounded-lg bg-[#141414] border border-white/[0.08] p-2.5 text-xs flex items-center gap-2.5 text-neutral-300">
+                  <div className="rounded-lg bg-[#141414] border border-white/[0.08] p-2.5 text-xs flex items-center gap-2.5 text-neutral-300 animate-fade-in">
                     <div className="w-6 h-6 rounded bg-white/[0.06] flex items-center justify-center shrink-0">
                       <Terminal className="w-3.5 h-3.5 text-neutral-400" />
                     </div>
@@ -198,10 +198,10 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                 )}
 
                 {/* Text Bubble */}
-                <div className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap relative ${
+                <div className={`p-4 rounded-2xl text-xs sm:text-sm leading-relaxed whitespace-pre-wrap relative transition-all ${
                   isUser
-                    ? 'bg-[#27272a] text-white border border-white/[0.08] rounded-tr-sm shadow-sm'
-                    : 'bg-[#141414] border border-white/[0.08] text-neutral-200 rounded-tl-sm shadow-sm'
+                    ? 'bg-[#27272a] text-white border border-white/[0.08] rounded-tr-sm shadow-sm hover:border-white/20'
+                    : 'bg-[#141414] border border-white/[0.08] text-neutral-200 rounded-tl-sm shadow-sm hover:border-white/20'
                 }`}>
                   {msg.content}
 
@@ -239,7 +239,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
 
         {/* Signature ChatGPT & OpenDots Thinking Dots */}
         {isLoading && (
-          <div className="flex gap-3 items-center text-xs text-neutral-400 mr-auto py-1">
+          <div className="flex gap-3 items-center text-xs text-neutral-400 mr-auto py-1 animate-fade-in">
             <div className="w-7 h-7 rounded-lg bg-[#171717] border border-white/[0.08] flex items-center justify-center text-sm">
               {agent.avatar}
             </div>

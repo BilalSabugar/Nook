@@ -155,7 +155,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
       {/* Main Workspace Canvas */}
       {activePage ? (
         /* ================= PAGE VISUAL EDITOR ================= */
-        <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex overflow-hidden animate-fade-in">
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Document Toolbar */}
             <div className="px-6 py-2 bg-[#0d0d0d] border-b border-white/[0.08] flex items-center justify-between text-xs">
@@ -164,9 +164,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <button
                   onClick={() => setIsSlashPaletteOpen(!isSlashPaletteOpen)}
                   title="Slash Commands Menu (/)"
-                  className={`px-2 py-1 rounded flex items-center gap-1 font-mono text-xs border transition-colors ${
+                  className={`px-2 py-1 rounded flex items-center gap-1 font-mono text-xs border transition-all active:scale-95 ${
                     isSlashPaletteOpen
-                      ? 'bg-white text-black border-white shadow-sm'
+                      ? 'bg-white text-black border-white shadow-sm font-semibold'
                       : 'bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 border-white/[0.08]'
                   }`}
                 >
@@ -186,28 +186,28 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <button
                   onClick={() => insertMarkdownSnippet('## Heading 2')}
                   title="Insert Heading"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white transition-colors"
                 >
                   <Heading2 className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('- [ ] Todo item')}
                   title="Insert Task Checkbox"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white transition-colors"
                 >
                   <CheckSquare className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('```typescript\n// your code here\n```')}
                   title="Insert Code Block"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white transition-colors"
                 >
                   <Code className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('> Callout note')}
                   title="Insert Quote"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white transition-colors"
                 >
                   <ListOrdered className="w-4 h-4" />
                 </button>
@@ -232,9 +232,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <div className="flex items-center bg-black/40 p-0.5 rounded-lg border border-white/[0.08]">
                   <button
                     onClick={() => setEditorMode('visual')}
-                    className={`px-2 py-0.5 rounded text-[11px] ${
+                    className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
                       editorMode === 'visual'
-                        ? 'bg-white text-black font-semibold'
+                        ? 'bg-white text-black font-semibold shadow-sm'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
@@ -242,9 +242,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                   </button>
                   <button
                     onClick={() => setEditorMode('preview')}
-                    className={`px-2 py-0.5 rounded text-[11px] flex items-center gap-1 ${
+                    className={`px-2 py-0.5 rounded text-[11px] flex items-center gap-1 transition-colors ${
                       editorMode === 'preview'
-                        ? 'bg-white/[0.12] text-white font-medium'
+                        ? 'bg-white text-black font-semibold shadow-sm'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
@@ -253,9 +253,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                   </button>
                   <button
                     onClick={() => setEditorMode('markdown')}
-                    className={`px-2 py-0.5 rounded text-[11px] ${
+                    className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
                       editorMode === 'markdown'
-                        ? 'bg-white/[0.12] text-white font-medium'
+                        ? 'bg-white text-black font-semibold shadow-sm'
                         : 'text-neutral-400 hover:text-white'
                     }`}
                   >
@@ -323,7 +323,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
             </div>
 
             {/* Document Content Canvas */}
-            <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto w-full space-y-4">
+            <div className="flex-1 p-8 overflow-y-auto max-w-4xl mx-auto w-full space-y-4 animate-fade-in">
               {/* Document Title Input */}
               <input
                 type="text"
@@ -349,21 +349,21 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
               {/* Visual, Preview, or Raw Markdown Mode */}
               {editorMode === 'preview' ? (
-                <div className="p-6 rounded-2xl bg-[#0a0a0a] border border-white/[0.08] min-h-[500px] shadow-sm">
+                <div className="p-6 rounded-2xl bg-[#0a0a0a] border border-white/[0.08] min-h-[500px] shadow-sm animate-fade-in">
                   <MarkdownViewer content={activePage.content} />
                 </div>
               ) : editorMode === 'visual' ? (
                 <textarea
                   value={activePage.content}
                   onChange={(e) => handleContentChange(e.target.value)}
-                  className="w-full min-h-[500px] bg-transparent border-none outline-none resize-none font-sans text-sm sm:text-base leading-relaxed text-neutral-200 placeholder:text-neutral-600"
+                  className="w-full min-h-[500px] bg-transparent border-none outline-none resize-none font-sans text-sm sm:text-base leading-relaxed text-neutral-200 placeholder:text-neutral-600 animate-fade-in"
                   placeholder="Type notes or markdown here... Tip: Click [/ Blocks] above to insert headings, checklists, and code."
                 />
               ) : (
                 <textarea
                   value={activePage.content}
                   onChange={(e) => handleContentChange(e.target.value)}
-                  className="w-full min-h-[500px] bg-[#0a0a0a] p-4 rounded-xl border border-white/[0.08] font-mono text-xs sm:text-sm text-neutral-200 resize-none outline-none"
+                  className="w-full min-h-[500px] bg-[#0a0a0a] p-4 rounded-xl border border-white/[0.08] font-mono text-xs sm:text-sm text-neutral-200 resize-none outline-none animate-fade-in"
                 />
               )}
             </div>
@@ -371,7 +371,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
           {/* Collaborative Page Chat Drawer */}
           {showPageChatDrawer && (
-            <div className="w-80 border-l border-white/[0.08] bg-[#121212] flex flex-col h-full shrink-0">
+            <div className="w-80 border-l border-white/[0.08] bg-[#121212] flex flex-col h-full shrink-0 animate-fade-in">
               <div className="p-3.5 border-b border-white/[0.08] flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Bot className="w-4 h-4 text-white" />
@@ -428,7 +428,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
         </div>
       ) : (
         /* ================= SPACE DOCUMENT LIBRARY ================= */
-        <div className="flex-1 p-8 overflow-y-auto max-w-6xl mx-auto w-full space-y-6">
+        <div className="flex-1 p-8 overflow-y-auto max-w-6xl mx-auto w-full space-y-6 animate-fade-in">
           {/* Search & View Controls */}
           <div className="flex items-center justify-between gap-4">
             <div className="flex-1 max-w-md flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#141414] border border-white/[0.08] text-xs">
@@ -445,7 +445,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
             <div className="flex items-center bg-[#141414] p-1 rounded-xl border border-white/[0.08]">
               <button
                 onClick={() => setViewMode('grid')}
-                className={`p-1.5 rounded-lg text-xs ${
+                className={`p-1.5 rounded-lg text-xs transition-colors ${
                   viewMode === 'grid' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'
                 }`}
               >
@@ -453,7 +453,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
               </button>
               <button
                 onClick={() => setViewMode('list')}
-                className={`p-1.5 rounded-lg text-xs ${
+                className={`p-1.5 rounded-lg text-xs transition-colors ${
                   viewMode === 'list' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'
                 }`}
               >
@@ -469,7 +469,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <div
                   key={page.id}
                   onClick={() => onSelectPage(page.id)}
-                  className="group p-5 rounded-2xl bg-[#141414] hover:bg-[#18181b] border border-white/[0.08] hover:border-white/20 shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between hover:-translate-y-0.5"
+                  className="group p-5 rounded-2xl bg-[#141414] hover:bg-[#18181b] border border-white/[0.08] hover:border-white/20 shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between hover:-translate-y-0.5 animate-slide-up"
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">

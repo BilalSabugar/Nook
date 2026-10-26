@@ -108,7 +108,7 @@ export const McpManager: React.FC<McpManagerProps> = ({
       )}
 
       {/* Tools Content List */}
-      <div className="flex-1 p-8 overflow-y-auto max-w-5xl mx-auto w-full space-y-4 scrollbar-thin">
+      <div className="flex-1 p-8 overflow-y-auto max-w-5xl mx-auto w-full space-y-4 scrollbar-thin animate-fade-in">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {tools.map((tool) => {
             const categoryIcons = {
@@ -123,9 +123,9 @@ export const McpManager: React.FC<McpManagerProps> = ({
             return (
               <div
                 key={tool.id}
-                className={`p-5 rounded-2xl border transition-all duration-200 flex flex-col justify-between ${
+                className={`p-5 rounded-2xl border transition-all duration-200 flex flex-col justify-between animate-slide-up ${
                   tool.enabled
-                    ? 'bg-[#141414] border-white/[0.1] shadow-sm'
+                    ? 'bg-[#141414] border-white/[0.1] shadow-sm hover:border-white/20'
                     : 'bg-[#111111] border-white/[0.04] opacity-50'
                 }`}
               >

@@ -243,8 +243,8 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
               </span>
               {review.type === 'save_page' && onViewSavedPage && (
                 <button
-                  onClick={() => onViewSavedPage('page-nook-brief')}
-                  className="flex items-center gap-1 text-xs text-emerald-300 hover:text-emerald-100 underline underline-offset-4"
+                  onClick={() => onViewSavedPage(review.createdPageId || 'page-nook-brief')}
+                  className="flex items-center gap-1 text-xs text-neutral-300 hover:text-white underline underline-offset-4 font-mono transition-colors"
                 >
                   View in Space <ArrowRight className="w-3.5 h-3.5" />
                 </button>

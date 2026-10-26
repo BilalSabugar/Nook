@@ -78,30 +78,94 @@ export const NookComputer: React.FC<NookComputerProps> = ({
     activityLogs: [],
   };
 
+  const [scrapedPageData, setScrapedPageData] = useState<{
+    title?: string;
+    description?: string;
+    headings?: string[];
+    readableText?: string;
+  } | null>(null);
+
   const currentUrl = browserInputUrl || currentState.url;
 
-  const handleNavigate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!browserInputUrl.trim()) return;
-    const formattedUrl = browserInputUrl.startsWith('http') 
-      ? browserInputUrl 
-      : `https://${browserInputUrl}`;
+  const handleNavigate = async (e?: React.FormEvent, customUrl?: string) => {
+    if (e) e.preventDefault();
+    const urlToUse = customUrl || browserInputUrl || currentState.url;
+    if (!urlToUse || !urlToUse.trim()) return;
+
+    const formattedUrl = urlToUse.startsWith('http') 
+      ? urlToUse 
+      : `https://${urlToUse}`;
+    setBrowserInputUrl(formattedUrl);
 
     onUpdateComputerState(currentAgent.id, {
+      isLoading: true,
       url: formattedUrl,
-      pageTitle: `Browsing ${formattedUrl}`,
-      history: [...currentState.history, formattedUrl],
-      historyIndex: currentState.history.length,
-      activityLogs: [
-        {
-          id: `act-${Date.now()}`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          action: 'Manual Navigation',
-          details: `User navigated to ${formattedUrl}`,
-        },
-        ...currentState.activityLogs,
-      ],
+      pageTitle: `Loading ${formattedUrl}...`,
+      history: [...currentState.history.slice(0, currentState.historyIndex + 1), formattedUrl],
+      historyIndex: currentState.historyIndex + 1,
     });
+
+    try {
+      const res = await fetch('/api/sandbox/browse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: formattedUrl }),
+      });
+      const data = await res.json();
+      setScrapedPageData(data);
+
+      onUpdateComputerState(currentAgent.id, {
+        isLoading: false,
+        url: formattedUrl,
+        pageTitle: data.title || formattedUrl,
+        activityLogs: [
+          {
+            id: `act-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            action: 'Web Scrape',
+            details: `Scraped ${formattedUrl} (${data.headings?.length || 0} headings extracted)`,
+          },
+          ...currentState.activityLogs,
+        ],
+      });
+      toast.success('Page Loaded', `Scraped ${data.title || formattedUrl}`);
+    } catch {
+      onUpdateComputerState(currentAgent.id, {
+        isLoading: false,
+        url: formattedUrl,
+        pageTitle: formattedUrl,
+      });
+    }
+  };
+
+  const handleBack = () => {
+    if (currentState.historyIndex > 0) {
+      const prevIndex = currentState.historyIndex - 1;
+      const prevUrl = currentState.history[prevIndex];
+      onUpdateComputerState(currentAgent.id, {
+        historyIndex: prevIndex,
+        url: prevUrl,
+        pageTitle: `Browsing ${prevUrl}`,
+      });
+      setBrowserInputUrl(prevUrl);
+    }
+  };
+
+  const handleForward = () => {
+    if (currentState.historyIndex < currentState.history.length - 1) {
+      const nextIndex = currentState.historyIndex + 1;
+      const nextUrl = currentState.history[nextIndex];
+      onUpdateComputerState(currentAgent.id, {
+        historyIndex: nextIndex,
+        url: nextUrl,
+        pageTitle: `Browsing ${nextUrl}`,
+      });
+      setBrowserInputUrl(nextUrl);
+    }
+  };
+
+  const handleRefresh = () => {
+    handleNavigate(undefined, currentState.url);
   };
 
   const handleTerminalSubmit = (e: React.FormEvent) => {
@@ -313,33 +377,41 @@ export const NookComputer: React.FC<NookComputerProps> = ({
             <div className="px-4 py-2 border-b border-white/[0.08] bg-[#141414] flex items-center gap-3">
               <div className="flex items-center gap-1 text-neutral-400">
                 <button 
+                  onClick={handleBack}
                   disabled={currentState.historyIndex <= 0}
-                  className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-30"
+                  className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-30 transition-colors"
+                  title="Back"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                 </button>
                 <button 
+                  onClick={handleForward}
                   disabled={currentState.historyIndex >= currentState.history.length - 1}
-                  className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-30"
+                  className="p-1 rounded hover:bg-white/[0.06] disabled:opacity-30 transition-colors"
+                  title="Forward"
                 >
                   <ArrowRight className="w-3.5 h-3.5" />
                 </button>
-                <button className="p-1 rounded hover:bg-white/[0.06]">
-                  <RotateCw className="w-3.5 h-3.5" />
+                <button 
+                  onClick={handleRefresh}
+                  className="p-1 rounded hover:bg-white/[0.06] transition-colors"
+                  title="Refresh"
+                >
+                  <RotateCw className={`w-3.5 h-3.5 ${currentState.isLoading ? 'animate-spin text-white' : ''}`} />
                 </button>
               </div>
 
               {/* URL Bar */}
-              <form onSubmit={handleNavigate} className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-xs">
+              <form onSubmit={handleNavigate} className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-xs focus-within:border-white/30 transition-colors">
                 <Lock className="w-3 h-3 text-neutral-400 shrink-0" />
                 <input
                   type="text"
                   value={currentUrl}
                   onChange={(e) => setBrowserInputUrl(e.target.value)}
-                  placeholder="Enter URL to navigate or inspect..."
+                  placeholder="Enter URL to navigate or inspect (e.g. news.ycombinator.com)..."
                   className="bg-transparent border-none outline-none text-white placeholder:text-neutral-500 w-full font-mono text-xs"
                 />
-                <button type="submit" className="text-neutral-400 hover:text-white">
+                <button type="submit" className="text-neutral-400 hover:text-white transition-colors" title="Navigate">
                   <Play className="w-3 h-3" />
                 </button>
               </form>
@@ -349,21 +421,21 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                   <button
                     onClick={() => setViewportMode('desktop')}
                     title="Desktop View (1920x1080)"
-                    className={`p-1 rounded ${viewportMode === 'desktop' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1 rounded transition-colors ${viewportMode === 'desktop' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Monitor className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setViewportMode('tablet')}
                     title="Tablet View (768px)"
-                    className={`p-1 rounded ${viewportMode === 'tablet' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1 rounded transition-colors ${viewportMode === 'tablet' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Tablet className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setViewportMode('mobile')}
                     title="Mobile View (375px)"
-                    className={`p-1 rounded ${viewportMode === 'mobile' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1 rounded transition-colors ${viewportMode === 'mobile' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Smartphone className="w-3.5 h-3.5" />
                   </button>
@@ -373,7 +445,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                   href={currentState.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white transition-colors"
                   title="Open external browser tab"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -382,7 +454,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
             </div>
 
             {/* Viewport Render Frame */}
-            <div className="flex-1 p-4 overflow-y-auto flex flex-col items-center">
+            <div className="flex-1 p-4 overflow-y-auto flex flex-col items-center animate-fade-in">
               <div className={`w-full transition-all duration-300 rounded-xl border border-white/[0.1] bg-[#141414] shadow-sm overflow-hidden flex flex-col min-h-[520px] ${
                 viewportMode === 'mobile' ? 'max-w-sm' : viewportMode === 'tablet' ? 'max-w-2xl' : 'max-w-5xl'
               }`}>
@@ -396,7 +468,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                   </div>
 
                   {currentState.takeoverMode && (
-                    <span className="px-2 py-0.5 rounded bg-white text-black font-mono text-[10px] font-semibold">
+                    <span className="px-2 py-0.5 rounded bg-white text-black font-mono text-[10px] font-semibold animate-pulse">
                       INTERACTIVE HUMAN MODE
                     </span>
                   )}
@@ -404,8 +476,78 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
                 {/* Simulated Web Page Content */}
                 <div className="flex-1 p-6 space-y-6 text-neutral-200">
-                  {currentState.url.includes('github.com/CopilotKit/OpenDots') ? (
-                    <div className="space-y-4">
+                  {currentState.isLoading ? (
+                    <div className="space-y-6 py-12 flex flex-col items-center justify-center animate-fade-in">
+                      <div className="flex items-center gap-2">
+                        <span className="chatgpt-dot chatgpt-dot-1" />
+                        <span className="chatgpt-dot chatgpt-dot-2" />
+                        <span className="chatgpt-dot chatgpt-dot-3" />
+                      </div>
+                      <p className="text-xs font-mono text-neutral-400 animate-pulse">
+                        Fetching DOM stream from {currentState.url}...
+                      </p>
+                      <div className="w-full max-w-md space-y-2.5">
+                        <div className="h-4 bg-white/[0.06] rounded animate-pulse" />
+                        <div className="h-4 bg-white/[0.04] rounded w-5/6 animate-pulse" />
+                        <div className="h-4 bg-white/[0.03] rounded w-2/3 animate-pulse" />
+                      </div>
+                    </div>
+                  ) : scrapedPageData ? (
+                    <div className="space-y-6 animate-fade-in">
+                      <div className="border-b border-white/[0.08] pb-4">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Globe className="w-4 h-4 text-white" />
+                            <h2 className="text-base font-bold text-white tracking-tight">{scrapedPageData.title || currentState.url}</h2>
+                          </div>
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.06] text-neutral-300 border border-white/[0.08]">
+                            Live Scraped DOM
+                          </span>
+                        </div>
+                        {scrapedPageData.description && (
+                          <p className="text-xs text-neutral-400 mt-2 leading-relaxed">{scrapedPageData.description}</p>
+                        )}
+                      </div>
+
+                      {scrapedPageData.headings && scrapedPageData.headings.length > 0 && (
+                        <div className="p-4 rounded-lg bg-[#0d0d0d] border border-white/[0.06] space-y-2">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                            Extracted Headings ({scrapedPageData.headings.length})
+                          </span>
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {scrapedPageData.headings.slice(0, 10).map((h, i) => (
+                              <span key={i} className="text-[11px] px-2 py-0.5 rounded bg-white/[0.04] text-neutral-300 border border-white/[0.06]">
+                                {h}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {scrapedPageData.readableText && (
+                        <div className="p-4 rounded-lg bg-[#0d0d0d] border border-white/[0.06] space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                              Readable Text Excerpt
+                            </span>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(scrapedPageData.readableText || '');
+                                toast.info('Copied', 'Extracted page content copied to clipboard.');
+                              }}
+                              className="text-[10px] text-neutral-400 hover:text-white transition-colors"
+                            >
+                              Copy Text
+                            </button>
+                          </div>
+                          <p className="text-xs text-neutral-300 leading-relaxed font-mono whitespace-pre-wrap max-h-48 overflow-y-auto">
+                            {scrapedPageData.readableText.slice(0, 800)}...
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  ) : currentState.url.includes('github.com/CopilotKit/OpenDots') ? (
+                    <div className="space-y-4 animate-fade-in">
                       <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
                         <div className="flex items-center gap-3">
                           <div className="w-8 h-8 rounded-lg bg-white text-black flex items-center justify-center font-bold text-sm">
@@ -444,7 +586,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-4">
+                    <div className="space-y-4 animate-fade-in">
                       <div className="flex items-center gap-2 text-white">
                         <Globe className="w-5 h-5 text-neutral-400" />
                         <h2 className="text-lg font-bold text-white">{currentState.pageTitle}</h2>
@@ -465,7 +607,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
         {/* ================= TERMINAL VIEW ================= */}
         {activeTab === 'terminal' && (
-          <div className="flex-1 flex flex-col overflow-hidden bg-black font-mono text-xs text-neutral-200">
+          <div className="flex-1 flex flex-col overflow-hidden bg-black font-mono text-xs text-neutral-200 animate-fade-in">
             {/* Terminal Header */}
             <div className="px-4 py-2 bg-[#141414] border-b border-white/[0.08] flex items-center justify-between text-neutral-400 text-[11px]">
               <div className="flex items-center gap-2">
@@ -490,7 +632,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                 <button
                   key={cmd}
                   onClick={() => handleQuickCommand(cmd)}
-                  className="px-2 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.06] text-[10px] transition-colors"
+                  className="px-2 py-0.5 rounded bg-white/[0.04] hover:bg-white/[0.08] text-neutral-300 hover:text-white border border-white/[0.06] text-[10px] transition-colors active:scale-95"
                 >
                   ${cmd}
                 </button>
@@ -500,7 +642,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
             {/* Terminal Output Logs */}
             <div className="flex-1 p-4 overflow-y-auto space-y-2 scrollbar-thin">
               {currentState.terminalLogs.map((log) => (
-                <div key={log.id} className="leading-relaxed">
+                <div key={log.id} className="leading-relaxed animate-slide-up">
                   {log.type === 'system' && (
                     <p className="text-neutral-500">[SYSTEM] {log.text}</p>
                   )}
@@ -530,7 +672,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                 placeholder="Type command (e.g. ls -la, npm test, cat /workspace/deploy.sh)..."
                 className="bg-transparent border-none outline-none text-white placeholder:text-neutral-500 flex-1 font-mono text-xs"
               />
-              <button type="submit" className="px-3 py-1 bg-white hover:bg-neutral-200 text-black font-semibold rounded text-xs transition-colors">
+              <button type="submit" className="px-3 py-1 bg-white hover:bg-neutral-200 text-black font-semibold rounded text-xs transition-colors active:scale-95">
                 Run
               </button>
             </form>
@@ -539,7 +681,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
         {/* ================= FILES VIEW ================= */}
         {activeTab === 'files' && (
-          <div className="flex-1 flex overflow-hidden bg-[#0d0d0d]">
+          <div className="flex-1 flex overflow-hidden bg-[#0d0d0d] animate-fade-in">
             {/* File List */}
             <div className="w-72 border-r border-white/[0.08] bg-[#141414] p-3 flex flex-col shrink-0">
               <div className="flex items-center justify-between mb-2 px-1">
@@ -666,7 +808,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
         {/* ================= ACTIVITY VIEW ================= */}
         {activeTab === 'activity' && (
-          <div className="flex-1 p-6 overflow-y-auto bg-[#0d0d0d]">
+          <div className="flex-1 p-6 overflow-y-auto bg-[#0d0d0d] animate-fade-in">
             <div className="max-w-3xl mx-auto space-y-4">
               <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
                 <h3 className="text-sm font-semibold text-white">Agent Computer Activity Stream</h3>
@@ -675,7 +817,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
               <div className="space-y-3">
                 {currentState.activityLogs.map((act) => (
-                  <div key={act.id} className="p-3 rounded-lg bg-[#141414] border border-white/[0.08] flex items-start justify-between">
+                  <div key={act.id} className="p-3 rounded-lg bg-[#141414] border border-white/[0.08] flex items-start justify-between animate-slide-up hover:border-white/20 transition-colors">
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="px-2 py-0.5 rounded bg-white/[0.06] text-neutral-300 font-mono text-[10px] font-semibold border border-white/[0.08]">

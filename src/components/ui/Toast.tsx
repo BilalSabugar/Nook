@@ -82,12 +82,12 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               <div className="flex-1 min-w-0 pr-1">
                 <p className="text-xs font-semibold text-white tracking-tight">{t.title}</p>
                 {t.description && (
-                  <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">{t.description}</p>
+                  <p className="text-[11px] text-neutral-400 mt-0.5 leading-snug">{t.description}</p>
                 )}
               </div>
               <button
                 onClick={() => removeToast(t.id)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/[0.08] transition-colors"
+                className="text-neutral-400 hover:text-white p-1 rounded-lg hover:bg-white/[0.08] transition-colors"
               >
                 <X className="w-3.5 h-3.5" />
               </button>

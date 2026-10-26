@@ -81,10 +81,10 @@ export const SlashCommandPalette: React.FC<SlashCommandPaletteProps> = ({
   ];
 
   return (
-    <div className="absolute top-12 left-6 z-40 w-72 rounded-2xl bg-[#0f1624] border border-white/[0.12] shadow-2xl p-2 space-y-1 text-xs text-slate-200 animate-in fade-in zoom-in-95">
-      <div className="px-2 py-1 text-[10px] uppercase font-semibold text-slate-400 border-b border-white/[0.06] flex items-center justify-between">
+    <div className="absolute top-12 left-6 z-40 w-72 rounded-2xl bg-[#141414] border border-white/[0.1] shadow-2xl p-2 space-y-1 text-xs text-neutral-200 animate-in fade-in zoom-in-95 font-sans">
+      <div className="px-2 py-1 text-[10px] uppercase font-semibold text-neutral-400 border-b border-white/[0.06] flex items-center justify-between">
         <span>Insert Block</span>
-        <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+        <button onClick={onClose} className="text-neutral-400 hover:text-white">✕</button>
       </div>
 
       <div className="max-h-64 overflow-y-auto space-y-0.5 scrollbar-thin py-1">
@@ -99,12 +99,12 @@ export const SlashCommandPalette: React.FC<SlashCommandPaletteProps> = ({
               }}
               className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/[0.06] flex items-center gap-2.5 transition-colors group"
             >
-              <div className="w-6 h-6 rounded-md bg-white/[0.05] border border-white/[0.08] flex items-center justify-center text-slate-400 group-hover:text-indigo-400 group-hover:border-indigo-500/30">
+              <div className="w-6 h-6 rounded-md bg-white/[0.05] border border-white/[0.08] flex items-center justify-center text-neutral-400 group-hover:text-white group-hover:border-white/20">
                 <Icon className="w-3.5 h-3.5" />
               </div>
               <div>
                 <p className="font-medium text-white text-xs leading-none mb-0.5">{cmd.title}</p>
-                <p className="text-[10px] text-slate-400 leading-none">{cmd.desc}</p>
+                <p className="text-[10px] text-neutral-400 leading-none">{cmd.desc}</p>
               </div>
             </button>
           );
@@ -116,14 +116,14 @@ export const SlashCommandPalette: React.FC<SlashCommandPaletteProps> = ({
               onTriggerAgent();
               onClose();
             }}
-            className="w-full text-left px-2.5 py-1.5 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/25 border border-indigo-500/20 text-indigo-300 flex items-center gap-2.5 transition-colors"
+            className="w-full text-left px-2.5 py-1.5 rounded-lg bg-white/[0.08] hover:bg-white/[0.14] border border-white/[0.15] text-white flex items-center gap-2.5 transition-colors"
           >
-            <div className="w-6 h-6 rounded-md bg-indigo-600/30 flex items-center justify-center text-indigo-300">
+            <div className="w-6 h-6 rounded-md bg-white text-black flex items-center justify-center font-bold">
               <Bot className="w-3.5 h-3.5" />
             </div>
             <div>
               <p className="font-semibold text-white text-xs leading-none mb-0.5">Ask AI Coworker</p>
-              <p className="text-[10px] text-indigo-300 leading-none">Draft sections or revise document</p>
+              <p className="text-[10px] text-neutral-300 leading-none">Draft sections or revise document</p>
             </div>
           </button>
         </div>

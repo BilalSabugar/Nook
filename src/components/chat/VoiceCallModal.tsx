@@ -64,21 +64,21 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   // Minimized Picture-in-Picture Mini-Player
   if (isMinimized) {
     return (
-      <div className="fixed bottom-6 right-6 z-50 bg-[#0e1422] border border-white/[0.15] p-3 rounded-2xl shadow-2xl flex items-center gap-3 text-slate-200 ring-1 ring-emerald-500/30 animate-in fade-in slide-in-from-bottom-4">
+      <div className="fixed bottom-6 right-6 z-50 bg-[#141414] border border-white/[0.1] p-3 rounded-2xl shadow-2xl flex items-center gap-3 text-neutral-200 animate-in fade-in slide-in-from-bottom-4">
         <div className="relative">
           <span className="text-xl">{agent.avatar}</span>
-          <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 border border-[#0e1422] animate-pulse" />
+          <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-500 border border-[#141414]" />
         </div>
 
         <div>
           <div className="flex items-center gap-2">
             <span className="text-xs font-semibold text-white">{agent.name}</span>
-            <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded border border-emerald-500/20">
+            <span className="text-[10px] font-mono text-neutral-300 bg-white/[0.08] px-1.5 py-0.2 rounded border border-white/[0.1]">
               {formatTime(callDuration)}
             </span>
           </div>
-          <p className="text-[10px] text-slate-400">
-            {agentSpeaking ? 'Speaking...' : 'Listening to you'}
+          <p className="text-[10px] text-neutral-400">
+            {agentSpeaking ? 'Speaking...' : 'Listening...'}
           </p>
         </div>
 
@@ -86,7 +86,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           <button
             onClick={() => setIsMuted(!isMuted)}
             className={`p-1.5 rounded-lg text-xs transition-colors ${
-              isMuted ? 'bg-rose-500/20 text-rose-300' : 'bg-white/[0.08] text-slate-300 hover:text-white'
+              isMuted ? 'bg-white/20 text-white' : 'bg-white/[0.08] text-neutral-300 hover:text-white'
             }`}
           >
             {isMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
@@ -95,7 +95,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           <button
             onClick={() => setIsMinimized(false)}
             title="Expand Call View"
-            className="p-1.5 rounded-lg bg-white/[0.08] text-slate-300 hover:text-white transition-colors"
+            className="p-1.5 rounded-lg bg-white/[0.08] text-neutral-300 hover:text-white transition-colors"
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
@@ -103,7 +103,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           <button
             onClick={onEndCall}
             title="End Call"
-            className="p-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white transition-colors"
+            className="p-1.5 rounded-lg bg-white hover:bg-neutral-200 text-black font-semibold transition-colors"
           >
             <PhoneOff className="w-3.5 h-3.5" />
           </button>

@@ -186,28 +186,28 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <button
                   onClick={() => insertMarkdownSnippet('## Heading 2')}
                   title="Insert Heading"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-slate-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
                 >
                   <Heading2 className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('- [ ] Todo item')}
                   title="Insert Task Checkbox"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-slate-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
                 >
                   <CheckSquare className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('```typescript\n// your code here\n```')}
                   title="Insert Code Block"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-slate-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
                 >
                   <Code className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => insertMarkdownSnippet('> Callout note')}
                   title="Insert Quote"
-                  className="p-1.5 rounded hover:bg-white/[0.06] text-slate-400 hover:text-white"
+                  className="p-1.5 rounded hover:bg-white/[0.06] text-neutral-400 hover:text-white"
                 >
                   <ListOrdered className="w-4 h-4" />
                 </button>
@@ -215,16 +215,16 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
               {/* Autosave Status & Mode Toggle & Export Controls */}
               <div className="flex items-center gap-2 sm:gap-3">
-                <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-400">
+                <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-neutral-400">
                   <span className="font-mono">{activePage.content.trim().split(/\s+/).filter(Boolean).length} words</span>
-                  <span className="text-slate-600">•</span>
+                  <span className="text-neutral-600">•</span>
                   {isSaving ? (
-                    <span className="text-amber-400 flex items-center gap-1">
+                    <span className="text-neutral-300 flex items-center gap-1">
                       <Save className="w-3 h-3 animate-spin" /> Saving...
                     </span>
                   ) : (
-                    <span className="text-emerald-400 flex items-center gap-1 font-mono">
-                      <Check className="w-3 h-3" /> v{activePage.version} saved
+                    <span className="text-neutral-400 flex items-center gap-1 font-mono">
+                      <Check className="w-3 h-3 text-white" /> v{activePage.version} saved
                     </span>
                   )}
                 </div>
@@ -234,8 +234,8 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     onClick={() => setEditorMode('visual')}
                     className={`px-2 py-0.5 rounded text-[11px] ${
                       editorMode === 'visual'
-                        ? 'bg-white/[0.12] text-white font-medium'
-                        : 'text-slate-400 hover:text-white'
+                        ? 'bg-white text-black font-semibold'
+                        : 'text-neutral-400 hover:text-white'
                     }`}
                   >
                     Editor
@@ -329,18 +329,18 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 type="text"
                 value={activePage.title}
                 onChange={(e) => handleTitleChange(e.target.value)}
-                className="w-full bg-transparent border-none outline-none text-2xl sm:text-3xl font-bold text-white placeholder:text-slate-600 tracking-tight"
+                className="w-full bg-transparent border-none outline-none text-2xl sm:text-3xl font-bold text-white placeholder:text-neutral-600 tracking-tight"
                 placeholder="Untitled Document..."
               />
 
               {/* Tags & Metadata */}
-              <div className="flex items-center gap-2 pb-4 border-b border-white/[0.08] text-xs text-slate-400">
+              <div className="flex items-center gap-2 pb-4 border-b border-white/[0.08] text-xs text-neutral-400">
                 <Clock className="w-3.5 h-3.5" />
                 <span>Updated {new Date(activePage.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                <span className="text-slate-600">•</span>
+                <span className="text-neutral-600">•</span>
                 <div className="flex items-center gap-1">
                   {activePage.tags.map((t) => (
-                    <span key={t} className="px-2 py-0.5 rounded-full bg-white/[0.05] text-slate-300 text-[10px]">
+                    <span key={t} className="px-2 py-0.5 rounded-full bg-white/[0.04] text-neutral-300 text-[10px] border border-white/[0.06]">
                       #{t}
                     </span>
                   ))}
@@ -349,21 +349,21 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
               {/* Visual, Preview, or Raw Markdown Mode */}
               {editorMode === 'preview' ? (
-                <div className="p-6 rounded-2xl bg-black/40 border border-white/[0.08] min-h-[500px] shadow-inner">
+                <div className="p-6 rounded-2xl bg-[#0a0a0a] border border-white/[0.08] min-h-[500px] shadow-sm">
                   <MarkdownViewer content={activePage.content} />
                 </div>
               ) : editorMode === 'visual' ? (
                 <textarea
                   value={activePage.content}
                   onChange={(e) => handleContentChange(e.target.value)}
-                  className="w-full min-h-[500px] bg-transparent border-none outline-none resize-none font-sans text-sm sm:text-base leading-relaxed text-slate-200 placeholder:text-slate-600"
+                  className="w-full min-h-[500px] bg-transparent border-none outline-none resize-none font-sans text-sm sm:text-base leading-relaxed text-neutral-200 placeholder:text-neutral-600"
                   placeholder="Type notes or markdown here... Tip: Click [/ Blocks] above to insert headings, checklists, and code."
                 />
               ) : (
                 <textarea
                   value={activePage.content}
                   onChange={(e) => handleContentChange(e.target.value)}
-                  className="w-full min-h-[500px] bg-black/40 p-4 rounded-xl border border-white/[0.08] font-mono text-xs sm:text-sm text-slate-300 resize-none outline-none"
+                  className="w-full min-h-[500px] bg-[#0a0a0a] p-4 rounded-xl border border-white/[0.08] font-mono text-xs sm:text-sm text-neutral-200 resize-none outline-none"
                 />
               )}
             </div>
@@ -371,56 +371,56 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
           {/* Collaborative Page Chat Drawer */}
           {showPageChatDrawer && (
-            <div className="w-80 border-l border-white/[0.08] bg-[#0b1018] flex flex-col h-full shrink-0">
+            <div className="w-80 border-l border-white/[0.08] bg-[#121212] flex flex-col h-full shrink-0">
               <div className="p-3.5 border-b border-white/[0.08] flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Bot className="w-4 h-4 text-emerald-400" />
+                  <Bot className="w-4 h-4 text-white" />
                   <span className="text-xs font-semibold text-white">Revise with Coworker</span>
                 </div>
                 <button
                   onClick={() => setShowPageChatDrawer(false)}
-                  className="text-slate-400 hover:text-white text-xs"
+                  className="text-neutral-400 hover:text-white text-xs"
                 >
                   ✕
                 </button>
               </div>
 
-              <div className="p-3 flex-1 overflow-y-auto space-y-3 text-xs text-slate-300">
-                <div className="p-3 rounded-lg bg-indigo-950/30 border border-indigo-500/20 text-indigo-200">
+              <div className="p-3 flex-1 overflow-y-auto space-y-3 text-xs text-neutral-300">
+                <div className="p-3 rounded-lg bg-[#18181b] border border-white/[0.08] text-neutral-300">
                   <p className="font-medium text-white mb-1">Page Assistant Context</p>
-                  <p className="text-[11px] text-slate-400">
+                  <p className="text-[11px] text-neutral-400">
                     Your assigned specialists can inspect this document, append sections, refine formatting, or verify technical assertions.
                   </p>
                 </div>
 
                 <div className="space-y-1">
-                  <span className="text-[11px] font-semibold text-slate-400">Choose Specialist:</span>
+                  <span className="text-[11px] font-semibold text-neutral-400">Choose Specialist:</span>
                   {assignedAgents.map((agent) => (
                     <button
                       key={agent.id}
                       onClick={() => onAskAgentAboutPage(agent.id, activePage)}
-                      className="w-full text-left p-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.06] border border-white/[0.06] flex items-center justify-between group transition-colors"
+                      className="w-full text-left p-2 rounded-lg bg-[#18181b] hover:bg-white/[0.08] border border-white/[0.06] flex items-center justify-between group transition-colors"
                     >
                       <div className="flex items-center gap-2">
                         <span>{agent.avatar}</span>
                         <div>
                           <p className="font-medium text-white text-xs">{agent.name}</p>
-                          <p className="text-[10px] text-slate-400">{agent.role}</p>
+                          <p className="text-[10px] text-neutral-400">{agent.role}</p>
                         </div>
                       </div>
-                      <Sparkles className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-400 transition-colors" />
+                      <Sparkles className="w-3.5 h-3.5 text-neutral-500 group-hover:text-white transition-colors" />
                     </button>
                   ))}
                 </div>
               </div>
 
-              <div className="p-3 border-t border-white/[0.08] bg-black/20">
+              <div className="p-3 border-t border-white/[0.08] bg-black/40">
                 <input
                   type="text"
                   value={pageChatPrompt}
                   onChange={(e) => setPageChatPrompt(e.target.value)}
                   placeholder="Ask agent to add section or edit..."
-                  className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-xs text-slate-200 outline-none focus:border-indigo-500"
+                  className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-xs text-neutral-200 outline-none focus:border-white/40"
                 />
               </div>
             </div>
@@ -431,22 +431,22 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
         <div className="flex-1 p-8 overflow-y-auto max-w-6xl mx-auto w-full space-y-6">
           {/* Search & View Controls */}
           <div className="flex items-center justify-between gap-4">
-            <div className="flex-1 max-w-md flex items-center gap-2 px-3.5 py-2 rounded-xl bg-black/40 border border-white/[0.08] text-xs">
-              <Search className="w-4 h-4 text-slate-400" />
+            <div className="flex-1 max-w-md flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#141414] border border-white/[0.08] text-xs">
+              <Search className="w-4 h-4 text-neutral-400" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search documents by title, tags, or content..."
-                className="bg-transparent border-none outline-none text-slate-200 placeholder:text-slate-500 w-full"
+                className="bg-transparent border-none outline-none text-neutral-200 placeholder:text-neutral-500 w-full"
               />
             </div>
 
-            <div className="flex items-center bg-black/40 p-1 rounded-xl border border-white/[0.08]">
+            <div className="flex items-center bg-[#141414] p-1 rounded-xl border border-white/[0.08]">
               <button
                 onClick={() => setViewMode('grid')}
                 className={`p-1.5 rounded-lg text-xs ${
-                  viewMode === 'grid' ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-white'
+                  viewMode === 'grid' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'
                 }`}
               >
                 <Grid className="w-4 h-4" />
@@ -454,7 +454,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
               <button
                 onClick={() => setViewMode('list')}
                 className={`p-1.5 rounded-lg text-xs ${
-                  viewMode === 'list' ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-white'
+                  viewMode === 'list' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'
                 }`}
               >
                 <List className="w-4 h-4" />
@@ -469,30 +469,30 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <div
                   key={page.id}
                   onClick={() => onSelectPage(page.id)}
-                  className="group p-5 rounded-2xl bg-[#0f1521] hover:bg-[#131b2a] border border-white/[0.08] hover:border-indigo-500/40 shadow-lg cursor-pointer transition-all duration-200 flex flex-col justify-between hover:-translate-y-0.5"
+                  className="group p-5 rounded-2xl bg-[#141414] hover:bg-[#18181b] border border-white/[0.08] hover:border-white/20 shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between hover:-translate-y-0.5"
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-2xl">{page.icon || '📄'}</span>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-slate-400">
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-neutral-400 border border-white/[0.06]">
                         v{page.version}
                       </span>
                     </div>
 
                     <div>
-                      <h3 className="font-semibold text-white text-sm group-hover:text-indigo-300 transition-colors line-clamp-1">
+                      <h3 className="font-semibold text-white text-sm group-hover:text-white transition-colors line-clamp-1">
                         {page.title}
                       </h3>
-                      <p className="text-xs text-slate-400 line-clamp-2 mt-1 leading-relaxed">
+                      <p className="text-xs text-neutral-400 line-clamp-2 mt-1 leading-relaxed">
                         {page.excerpt || page.content.slice(0, 100)}...
                       </p>
                     </div>
                   </div>
 
-                  <div className="pt-4 mt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-slate-400">
+                  <div className="pt-4 mt-3 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-neutral-400">
                     <div className="flex items-center gap-1">
                       {page.tags.slice(0, 2).map((t) => (
-                        <span key={t} className="px-1.5 py-0.5 rounded bg-white/[0.04] text-slate-300 text-[10px]">
+                        <span key={t} className="px-1.5 py-0.5 rounded bg-white/[0.04] text-neutral-300 text-[10px] border border-white/[0.04]">
                           #{t}
                         </span>
                       ))}
@@ -504,9 +504,9 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
             </div>
           ) : (
             /* List View */
-            <div className="rounded-xl border border-white/[0.08] bg-[#0f1521] overflow-hidden">
+            <div className="rounded-xl border border-white/[0.08] bg-[#141414] overflow-hidden">
               <table className="w-full text-left text-xs">
-                <thead className="bg-[#141b2b] border-b border-white/[0.08] text-slate-400 font-medium">
+                <thead className="bg-[#18181b] border-b border-white/[0.08] text-neutral-400 font-medium">
                   <tr>
                     <th className="py-3 px-4">Title</th>
                     <th className="py-3 px-4">Tags</th>
@@ -525,11 +525,11 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                         <span className="text-base">{page.icon || '📄'}</span>
                         <span>{page.title}</span>
                       </td>
-                      <td className="py-3 px-4 text-slate-400">
+                      <td className="py-3 px-4 text-neutral-400">
                         {page.tags.join(', ')}
                       </td>
-                      <td className="py-3 px-4 font-mono text-slate-400">v{page.version}</td>
-                      <td className="py-3 px-4 text-slate-400">
+                      <td className="py-3 px-4 font-mono text-neutral-400">v{page.version}</td>
+                      <td className="py-3 px-4 text-neutral-400">
                         {new Date(page.updatedAt).toLocaleDateString()}
                       </td>
                     </tr>

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Agent, AgentRole, MCPTool, Space } from '@/types';
-import { Bot, Sparkles, Monitor, Shield, Check } from 'lucide-react';
+import { Bot, Monitor, Check } from 'lucide-react';
 
 interface AgentModalProps {
   isOpen: boolean;
@@ -43,7 +43,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
       systemPrompt: systemPrompt.trim() || `You are ${name}, a persistent specialist AI coworker at Nook. Your role is ${role}.`,
       status: 'idle',
       statusMessage: 'Ready for collaboration',
-      color: '#6366f1',
+      color: '#ffffff',
       allowedTools: selectedTools,
       assignedSpaces: selectedSpaces,
       computerEnabled,
@@ -60,60 +60,54 @@ export const AgentModal: React.FC<AgentModalProps> = ({
     );
   };
 
-  const toggleSpace = (spaceId: string) => {
-    setSelectedSpaces((prev) =>
-      prev.includes(spaceId) ? prev.filter((id) => id !== spaceId) : [...prev, spaceId]
-    );
-  };
-
   return (
-    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-xl rounded-2xl bg-[#0e1420] border border-white/[0.12] p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto scrollbar-thin text-slate-200">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+      <div className="w-full max-w-xl rounded-2xl bg-[#141414] border border-white/[0.1] p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto scrollbar-thin text-neutral-200 font-sans">
         <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-white/[0.08] text-white border border-white/[0.1] flex items-center justify-center">
               <Bot className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="text-base font-semibold text-white">Create Persistent AI Coworker</h3>
-              <p className="text-xs text-slate-400">Configure persona, sandbox computer, and tool permissions</p>
+              <h3 className="text-base font-semibold text-white tracking-tight">Create AI Coworker</h3>
+              <p className="text-xs text-neutral-400">Configure persona, sandbox computer, and tool permissions</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white">✕</button>
+          <button onClick={onClose} className="text-neutral-400 hover:text-white p-1">✕</button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">
           <div className="grid grid-cols-4 gap-3">
             <div className="col-span-1">
-              <label className="block text-slate-300 mb-1 font-medium">Avatar Icon</label>
+              <label className="block text-neutral-300 mb-1 font-medium">Avatar Icon</label>
               <input
                 type="text"
                 value={avatar}
                 onChange={(e) => setAvatar(e.target.value)}
                 placeholder="🧭"
-                className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-center text-lg outline-none focus:border-indigo-500"
+                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-center text-lg outline-none focus:border-white/40"
               />
             </div>
 
             <div className="col-span-3">
-              <label className="block text-slate-300 mb-1 font-medium">Coworker Name</label>
+              <label className="block text-neutral-300 mb-1 font-medium">Coworker Name</label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. Helix, Sentinel, Nova"
                 required
-                className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-slate-100 outline-none focus:border-indigo-500"
+                className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none focus:border-white/40"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-slate-300 mb-1 font-medium">Specialist Role</label>
+            <label className="block text-neutral-300 mb-1 font-medium">Specialist Role</label>
             <select
               value={role}
               onChange={(e) => setRole(e.target.value as AgentRole)}
-              className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-slate-100 outline-none"
+              className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none"
             >
               <option value="Research & Intelligence">Research & Intelligence (Web investigator)</option>
               <option value="Technical Writer">Technical Writer (Document architect)</option>
@@ -124,47 +118,47 @@ export const AgentModal: React.FC<AgentModalProps> = ({
           </div>
 
           <div>
-            <label className="block text-slate-300 mb-1 font-medium">Bio / Description</label>
+            <label className="block text-neutral-300 mb-1 font-medium">Bio / Description</label>
             <input
               type="text"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="e.g. Investigates technical protocols, runs tests, and drafts PRDs."
-              className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-slate-100 outline-none focus:border-indigo-500"
+              className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none focus:border-white/40"
             />
           </div>
 
           <div>
-            <label className="block text-slate-300 mb-1 font-medium">System Instructions / Prompt</label>
+            <label className="block text-neutral-300 mb-1 font-medium">System Instructions / Prompt</label>
             <textarea
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={3}
               placeholder="Define behavioral principles, tone, and decision rules..."
-              className="w-full px-3 py-2 rounded-lg bg-black/40 border border-white/[0.1] text-slate-100 outline-none resize-none"
+              className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none resize-none"
             />
           </div>
 
           {/* Computer Sandbox Toggle */}
-          <div className="p-3 rounded-xl bg-black/30 border border-white/[0.08] flex items-center justify-between">
+          <div className="p-3 rounded-xl bg-[#0d0d0d] border border-white/[0.08] flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Monitor className="w-4 h-4 text-emerald-400" />
+              <Monitor className="w-4 h-4 text-white" />
               <div>
                 <p className="font-semibold text-white">Enable Dedicated Computer</p>
-                <p className="text-[11px] text-slate-400">Allocates an isolated browser session, terminal shell, and file storage.</p>
+                <p className="text-[11px] text-neutral-400">Allocates an isolated browser session, terminal shell, and file storage.</p>
               </div>
             </div>
             <input
               type="checkbox"
               checked={computerEnabled}
               onChange={(e) => setComputerEnabled(e.target.checked)}
-              className="w-4 h-4 accent-indigo-500 rounded cursor-pointer"
+              className="w-4 h-4 accent-white rounded cursor-pointer"
             />
           </div>
 
           {/* Permitted Tools Matrix */}
           <div>
-            <label className="block text-slate-300 mb-1.5 font-medium">Permitted Tools</label>
+            <label className="block text-neutral-300 mb-1.5 font-medium">Permitted Tools</label>
             <div className="grid grid-cols-2 gap-2">
               {availableTools.map((tool) => (
                 <button
@@ -173,12 +167,12 @@ export const AgentModal: React.FC<AgentModalProps> = ({
                   onClick={() => toggleTool(tool.id)}
                   className={`p-2 rounded-lg border text-left flex items-center justify-between transition-colors ${
                     selectedTools.includes(tool.id)
-                      ? 'bg-indigo-600/20 border-indigo-500/40 text-white'
-                      : 'bg-black/30 border-white/[0.06] text-slate-400 hover:text-slate-300'
+                      ? 'bg-white/[0.1] border-white/20 text-white font-medium'
+                      : 'bg-[#18181b] border-white/[0.04] text-neutral-400 hover:text-white'
                   }`}
                 >
                   <span className="font-mono text-[11px]">{tool.name}</span>
-                  {selectedTools.includes(tool.id) && <Check className="w-3.5 h-3.5 text-indigo-400" />}
+                  {selectedTools.includes(tool.id) && <Check className="w-3.5 h-3.5 text-white" />}
                 </button>
               ))}
             </div>
@@ -188,13 +182,13 @@ export const AgentModal: React.FC<AgentModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-2 rounded-lg text-slate-400 hover:text-white"
+              className="px-3 py-2 rounded-lg text-neutral-400 hover:text-white"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition-colors shadow-lg shadow-emerald-900/30"
+              className="px-4 py-2 rounded-lg bg-white hover:bg-neutral-200 text-black font-semibold transition-colors shadow-sm"
             >
               Create Coworker
             </button>

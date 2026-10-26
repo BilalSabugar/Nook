@@ -416,7 +416,7 @@ export default function NookApp() {
   const currentSpace = spaces.find((s) => s.id === activeSpaceId) || spaces[0];
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#070b12] text-slate-100 font-sans">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#0a0a0a] text-zinc-100 font-sans antialiased selection:bg-white selection:text-black">
       {/* Primary Sidebar */}
       <Sidebar
         spaces={spaces}

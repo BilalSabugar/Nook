@@ -22,13 +22,13 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
       if (inCodeBlock) {
         // End code block
         renderedElements.push(
-          <div key={`code-${i}`} className="my-4 rounded-xl bg-black/60 border border-white/[0.1] overflow-hidden font-mono text-xs">
+          <div key={`code-${i}`} className="my-4 rounded-xl bg-[#0a0a0a] border border-white/[0.1] overflow-hidden font-mono text-xs">
             {codeBlockLang && (
-              <div className="px-4 py-1.5 bg-white/[0.05] border-b border-white/[0.08] text-slate-400 text-[10px] uppercase font-semibold">
+              <div className="px-4 py-1.5 bg-white/[0.04] border-b border-white/[0.06] text-neutral-400 text-[10px] uppercase font-semibold">
                 {codeBlockLang}
               </div>
             )}
-            <pre className="p-4 text-emerald-300 overflow-x-auto whitespace-pre leading-relaxed">
+            <pre className="p-4 text-neutral-200 overflow-x-auto whitespace-pre leading-relaxed">
               {codeBlockContent.join('\n')}
             </pre>
           </div>
@@ -67,7 +67,7 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
     }
     if (line.startsWith('### ')) {
       renderedElements.push(
-        <h3 key={i} className="text-lg font-semibold text-slate-100 tracking-tight mt-4 mb-2">
+        <h3 key={i} className="text-lg font-semibold text-neutral-100 tracking-tight mt-4 mb-2">
           {line.slice(4)}
         </h3>
       );
@@ -77,7 +77,7 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
     // Blockquote
     if (line.startsWith('> ')) {
       renderedElements.push(
-        <blockquote key={i} className="my-3 pl-4 border-l-2 border-indigo-500 bg-indigo-500/5 py-1.5 pr-3 rounded-r-lg text-slate-300 italic text-sm">
+        <blockquote key={i} className="my-3 pl-4 border-l-2 border-white/40 bg-white/[0.03] py-1.5 pr-3 rounded-r-lg text-neutral-300 italic text-sm">
           {line.slice(2)}
         </blockquote>
       );
@@ -87,8 +87,8 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
     // Task Checklist
     if (line.trim().startsWith('- [ ] ')) {
       renderedElements.push(
-        <div key={i} className="flex items-center gap-2.5 my-1.5 text-sm text-slate-300">
-          <input type="checkbox" readOnly checked={false} className="rounded accent-indigo-500 w-4 h-4 cursor-pointer" />
+        <div key={i} className="flex items-center gap-2.5 my-1.5 text-sm text-neutral-300">
+          <input type="checkbox" readOnly checked={false} className="rounded accent-white w-4 h-4 cursor-pointer" />
           <span>{line.trim().slice(6)}</span>
         </div>
       );
@@ -96,8 +96,8 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
     }
     if (line.trim().startsWith('- [x] ') || line.trim().startsWith('- [X] ')) {
       renderedElements.push(
-        <div key={i} className="flex items-center gap-2.5 my-1.5 text-sm text-slate-400 line-through">
-          <input type="checkbox" readOnly checked={true} className="rounded accent-indigo-500 w-4 h-4" />
+        <div key={i} className="flex items-center gap-2.5 my-1.5 text-sm text-neutral-400 line-through">
+          <input type="checkbox" readOnly checked={true} className="rounded accent-white w-4 h-4" />
           <span>{line.trim().slice(6)}</span>
         </div>
       );
@@ -107,8 +107,8 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
     // Bullet item
     if (line.trim().startsWith('- ') || line.trim().startsWith('* ')) {
       renderedElements.push(
-        <div key={i} className="flex items-start gap-2.5 my-1 pl-2 text-sm text-slate-300">
-          <span className="text-indigo-400 mt-1">●</span>
+        <div key={i} className="flex items-start gap-2.5 my-1 pl-2 text-sm text-neutral-300">
+          <span className="text-neutral-500 mt-1">●</span>
           <span>{line.trim().slice(2)}</span>
         </div>
       );
@@ -129,14 +129,14 @@ export const MarkdownViewer: React.FC<MarkdownViewerProps> = ({ content }) => {
 
     // Standard paragraph with inline formatting
     renderedElements.push(
-      <p key={i} className="text-sm sm:text-base leading-relaxed text-slate-300 my-1.5">
+      <p key={i} className="text-sm sm:text-base leading-relaxed text-neutral-300 my-1.5">
         {line}
       </p>
     );
   }
 
   return (
-    <div className="space-y-1 prose prose-invert max-w-none text-slate-200">
+    <div className="space-y-1 prose prose-invert max-w-none text-neutral-200 font-sans">
       {renderedElements}
     </div>
   );

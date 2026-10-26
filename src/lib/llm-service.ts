@@ -30,90 +30,68 @@ export async function executeAgentTurn({
 }): Promise<AgentExecutionResponse> {
   const lowerMsg = userMessage.toLowerCase();
 
-  // If user configured real Gemini API Key
-  if (settings.provider === 'gemini' && settings.geminiApiKey) {
+  // Try calling the server-side API router first (handles server .env keys and proxies safely)
+  if (settings.provider !== 'simulation') {
     try {
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${settings.geminiApiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: `${agent.systemPrompt}\nYou have access to an agent computer (browser, bash terminal, files). When proposing to create a page or run a dangerous command, request review.` }]
-            },
-            contents: [
-              ...history.slice(-6).map((m) => ({
-                role: m.sender === 'user' ? 'user' : 'model',
-                parts: [{ text: m.content }],
-              })),
-              { role: 'user', parts: [{ text: userMessage }] }
-            ],
-          }),
-        }
-      );
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated.';
-        return {
-          reply: text,
-          thoughtProcess: ['Invoked Gemini 1.5 Flash with agent context', 'Evaluated instructions and generated response'],
-        };
-      }
-    } catch (e) {
-      console.error('Gemini API call failed, falling back to agent engine', e);
-    }
-  }
-
-  // If user configured OpenAI API Key
-  if (settings.provider === 'openai' && settings.openaiApiKey) {
-    try {
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const serverRes = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${settings.openaiApiKey}`,
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: settings.model || 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: agent.systemPrompt },
-            ...history.slice(-6).map((m) => ({
-              role: m.sender === 'user' ? 'user' : 'assistant',
-              content: m.content,
-            })),
-            { role: 'user', content: userMessage },
-          ],
+          agent,
+          userMessage,
+          history,
+          settings,
         }),
       });
-      if (response.ok) {
-        const data = await response.json();
-        const text = data.choices?.[0]?.message?.content || 'No response generated.';
-        return {
-          reply: text,
-          thoughtProcess: ['Invoked OpenAI model', 'Processed context and returned output'],
-        };
+
+      if (serverRes.ok) {
+        const data = await serverRes.json();
+        if (data.reply) {
+          return {
+            reply: data.reply,
+            thoughtProcess: data.thoughtProcess || [`Dispatched to ${settings.provider} router`],
+          };
+        }
       }
-    } catch (e) {
-      console.error('OpenAI call failed, falling back to agent engine', e);
+    } catch (err) {
+      console.warn('Server chat route bypassed, proceeding with agent engine', err);
     }
   }
 
   // Autonomous Specialist Simulated Engine
   // Delivers high-fidelity OpenDots coworker experience with thoughts, tools, computer state updates, and review cards
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  await new Promise((resolve) => setTimeout(resolve, 600));
 
-  // Scenario 1: User asks to browse or search
-  if (lowerMsg.includes('browse') || lowerMsg.includes('search') || lowerMsg.includes('visit') || lowerMsg.includes('http') || lowerMsg.includes('github')) {
-    const targetUrl = lowerMsg.includes('github')
-      ? 'https://github.com/CopilotKit/OpenDots'
-      : lowerMsg.includes('docs')
-      ? 'https://docs.copilotkit.ai'
-      : 'https://news.ycombinator.com';
+  // Scenario 1: User asks to browse or search or visit any URL
+  if (lowerMsg.includes('browse') || lowerMsg.includes('search') || lowerMsg.includes('visit') || lowerMsg.includes('http') || lowerMsg.includes('github') || lowerMsg.includes('url')) {
+    let targetUrl = 'https://github.com/CopilotKit/OpenDots';
+    const urlMatch = userMessage.match(/https?:\/\/[^\s]+/i);
+    if (urlMatch) {
+      targetUrl = urlMatch[0];
+    } else if (lowerMsg.includes('docs')) {
+      targetUrl = 'https://docs.copilotkit.ai';
+    } else if (lowerMsg.includes('hackernews') || lowerMsg.includes('news')) {
+      targetUrl = 'https://news.ycombinator.com';
+    }
 
-    const pageTitle = lowerMsg.includes('github')
-      ? 'GitHub - CopilotKit/OpenDots: Always-on AI coworkers'
-      : 'Documentation & Architecture Overview';
+    let pageTitle = `Snapshot: ${targetUrl}`;
+    let snippet = 'DOM content extracted by agent computer supervisor.';
+
+    // Try fetching real web content via /api/sandbox/browse
+    try {
+      const browseRes = await fetch('/api/sandbox/browse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: targetUrl }),
+      });
+      if (browseRes.ok) {
+        const browseData = await browseRes.json();
+        pageTitle = browseData.title || pageTitle;
+        snippet = browseData.textContent?.slice(0, 300) || snippet;
+      }
+    } catch (err) {
+      console.warn('Browse API call fallback', err);
+    }
 
     const newActivity = {
       id: `act-${Date.now()}`,
@@ -123,18 +101,18 @@ export async function executeAgentTurn({
     };
 
     return {
-      reply: `I navigated to **${targetUrl}** on my computer browser and extracted the page contents.\n\nThe service is active and I have synchronized the DOM snapshot to my workspace files. Check out my **Computer** tab to see the live view!`,
+      reply: `I navigated to **${targetUrl}** on my computer browser and extracted the page structure:\n\n> **${pageTitle}**\n> ${snippet}...\n\nCheck out my **Computer** tab to inspect the rendered page and files!`,
       thoughtProcess: [
         `Received navigation request for ${targetUrl}`,
         'Spinning up headless Chromium session on agent computer',
-        `Navigated to ${targetUrl}`,
-        'Extracted primary headers, documentation, and metadata',
+        `Navigated to ${targetUrl} (HTTP 200 OK)`,
+        'Extracted primary headers, metadata, and body text',
       ],
       toolCall: {
         toolName: 'browse_url',
         status: 'completed',
         input: { url: targetUrl },
-        output: `Rendered ${pageTitle} (HTTP 200 OK). Parsed 4,200 bytes.`,
+        output: `Rendered "${pageTitle}". Extracted content and saved DOM snapshot to /workspace.`,
       },
       updatedComputerState: {
         url: targetUrl,
@@ -153,12 +131,12 @@ export async function executeAgentTurn({
       : lowerMsg.includes('build')
       ? 'node ./node_modules/next/dist/bin/next build'
       : lowerMsg.includes('docker')
-      ? 'docker status'
+      ? 'docker ps'
       : 'ls -la /workspace';
 
     // Generates an Approve & Run Review Card because running shell commands requires human approval!
     return {
-      reply: `I have prepared the terminal command \`${commandToRun}\` for execution in my isolated sandbox.\n\nBecause this is a mutating system action, please review and approve it below:`,
+      reply: `I have prepared the terminal command \`${commandToRun}\` for execution in my isolated container sandbox.\n\nBecause this is a mutating system action, please review and approve it below:`,
       thoughtProcess: [
         `Identified terminal command request: ${commandToRun}`,
         'Safety check: Verifying command parameters and sandbox permissions',
@@ -170,7 +148,7 @@ export async function executeAgentTurn({
         agentName: agent.name,
         type: 'run_command',
         title: `Execute Shell Command: \`${commandToRun}\``,
-        description: `${agent.name} is requesting permission to execute a bash command in the isolated container.`,
+        description: `${agent.name} is requesting permission to execute a bash command in the isolated container sandbox.`,
         payload: { command: commandToRun },
         status: 'pending',
         createdAt: new Date().toISOString(),
@@ -226,6 +204,21 @@ This document captures our current objectives and technical specs. It was genera
         createdAt: new Date().toISOString(),
       },
     };
+  }
+
+  // Multi-Agent mentions handler (e.g. "@Quill draft a spec" or "@Cipher test")
+  if (userMessage.includes('@')) {
+    const mentionMatch = userMessage.match(/@([a-zA-Z0-9_-]+)/);
+    if (mentionMatch) {
+      const mentionedAgentName = mentionMatch[1];
+      return {
+        reply: `I noticed you tagged **@${mentionedAgentName}**. I will coordinate our team context with them so we can tackle this task collaboratively!`,
+        thoughtProcess: [
+          `Detected multi-agent coworker mention: @${mentionedAgentName}`,
+          'Sharing active thread context and tool outputs with coworker',
+        ],
+      };
+    }
   }
 
   // Default intelligent specialist reply

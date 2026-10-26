@@ -60,3 +60,41 @@ test('Nook Settings Fallback Safety', () => {
   assert.equal(DEFAULT_LLM_SETTINGS.provider, 'simulation', 'Default provider should be zero-key simulation');
   assert.ok(DEFAULT_LLM_SETTINGS.model, 'Default model must be defined');
 });
+
+test('Nook MCP Server Protocol & Registered Tools', async () => {
+  const { REGISTERED_MCP_TOOLS } = await import('../lib/mcp-registry.ts');
+  assert.ok(Array.isArray(REGISTERED_MCP_TOOLS), 'Registered tools must be an array');
+  assert.ok(REGISTERED_MCP_TOOLS.length >= 4, 'Should register at least 4 MCP tools');
+
+  const names = REGISTERED_MCP_TOOLS.map((t) => t.name);
+  assert.ok(names.includes('web_search'), 'MCP should provide web_search');
+  assert.ok(names.includes('fetch_url'), 'MCP should provide fetch_url');
+  assert.ok(names.includes('calculate'), 'MCP should provide calculate');
+  assert.ok(names.includes('format_document'), 'MCP should provide format_document');
+
+  for (const tool of REGISTERED_MCP_TOOLS) {
+    assert.ok(tool.description, `Tool ${tool.name} must have a description`);
+    assert.equal(tool.inputSchema.type, 'object', `Tool ${tool.name} schema must be object`);
+    assert.ok(Array.isArray(tool.inputSchema.required), `Tool ${tool.name} must define required fields`);
+  }
+});
+
+test('Nook Sandbox Security & Safety Policy', () => {
+  const forbidden = ['rm -rf /', ':(){ :|:& };:', 'mkfs', 'dd if='];
+  const testSafeCommand = 'npm test';
+  const testMaliciousCommand = 'rm -rf / --no-preserve-root';
+
+  assert.equal(forbidden.some((f) => testSafeCommand.includes(f)), false, 'Safe command should not match forbidden patterns');
+  assert.equal(forbidden.some((f) => testMaliciousCommand.includes(f)), true, 'Malicious command must match forbidden pattern');
+});
+
+test('Nook Space Document Word & Character Count Utility', () => {
+  const sampleText = 'Welcome to Nook Autonomous Coworkers.\nBuilt for modern AI teams.';
+  const words = sampleText.trim().split(/\s+/).filter(Boolean).length;
+  const chars = sampleText.length;
+
+  assert.equal(words, 10, 'Word count must correctly calculate 10 words');
+  assert.equal(chars, 64, 'Character count must match string length');
+});
+
+

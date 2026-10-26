@@ -32,6 +32,7 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
   const [isExpanded, setIsExpanded] = useState(true);
   const [declineReason, setDeclineReason] = useState('');
   const [showDeclineInput, setShowDeclineInput] = useState(false);
+  const [previewTab, setPreviewTab] = useState<'content' | 'diff'>('content');
 
   const handleApprove = () => {
     try {
@@ -50,6 +51,13 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
     onDecline(review.id, declineReason);
     setShowDeclineInput(false);
   };
+
+  const quickDeclineSuggestions = [
+    'Add more technical specifications',
+    'Shorten overview section',
+    'Include code snippets',
+    'Verify command parameters',
+  ];
 
   return (
     <div className={`mt-3 mb-2 rounded-xl border transition-all duration-200 overflow-hidden shadow-lg ${
@@ -105,14 +113,53 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
         <div className="p-3.5 space-y-3">
           <p className="text-xs text-slate-300 leading-relaxed">{review.description}</p>
 
-          {/* Page Save Preview */}
+          {/* Page Save Preview & Diff Toggle */}
           {review.type === 'save_page' && review.payload.pageContent && (
-            <div className="rounded-lg bg-black/40 border border-white/[0.08] p-3 text-xs font-mono max-h-52 overflow-y-auto scrollbar-thin text-slate-300">
-              <div className="text-[11px] font-sans font-bold text-indigo-400 mb-1 flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5" />
-                Proposed Page Title: {review.payload.pageTitle}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[11px] font-medium text-indigo-400 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Target: {review.payload.pageTitle}
+                </span>
+
+                <div className="flex items-center bg-black/40 p-0.5 rounded-md border border-white/[0.06] text-[10px]">
+                  <button
+                    onClick={() => setPreviewTab('content')}
+                    className={`px-2 py-0.5 rounded ${
+                      previewTab === 'content'
+                        ? 'bg-white/[0.12] text-white font-medium'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    Draft View
+                  </button>
+                  <button
+                    onClick={() => setPreviewTab('diff')}
+                    className={`px-2 py-0.5 rounded ${
+                      previewTab === 'diff'
+                        ? 'bg-emerald-500/20 text-emerald-300 font-medium'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    + Diff View
+                  </button>
+                </div>
               </div>
-              <pre className="whitespace-pre-wrap leading-relaxed">{review.payload.pageContent}</pre>
+
+              <div className="rounded-lg bg-black/40 border border-white/[0.08] p-3 text-xs font-mono max-h-56 overflow-y-auto scrollbar-thin text-slate-300">
+                {previewTab === 'content' ? (
+                  <pre className="whitespace-pre-wrap leading-relaxed">{review.payload.pageContent}</pre>
+                ) : (
+                  <div className="space-y-0.5">
+                    {review.payload.pageContent.split('\n').map((line, lIdx) => (
+                      <div key={lIdx} className="bg-emerald-950/20 text-emerald-300 pl-2 py-0.5 border-l-2 border-emerald-500/40">
+                        <span className="text-emerald-500 select-none mr-2">+</span>
+                        <span>{line}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -133,6 +180,20 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
             <div>
               {showDeclineInput ? (
                 <div className="space-y-2 mt-2 pt-2 border-t border-white/[0.08]">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] text-slate-400">Quick feedback:</span>
+                    {quickDeclineSuggestions.map((sug, sIdx) => (
+                      <button
+                        key={sIdx}
+                        type="button"
+                        onClick={() => setDeclineReason(sug)}
+                        className="px-2 py-0.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] text-[10px] text-slate-300 hover:text-white border border-white/[0.06]"
+                      >
+                        {sug}
+                      </button>
+                    ))}
+                  </div>
+
                   <input
                     type="text"
                     value={declineReason}

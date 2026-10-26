@@ -25,8 +25,11 @@ import {
   ExternalLink,
   Download,
   Copy,
-  Trash2
+  Trash2,
+  SlidersHorizontal
 } from 'lucide-react';
+import { MarkdownViewer } from '@/components/spaces/MarkdownViewer';
+import { SlashCommandPalette } from '@/components/spaces/SlashCommandPalette';
 
 interface SpaceWorkspaceProps {
   space: Space;
@@ -51,7 +54,8 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 }) => {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [searchQuery, setSearchQuery] = useState('');
-  const [editorMode, setEditorMode] = useState<'visual' | 'markdown'>('visual');
+  const [editorMode, setEditorMode] = useState<'visual' | 'preview' | 'markdown'>('visual');
+  const [isSlashPaletteOpen, setIsSlashPaletteOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showPageChatDrawer, setShowPageChatDrawer] = useState(false);
   const [pageChatPrompt, setPageChatPrompt] = useState('');
@@ -151,8 +155,30 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Document Toolbar */}
             <div className="px-6 py-2 bg-[#0c1017] border-b border-white/[0.08] flex items-center justify-between text-xs">
-              {/* Formatting Helpers */}
-              <div className="flex items-center gap-1">
+              {/* Formatting Helpers & Slash Palette Trigger */}
+              <div className="flex items-center gap-1 relative">
+                <button
+                  onClick={() => setIsSlashPaletteOpen(!isSlashPaletteOpen)}
+                  title="Slash Commands Menu (/)"
+                  className={`px-2 py-1 rounded flex items-center gap-1 font-mono text-xs border transition-colors ${
+                    isSlashPaletteOpen
+                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
+                      : 'bg-white/[0.05] hover:bg-white/[0.1] text-indigo-400 border-white/[0.08]'
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>/ Blocks</span>
+                </button>
+
+                <SlashCommandPalette
+                  isOpen={isSlashPaletteOpen}
+                  onClose={() => setIsSlashPaletteOpen(false)}
+                  onSelectCommand={insertMarkdownSnippet}
+                  onTriggerAgent={() => setShowPageChatDrawer(true)}
+                />
+
+                <div className="h-4 w-[1px] bg-white/[0.1] mx-1" />
+
                 <button
                   onClick={() => insertMarkdownSnippet('## Heading 2')}
                   title="Insert Heading"
@@ -209,6 +235,17 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     }`}
                   >
                     Editor
+                  </button>
+                  <button
+                    onClick={() => setEditorMode('preview')}
+                    className={`px-2 py-0.5 rounded text-[11px] flex items-center gap-1 ${
+                      editorMode === 'preview'
+                        ? 'bg-white/[0.12] text-white font-medium'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Eye className="w-3 h-3 text-indigo-400" />
+                    <span>Preview</span>
                   </button>
                   <button
                     onClick={() => setEditorMode('markdown')}
@@ -304,13 +341,17 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 </div>
               </div>
 
-              {/* Visual or Raw Markdown Editor */}
-              {editorMode === 'visual' ? (
+              {/* Visual, Preview, or Raw Markdown Mode */}
+              {editorMode === 'preview' ? (
+                <div className="p-6 rounded-2xl bg-black/40 border border-white/[0.08] min-h-[500px] shadow-inner">
+                  <MarkdownViewer content={activePage.content} />
+                </div>
+              ) : editorMode === 'visual' ? (
                 <textarea
                   value={activePage.content}
                   onChange={(e) => handleContentChange(e.target.value)}
                   className="w-full min-h-[500px] bg-transparent border-none outline-none resize-none font-sans text-sm sm:text-base leading-relaxed text-slate-200 placeholder:text-slate-600"
-                  placeholder="Type notes or markdown here..."
+                  placeholder="Type notes or markdown here... Tip: Click [/ Blocks] above to insert headings, checklists, and code."
                 />
               ) : (
                 <textarea

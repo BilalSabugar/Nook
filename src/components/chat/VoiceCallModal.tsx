@@ -114,20 +114,20 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
   // Full Call Screen Overlay
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="w-full max-w-lg rounded-3xl bg-[#0b1019] border border-white/[0.12] p-8 shadow-2xl flex flex-col items-center justify-between min-h-[500px] text-slate-200 relative overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+      <div className="w-full max-w-lg rounded-3xl bg-[#0d0d0d] border border-white/[0.12] p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden">
         {/* Top Header */}
         <div className="w-full flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span className="text-xs font-mono text-emerald-400 uppercase tracking-wider font-semibold">
-              Live Voice Call
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="text-xs font-mono text-neutral-300 uppercase tracking-wider font-medium">
+              Voice Session
             </span>
           </div>
 
           <button
             onClick={() => setIsMinimized(true)}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+            className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors"
             title="Minimize to Picture-in-Picture"
           >
             <Minimize2 className="w-4 h-4" />
@@ -138,24 +138,24 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
         <div className="flex flex-col items-center space-y-6 my-auto">
           {/* Animated Glow Avatar */}
           <div className="relative">
-            <div className={`absolute -inset-4 rounded-full bg-indigo-500/20 blur-xl transition-all duration-700 ${
-              agentSpeaking ? 'scale-125 opacity-100' : 'scale-95 opacity-30'
+            <div className={`absolute -inset-4 rounded-full bg-white/10 blur-xl transition-all duration-700 ${
+              agentSpeaking ? 'scale-125 opacity-100' : 'scale-95 opacity-20'
             }`} />
-            <div className="w-28 h-28 rounded-full bg-[#131b28] border-2 border-white/[0.15] flex items-center justify-center text-5xl shadow-2xl relative z-10">
+            <div className="w-24 h-24 rounded-full bg-[#171717] border border-white/[0.15] flex items-center justify-center text-4xl shadow-2xl relative z-10">
               {agent.avatar}
             </div>
           </div>
 
           <div className="text-center space-y-1">
             <h3 className="text-xl font-bold text-white tracking-tight">{agent.name}</h3>
-            <p className="text-xs text-slate-400">{agent.role}</p>
-            <p className="text-sm font-mono text-indigo-400 font-semibold pt-1">
+            <p className="text-xs text-neutral-400">{agent.role}</p>
+            <p className="text-sm font-mono text-neutral-300 font-medium pt-1">
               {formatTime(callDuration)}
             </p>
           </div>
 
-          {/* Interactive Audio Visualizer Waves */}
-          <div className="flex items-center gap-1.5 h-12 px-4 py-2 bg-black/40 rounded-2xl border border-white/[0.08]">
+          {/* Interactive Audio Visualizer Waves — Minimalist White */}
+          <div className="flex items-center gap-1.5 h-12 px-4 py-2 bg-[#141414] rounded-2xl border border-white/[0.08]">
             {[40, 65, 30, 85, 55, 95, 70, 45, 90, 60, 35, 75].map((height, idx) => (
               <span
                 key={idx}
@@ -164,7 +164,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
                   transition: 'height 0.2s ease-in-out',
                 }}
                 className={`w-1 rounded-full ${
-                  agentSpeaking ? 'bg-indigo-400' : 'bg-slate-600'
+                  agentSpeaking ? 'bg-white' : 'bg-neutral-600'
                 }`}
               />
             ))}
@@ -172,10 +172,10 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
           {/* Real-time Subtitles / Live Captions */}
           <div className="max-w-xs text-center px-4 py-2 rounded-xl bg-white/[0.03] border border-white/[0.06]">
-            <p className="text-xs text-slate-300 italic">
+            <p className="text-xs text-neutral-300 italic">
               {agentSpeaking
-                ? `"${agent.name}: I have synchronized your recent Space documents and my computer is ready."`
-                : '"Listening for your voice input..."'}
+                ? `"${agent.name}: I am connected to your workspace and ready."`
+                : '"Listening..."'}
             </p>
           </div>
         </div>
@@ -185,36 +185,36 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           {/* Mute Mic */}
           <button
             onClick={() => setIsMuted(!isMuted)}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
+            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all ${
               isMuted
-                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                ? 'bg-white/20 text-white border border-white/40'
                 : 'bg-white/[0.08] text-white hover:bg-white/[0.15] border border-white/[0.1]'
             }`}
             title={isMuted ? 'Unmute Microphone' : 'Mute Microphone'}
           >
-            {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </button>
 
-          {/* End Call */}
+          {/* End Call — Clean White Button */}
           <button
             onClick={onEndCall}
-            className="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center shadow-lg shadow-rose-900/40 hover:scale-105 active:scale-95 transition-all"
+            className="w-12 h-12 rounded-full bg-white hover:bg-neutral-200 text-black flex items-center justify-center shadow-lg transition-all active:scale-95"
             title="End Call"
           >
-            <PhoneOff className="w-6 h-6" />
+            <PhoneOff className="w-5 h-5" />
           </button>
 
           {/* Mute Speaker */}
           <button
             onClick={() => setIsSpeakerMuted(!isSpeakerMuted)}
-            className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${
+            className={`w-11 h-11 rounded-full flex items-center justify-center transition-all ${
               isSpeakerMuted
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                ? 'bg-white/20 text-white border border-white/40'
                 : 'bg-white/[0.08] text-white hover:bg-white/[0.15] border border-white/[0.1]'
             }`}
             title={isSpeakerMuted ? 'Unmute Speaker' : 'Mute Speaker'}
           >
-            {isSpeakerMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+            {isSpeakerMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
         </div>
       </div>

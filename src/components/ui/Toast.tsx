@@ -61,12 +61,8 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       {/* Floating Toasts Viewport */}
       <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
         {toasts.map((t) => {
-          const typeStyles = {
-            success: 'bg-[#0f172a]/95 border-emerald-500/40 text-emerald-300 shadow-emerald-950/40',
-            info: 'bg-[#0f172a]/95 border-indigo-500/40 text-indigo-300 shadow-indigo-950/40',
-            warning: 'bg-[#0f172a]/95 border-amber-500/40 text-amber-300 shadow-amber-950/40',
-            error: 'bg-[#0f172a]/95 border-rose-500/40 text-rose-300 shadow-rose-950/40',
-          }[t.type];
+          const typeStyles = 'bg-[#18181b] border border-white/[0.12] text-white shadow-2xl';
+
 
           const Icon = {
             success: CheckCircle2,

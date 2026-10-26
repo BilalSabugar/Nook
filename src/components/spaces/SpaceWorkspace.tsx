@@ -99,42 +99,42 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-screen bg-[#070b12] text-slate-200 overflow-hidden">
+    <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d] text-neutral-200 overflow-hidden">
       {/* Top Header Bar */}
-      <div className="h-16 px-6 border-b border-white/[0.08] bg-[#0c1017] flex items-center justify-between shrink-0">
+      <div className="h-14 px-6 border-b border-white/[0.08] bg-[#0d0d0d] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           {activePage && (
             <button
               onClick={() => onSelectPage(null)}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors mr-1"
+              className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors mr-1"
               title="Back to Space Library"
             >
               <ArrowLeft className="w-4 h-4" />
             </button>
           )}
 
-          <span className="text-2xl">{space.icon}</span>
+          <span className="text-xl">{space.icon}</span>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="font-semibold text-white text-base tracking-tight">{space.name}</h2>
-              <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+              <h2 className="font-semibold text-white text-sm tracking-tight">{space.name}</h2>
+              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-white/[0.06] text-neutral-300 border border-white/[0.08]">
                 {space.pages.length} Pages
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">{space.description}</p>
+            <p className="text-[11px] text-neutral-500 mt-0.5 leading-none">{space.description}</p>
           </div>
         </div>
 
         {/* Assigned Coworkers & Actions */}
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 bg-white/[0.04] px-2.5 py-1 rounded-lg border border-white/[0.08]">
-            <span className="text-[11px] text-slate-400">Collaborators:</span>
+          <div className="flex items-center gap-1.5 bg-[#141414] px-2.5 py-1 rounded-lg border border-white/[0.08]">
+            <span className="text-[11px] text-neutral-400">Team:</span>
             <div className="flex -space-x-1.5">
               {assignedAgents.map((agent) => (
                 <span
                   key={agent.id}
                   title={`${agent.name} (${agent.role})`}
-                  className="w-5 h-5 rounded-full bg-[#141d2e] border border-white/[0.1] flex items-center justify-center text-xs cursor-pointer hover:scale-110 transition-transform"
+                  className="w-5 h-5 rounded-full bg-[#1e1e1e] border border-white/[0.1] flex items-center justify-center text-xs cursor-pointer hover:scale-110 transition-transform"
                 >
                   {agent.avatar}
                 </span>
@@ -144,7 +144,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
 
           <button
             onClick={() => onCreatePage(space.id)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition-all hover:scale-[1.02]"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-neutral-200 text-black text-xs font-semibold shadow-sm transition-all"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>New Page</span>
@@ -158,7 +158,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
         <div className="flex-1 flex overflow-hidden">
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Document Toolbar */}
-            <div className="px-6 py-2 bg-[#0c1017] border-b border-white/[0.08] flex items-center justify-between text-xs">
+            <div className="px-6 py-2 bg-[#0d0d0d] border-b border-white/[0.08] flex items-center justify-between text-xs">
               {/* Formatting Helpers & Slash Palette Trigger */}
               <div className="flex items-center gap-1 relative">
                 <button
@@ -166,8 +166,8 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                   title="Slash Commands Menu (/)"
                   className={`px-2 py-1 rounded flex items-center gap-1 font-mono text-xs border transition-colors ${
                     isSlashPaletteOpen
-                      ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
-                      : 'bg-white/[0.05] hover:bg-white/[0.1] text-indigo-400 border-white/[0.08]'
+                      ? 'bg-white text-black border-white shadow-sm'
+                      : 'bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 border-white/[0.08]'
                   }`}
                 >
                   <Sparkles className="w-3.5 h-3.5" />
@@ -245,10 +245,10 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     className={`px-2 py-0.5 rounded text-[11px] flex items-center gap-1 ${
                       editorMode === 'preview'
                         ? 'bg-white/[0.12] text-white font-medium'
-                        : 'text-slate-400 hover:text-white'
+                        : 'text-neutral-400 hover:text-white'
                     }`}
                   >
-                    <Eye className="w-3 h-3 text-indigo-400" />
+                    <Eye className="w-3 h-3 text-neutral-300" />
                     <span>Preview</span>
                   </button>
                   <button
@@ -256,7 +256,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     className={`px-2 py-0.5 rounded text-[11px] ${
                       editorMode === 'markdown'
                         ? 'bg-white/[0.12] text-white font-medium'
-                        : 'text-slate-400 hover:text-white'
+                        : 'text-neutral-400 hover:text-white'
                     }`}
                   >
                     Raw MD
@@ -270,7 +270,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     toast.success('Markdown copied to clipboard', 'Raw document ready to paste into any editor.');
                   }}
                   title="Copy Raw Markdown"
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+                  className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors"
                 >
                   <Copy className="w-3.5 h-3.5" />
                 </button>
@@ -287,7 +287,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     toast.info('Document Downloaded', `Saved as ${activePage.title}.md`);
                   }}
                   title="Download Markdown File"
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors"
+                  className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/[0.06] transition-colors"
                 >
                   <Download className="w-3.5 h-3.5" />
                 </button>
@@ -302,7 +302,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                       }
                     }}
                     title="Delete Document"
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                    className="p-1.5 rounded-lg text-neutral-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
@@ -312,11 +312,11 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                   onClick={() => setShowPageChatDrawer(!showPageChatDrawer)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
                     showPageChatDrawer
-                      ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/30'
-                      : 'bg-white/[0.05] text-slate-300 hover:text-white border-white/[0.08]'
+                      ? 'bg-white/[0.1] text-white border-white/[0.14]'
+                      : 'bg-white/[0.05] text-neutral-300 hover:text-white border-white/[0.08]'
                   }`}
                 >
-                  <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
+                  <MessageSquare className="w-3.5 h-3.5 text-neutral-300" />
                   <span>Ask Coworker</span>
                 </button>
               </div>

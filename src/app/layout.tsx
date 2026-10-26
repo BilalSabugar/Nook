@@ -29,7 +29,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className={`dark ${inter.variable} ${jetbrainsMono.variable}`}>
-      <body className="min-h-screen bg-[#070b12] text-slate-100 antialiased font-sans selection:bg-indigo-500/30 selection:text-indigo-200">
+      <body className="min-h-screen bg-[#0d0d0d] text-neutral-100 antialiased font-sans selection:bg-white/20 selection:text-white">
         <ToastProvider>
           {children}
         </ToastProvider>

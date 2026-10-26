@@ -196,33 +196,33 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-screen bg-[#090d14] text-slate-200 overflow-hidden">
+    <div className="flex-1 flex flex-col h-screen bg-[#0d0d0d] text-neutral-200 overflow-hidden">
       {/* Computer Top Header */}
-      <div className="h-14 px-4 border-b border-white/[0.08] bg-[#0c111a] flex items-center justify-between shrink-0">
+      <div className="h-14 px-4 border-b border-white/[0.08] bg-[#0d0d0d] flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <span className="text-xl">{currentAgent.avatar}</span>
+            <span className="text-lg">{currentAgent.avatar}</span>
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-white text-sm">{currentAgent.name}&apos;s Computer</span>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  Container: {currentAgent.id}
+                <span className="text-[10px] font-mono px-2 py-0.2 rounded-full bg-white/[0.06] text-neutral-300 border border-white/[0.08] flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  sandbox/{currentAgent.id}
                 </span>
               </div>
             </div>
           </div>
 
           {/* Agent Switcher Quick Dropdown */}
-          <div className="flex items-center gap-1 bg-white/[0.04] p-1 rounded-lg border border-white/[0.08] ml-4">
+          <div className="flex items-center gap-1 bg-[#141414] p-1 rounded-lg border border-white/[0.08] ml-4">
             {agents.map((agent) => (
               <button
                 key={agent.id}
                 onClick={() => onSelectAgent(agent.id)}
-                className={`px-2 py-1 rounded text-xs transition-colors flex items-center gap-1.5 ${
+                className={`px-2 py-0.5 rounded text-xs transition-colors flex items-center gap-1.5 ${
                   agent.id === currentAgent.id
-                    ? 'bg-indigo-600 text-white font-medium shadow-sm'
-                    : 'text-slate-400 hover:text-white hover:bg-white/[0.05]'
+                    ? 'bg-white/[0.12] text-white font-medium shadow-sm'
+                    : 'text-neutral-400 hover:text-white hover:bg-white/[0.05]'
                 }`}
               >
                 <span>{agent.avatar}</span>
@@ -235,16 +235,16 @@ export const NookComputer: React.FC<NookComputerProps> = ({
         {/* Tab Switcher & Human Takeover Toggle */}
         <div className="flex items-center gap-3">
           {/* View Tabs */}
-          <div className="flex items-center gap-1 bg-black/40 p-1 rounded-lg border border-white/[0.08]">
+          <div className="flex items-center gap-0.5 bg-[#141414] p-0.5 rounded-lg border border-white/[0.08]">
             <button
               onClick={() => setActiveTab('browser')}
               className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 transition-colors ${
                 activeTab === 'browser'
                   ? 'bg-white/[0.12] text-white font-medium'
-                  : 'text-slate-400 hover:text-slate-200'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
-              <Globe className="w-3.5 h-3.5 text-blue-400" />
+              <Globe className="w-3.5 h-3.5 text-neutral-300" />
               Browser
             </button>
 
@@ -253,10 +253,10 @@ export const NookComputer: React.FC<NookComputerProps> = ({
               className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 transition-colors ${
                 activeTab === 'terminal'
                   ? 'bg-white/[0.12] text-white font-medium'
-                  : 'text-slate-400 hover:text-slate-200'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
-              <TerminalIcon className="w-3.5 h-3.5 text-amber-400" />
+              <TerminalIcon className="w-3.5 h-3.5 text-neutral-300" />
               Terminal
             </button>
 
@@ -265,10 +265,10 @@ export const NookComputer: React.FC<NookComputerProps> = ({
               className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 transition-colors ${
                 activeTab === 'files'
                   ? 'bg-white/[0.12] text-white font-medium'
-                  : 'text-slate-400 hover:text-slate-200'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
-              <FolderTree className="w-3.5 h-3.5 text-emerald-400" />
+              <FolderTree className="w-3.5 h-3.5 text-neutral-300" />
               Files ({currentState.files.length})
             </button>
 
@@ -277,10 +277,10 @@ export const NookComputer: React.FC<NookComputerProps> = ({
               className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 transition-colors ${
                 activeTab === 'activity'
                   ? 'bg-white/[0.12] text-white font-medium'
-                  : 'text-slate-400 hover:text-slate-200'
+                  : 'text-neutral-400 hover:text-neutral-200'
               }`}
             >
-              <Activity className="w-3.5 h-3.5 text-purple-400" />
+              <Activity className="w-3.5 h-3.5 text-neutral-300" />
               Activity
             </button>
           </div>
@@ -288,21 +288,21 @@ export const NookComputer: React.FC<NookComputerProps> = ({
           {/* Takeover Control */}
           <button
             onClick={handleToggleTakeover}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition-all ${
+            className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition-all ${
               currentState.takeoverMode
-                ? 'bg-amber-500/20 border-amber-500/40 text-amber-300 shadow-md shadow-amber-950/30 ring-1 ring-amber-500/30'
-                : 'bg-white/[0.04] border-white/[0.08] text-slate-300 hover:text-white hover:bg-white/[0.08]'
+                ? 'bg-white text-black border-white shadow-sm font-semibold'
+                : 'bg-white/[0.04] border-white/[0.08] text-neutral-300 hover:text-white hover:bg-white/[0.08]'
             }`}
           >
             {currentState.takeoverMode ? (
               <>
-                <UserCheck className="w-3.5 h-3.5 text-amber-400" />
-                <span>Human Takeover Active</span>
+                <UserCheck className="w-3.5 h-3.5 text-black" />
+                <span>Human Takeover</span>
               </>
             ) : (
               <>
-                <Bot className="w-3.5 h-3.5 text-slate-400" />
-                <span>Agent Control (Autonomous)</span>
+                <Bot className="w-3.5 h-3.5 text-neutral-400" />
+                <span>Autonomous</span>
               </>
             )}
           </button>

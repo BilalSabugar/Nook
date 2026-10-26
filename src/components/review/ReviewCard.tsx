@@ -60,21 +60,17 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
   ];
 
   return (
-    <div className={`mt-3 mb-2 rounded-xl border transition-all duration-200 overflow-hidden shadow-lg ${
+    <div className={`mt-3 mb-2 rounded-xl border transition-all duration-200 overflow-hidden shadow-sm ${
       review.status === 'approved'
-        ? 'bg-emerald-950/20 border-emerald-500/30 text-emerald-200'
+        ? 'bg-[#141414] border-white/20 text-neutral-200'
         : review.status === 'declined'
-        ? 'bg-rose-950/20 border-rose-500/30 text-rose-200'
-        : 'bg-[#131b26] border-indigo-500/30 text-slate-200 ring-1 ring-indigo-500/20'
+        ? 'bg-[#141414] border-white/10 text-neutral-400'
+        : 'bg-[#171717] border-white/[0.12] text-neutral-200 shadow-md'
     }`}>
       {/* Header Bar */}
-      <div className="p-3.5 flex items-center justify-between border-b border-white/[0.06] bg-black/20">
+      <div className="p-3.5 flex items-center justify-between border-b border-white/[0.08] bg-black/20">
         <div className="flex items-center gap-2.5">
-          <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
-            review.type === 'save_page'
-              ? 'bg-indigo-500/20 text-indigo-400'
-              : 'bg-amber-500/20 text-amber-400'
-          }`}>
+          <div className="w-7 h-7 rounded-lg bg-white/[0.08] text-neutral-300 flex items-center justify-center shrink-0 border border-white/[0.06]">
             {review.type === 'save_page' ? (
               <FileText className="w-4 h-4" />
             ) : (
@@ -86,17 +82,17 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
               <span className="text-xs font-semibold tracking-wide text-white">
                 Human-in-the-Loop Review
               </span>
-              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase tracking-wider font-bold ${
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded-full uppercase tracking-wider font-medium ${
                 review.status === 'approved'
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  ? 'bg-white/10 text-white border border-white/20'
                   : review.status === 'declined'
-                  ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse'
+                  ? 'bg-white/5 text-neutral-400 border border-white/10'
+                  : 'bg-white text-black font-semibold'
               }`}>
                 {review.status === 'pending' ? 'Needs Approval' : review.status}
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 mt-0.5">{review.title}</p>
+            <p className="text-[11px] text-neutral-400 mt-0.5">{review.title}</p>
           </div>
         </div>
 
@@ -220,15 +216,15 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
                 <div className="flex items-center gap-2.5 pt-1">
                   <button
                     onClick={handleApprove}
-                    className="flex-1 flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-900/40 transition-all hover:scale-[1.01] active:scale-[0.99]"
+                    className="flex-1 flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-white hover:bg-neutral-200 text-black text-xs font-semibold shadow-sm transition-all"
                   >
-                    <CheckCircle2 className="w-4 h-4" />
+                    <CheckCircle2 className="w-4 h-4 text-black" />
                     {review.type === 'save_page' ? 'Approve & Save to Space' : 'Approve & Run in Sandbox'}
                   </button>
 
                   <button
                     onClick={() => setShowDeclineInput(true)}
-                    className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-white/[0.08] hover:border-rose-500/30 text-xs font-medium transition-colors"
+                    className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-neutral-400 hover:text-white border border-white/[0.08] text-xs font-medium transition-colors"
                   >
                     <XCircle className="w-4 h-4" />
                     Decline

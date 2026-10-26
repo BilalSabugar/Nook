@@ -26,7 +26,8 @@ import {
   Download,
   Copy,
   Trash2,
-  SlidersHorizontal
+  SlidersHorizontal,
+  X
 } from 'lucide-react';
 import { MarkdownViewer } from '@/components/spaces/MarkdownViewer';
 import { SlashCommandPalette } from '@/components/spaces/SlashCommandPalette';
@@ -380,9 +381,10 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 </div>
                 <button
                   onClick={() => setShowPageChatDrawer(false)}
-                  className="text-neutral-400 hover:text-white text-xs"
+                  className="p-1 rounded-md hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors"
+                  title="Close drawer"
                 >
-                  ✕
+                  <X className="w-3.5 h-3.5" />
                 </button>
               </div>
 

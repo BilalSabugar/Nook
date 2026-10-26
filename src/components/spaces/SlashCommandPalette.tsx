@@ -11,7 +11,8 @@ import {
   Table, 
   Minus, 
   Bot, 
-  Sparkles 
+  Sparkles,
+  X 
 } from 'lucide-react';
 
 interface SlashCommandPaletteProps {
@@ -81,10 +82,12 @@ export const SlashCommandPalette: React.FC<SlashCommandPaletteProps> = ({
   ];
 
   return (
-    <div className="absolute top-12 left-6 z-40 w-72 rounded-2xl bg-[#141414] border border-white/[0.1] shadow-2xl p-2 space-y-1 text-xs text-neutral-200 animate-in fade-in zoom-in-95 font-sans">
+    <div className="absolute top-12 left-6 z-40 w-72 rounded-2xl glass-card border border-white/[0.12] shadow-2xl p-2 space-y-1 text-xs text-neutral-200 animate-scale-in font-sans">
       <div className="px-2 py-1 text-[10px] uppercase font-semibold text-neutral-400 border-b border-white/[0.06] flex items-center justify-between">
         <span>Insert Block</span>
-        <button onClick={onClose} className="text-neutral-400 hover:text-white">✕</button>
+        <button onClick={onClose} className="p-0.5 rounded hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors">
+          <X className="w-3.5 h-3.5" />
+        </button>
       </div>
 
       <div className="max-h-64 overflow-y-auto space-y-0.5 scrollbar-thin py-1">

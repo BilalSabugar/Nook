@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Agent, AgentRole, MCPTool, Space } from '@/types';
-import { Bot, Monitor, Check } from 'lucide-react';
+import { Bot, Monitor, Check, X } from 'lucide-react';
 
 interface AgentModalProps {
   isOpen: boolean;
@@ -81,7 +81,13 @@ export const AgentModal: React.FC<AgentModalProps> = ({
               <p className="text-xs text-neutral-400">Configure persona, sandbox computer, and tool permissions</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-neutral-400 hover:text-white p-1">✕</button>
+          <button 
+            onClick={onClose} 
+            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors"
+            title="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">

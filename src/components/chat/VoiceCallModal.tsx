@@ -115,7 +115,7 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
   // Full Call Screen Overlay
   return (
-    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in">
+    <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-2xl flex items-center justify-center p-4 animate-fade-in">
       <div className="w-full max-w-lg rounded-3xl glass-card apple-fluid-glow p-8 shadow-2xl flex flex-col items-center justify-between min-h-[480px] text-neutral-200 relative overflow-hidden animate-scale-in">
         {/* Top Header */}
         <div className="w-full flex items-center justify-between">
@@ -153,8 +153,8 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
             </p>
           </div>
 
-          {/* Interactive Audio Visualizer Waves — Minimalist White */}
-          <div className="flex items-center gap-1.5 h-12 px-4 py-2 bg-[#141414] rounded-2xl border border-white/[0.08]">
+          {/* Interactive Audio Visualizer Waves — Minimalist White Glass */}
+          <div className="flex items-center gap-1.5 h-12 px-5 py-2.5 glass-panel rounded-full border border-white/[0.1]">
             {[40, 65, 30, 85, 55, 95, 70, 45, 90, 60, 35, 75].map((height, idx) => (
               <span
                 key={idx}

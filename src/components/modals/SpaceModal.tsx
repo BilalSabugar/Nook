@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { Space, Agent } from '@/types';
-import { FolderKanban, Check } from 'lucide-react';
+import { FolderKanban, Check, X } from 'lucide-react';
 
 interface SpaceModalProps {
   isOpen: boolean;
@@ -69,7 +69,13 @@ export const SpaceModal: React.FC<SpaceModalProps> = ({
               <p className="text-xs text-neutral-400">Organize collaborative documents and knowledge</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-neutral-400 hover:text-white p-1">✕</button>
+          <button 
+            onClick={onClose} 
+            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors"
+            title="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">

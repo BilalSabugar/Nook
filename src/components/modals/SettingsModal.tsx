@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { LLMSettings, LLMProvider } from '@/types';
-import { Settings2, Key, Cpu, Sparkles, Check, Server, Download, RotateCcw } from 'lucide-react';
+import { Settings2, Key, Cpu, Sparkles, Check, Server, Download, RotateCcw, X } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -52,8 +52,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="w-full max-w-lg rounded-2xl bg-[#141414] border border-white/[0.1] p-6 shadow-2xl space-y-5 text-neutral-200 font-sans">
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4 animate-fade-in">
+      <div className="w-full max-w-lg rounded-2xl glass-card border border-white/[0.12] p-6 shadow-2xl space-y-5 text-neutral-200 font-sans animate-scale-in">
         <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-white/[0.08] text-white border border-white/[0.1] flex items-center justify-center">
@@ -64,7 +64,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <p className="text-xs text-neutral-400">Configure LLM models and credentials</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-neutral-400 hover:text-white p-1">✕</button>
+          <button 
+            onClick={onClose} 
+            className="p-1.5 rounded-lg hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors"
+            title="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 text-xs">

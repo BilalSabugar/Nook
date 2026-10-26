@@ -14,7 +14,8 @@ import {
   Database, 
   Sparkles,
   ExternalLink,
-  Play
+  Play,
+  X
 } from 'lucide-react';
 import { useToast } from '@/components/ui/Toast';
 
@@ -197,15 +198,16 @@ export const McpManager: React.FC<McpManagerProps> = ({
 
       {/* Add Custom MCP Server Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-md rounded-2xl bg-[#141414] border border-white/[0.1] p-6 shadow-2xl space-y-4">
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xl flex items-center justify-center p-4 animate-fade-in">
+          <div className="w-full max-w-md rounded-2xl glass-card border border-white/[0.12] p-6 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
-              <h3 className="text-base font-semibold text-white">Connect New MCP Server</h3>
+              <h3 className="text-base font-semibold text-white tracking-tight">Connect New MCP Server</h3>
               <button
                 onClick={() => setShowAddModal(false)}
-                className="text-neutral-400 hover:text-white"
+                className="p-1.5 rounded-lg hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors"
+                title="Close"
               >
-                ✕
+                <X className="w-4 h-4" />
               </button>
             </div>
 

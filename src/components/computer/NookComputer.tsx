@@ -27,6 +27,8 @@ import {
   Tablet,
   Monitor
 } from 'lucide-react';
+import { useToast } from '@/components/ui/Toast';
+
 
 interface NookComputerProps {
   agents: Agent[];
@@ -45,6 +47,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   onUpdateComputerState,
   onExecuteTerminalCommand,
 }) => {
+  const toast = useToast();
   const [activeTab, setActiveTab] = useState<'browser' | 'terminal' | 'files' | 'activity'>('browser');
   const [browserInputUrl, setBrowserInputUrl] = useState('');
   const [terminalInput, setTerminalInput] = useState('');
@@ -55,6 +58,16 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   const [viewportMode, setViewportMode] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [copiedFile, setCopiedFile] = useState(false);
   const [fileSaveSuccess, setFileSaveSuccess] = useState(false);
+
+  const getFileIconColor = (name: string) => {
+    if (name.endsWith('.sh') || name.endsWith('.bash')) return 'text-emerald-400';
+    if (name.endsWith('.py')) return 'text-amber-400';
+    if (name.endsWith('.ts') || name.endsWith('.tsx') || name.endsWith('.js')) return 'text-blue-400';
+    if (name.endsWith('.json')) return 'text-yellow-400';
+    if (name.endsWith('.md')) return 'text-purple-400';
+    return 'text-indigo-400';
+  };
+
 
   const currentAgent = agents.find((a) => a.id === activeAgentId) || agents[0];
   const currentState = computerStates[currentAgent.id] || {
@@ -136,6 +149,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
     });
     setSelectedFile({ ...selectedFile, content: editedFileContent });
     setFileSaveSuccess(true);
+    toast.success('File Saved', `Updated ${selectedFile.name} in /workspace.`);
     setTimeout(() => setFileSaveSuccess(false), 2000);
   };
 
@@ -159,6 +173,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
     setEditedFileContent(newFile.content);
     setNewFileName('');
     setIsCreatingFile(false);
+    toast.success('File Created', `Added ${cleanName} to /workspace.`);
   };
 
   const handleDeleteVirtualFile = (path: string) => {
@@ -166,6 +181,8 @@ export const NookComputer: React.FC<NookComputerProps> = ({
     onUpdateComputerState(currentAgent.id, {
       files: updatedFiles,
     });
+    const filename = path.split('/').pop() || path;
+    toast.warning('File Deleted', `${filename} was removed from /workspace.`);
     if (selectedFile?.path === path) {
       setSelectedFile(null);
     }
@@ -174,6 +191,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   const copyFileContent = (content: string) => {
     navigator.clipboard.writeText(content);
     setCopiedFile(true);
+    toast.info('Copied File Content', 'Raw file content copied to clipboard.');
     setTimeout(() => setCopiedFile(false), 2000);
   };
 
@@ -332,7 +350,30 @@ export const NookComputer: React.FC<NookComputerProps> = ({
               </form>
 
               <div className="flex items-center gap-2 text-xs text-slate-400">
-                <span className="font-mono text-[10px] bg-white/[0.05] px-1.5 py-0.5 rounded">1280x800</span>
+                <div className="flex items-center bg-black/40 p-0.5 rounded-lg border border-white/[0.08]">
+                  <button
+                    onClick={() => setViewportMode('desktop')}
+                    title="Desktop View (1920x1080)"
+                    className={`p-1 rounded ${viewportMode === 'desktop' ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <Monitor className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setViewportMode('tablet')}
+                    title="Tablet View (768px)"
+                    className={`p-1 rounded ${viewportMode === 'tablet' ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <Tablet className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setViewportMode('mobile')}
+                    title="Mobile View (375px)"
+                    className={`p-1 rounded ${viewportMode === 'mobile' ? 'bg-white/[0.12] text-white' : 'text-slate-400 hover:text-white'}`}
+                  >
+                    <Smartphone className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
                 <a
                   href={currentState.url}
                   target="_blank"
@@ -347,7 +388,9 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
             {/* Viewport Render Frame */}
             <div className="flex-1 p-4 overflow-y-auto flex flex-col items-center">
-              <div className="w-full max-w-5xl rounded-xl border border-white/[0.1] bg-[#0f1724] shadow-2xl overflow-hidden flex flex-col min-h-[520px]">
+              <div className={`w-full transition-all duration-300 rounded-xl border border-white/[0.1] bg-[#0f1724] shadow-2xl overflow-hidden flex flex-col min-h-[520px] ${
+                viewportMode === 'mobile' ? 'max-w-sm' : viewportMode === 'tablet' ? 'max-w-2xl' : 'max-w-5xl'
+              }`}>
                 {/* Simulated Web Viewport Header */}
                 <div className="px-4 py-2 bg-[#141d2e] border-b border-white/[0.08] flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2">
@@ -557,7 +600,7 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                     }`}
                   >
                     <div className="flex items-center gap-2 min-w-0">
-                      <FileCode className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                      <FileCode className={`w-3.5 h-3.5 ${getFileIconColor(file.name)} shrink-0`} />
                       <span className="truncate">{file.name}</span>
                     </div>
                     <span className="text-[10px] text-slate-500 font-mono">{file.size}</span>

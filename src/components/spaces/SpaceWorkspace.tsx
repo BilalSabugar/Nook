@@ -30,6 +30,9 @@ import {
 } from 'lucide-react';
 import { MarkdownViewer } from '@/components/spaces/MarkdownViewer';
 import { SlashCommandPalette } from '@/components/spaces/SlashCommandPalette';
+import { useToast } from '@/components/ui/Toast';
+
+
 
 interface SpaceWorkspaceProps {
   space: Space;
@@ -52,6 +55,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
   onAskAgentAboutPage,
   onDeletePage,
 }) => {
+  const toast = useToast();
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [searchQuery, setSearchQuery] = useState('');
   const [editorMode, setEditorMode] = useState<'visual' | 'preview' | 'markdown'>('visual');
@@ -263,7 +267,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(activePage.content);
-                    alert('Markdown copied to clipboard!');
+                    toast.success('Markdown copied to clipboard', 'Raw document ready to paste into any editor.');
                   }}
                   title="Copy Raw Markdown"
                   className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors"
@@ -280,6 +284,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     a.download = `${activePage.title.toLowerCase().replace(/[^a-z0-9]/g, '-')}.md`;
                     a.click();
                     URL.revokeObjectURL(url);
+                    toast.info('Document Downloaded', `Saved as ${activePage.title}.md`);
                   }}
                   title="Download Markdown File"
                   className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] transition-colors"
@@ -292,6 +297,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     onClick={() => {
                       if (confirm(`Are you sure you want to delete "${activePage.title}"?`)) {
                         onDeletePage(space.id, activePage.id);
+                        toast.warning('Document Deleted', `"${activePage.title}" was removed from ${space.name}.`);
                         onSelectPage(null);
                       }
                     }}

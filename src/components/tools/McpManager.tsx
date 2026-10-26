@@ -17,6 +17,7 @@ import {
   Settings,
   Sliders
 } from 'lucide-react';
+import { useToast } from '@/components/ui/Toast';
 
 interface McpManagerProps {
   tools: MCPTool[];
@@ -33,6 +34,7 @@ export const McpManager: React.FC<McpManagerProps> = ({
   onToggleApproval,
   onAddCustomTool,
 }) => {
+  const toast = useToast();
   const [showAddModal, setShowAddModal] = useState(false);
   const [newToolName, setNewToolName] = useState('');
   const [newServerName, setNewServerName] = useState('');
@@ -60,10 +62,12 @@ export const McpManager: React.FC<McpManagerProps> = ({
     setNewToolName('');
     setNewServerName('');
     setNewDesc('');
+    toast.success('MCP Server Connected', `Registered "${tool.name}" on ${tool.serverName}.`);
   };
 
   const handleTestTool = (tool: MCPTool) => {
     setTestResult(`[MCP Test OK] Connected to "${tool.serverName}". Tool "${tool.name}" returned status 200.`);
+    toast.success('MCP Tool Verified', `Pinged "${tool.name}" via JSON-RPC 2.0 (200 OK).`);
     setTimeout(() => setTestResult(null), 3500);
   };
 

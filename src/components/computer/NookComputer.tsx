@@ -372,6 +372,41 @@ export const NookComputer: React.FC<NookComputerProps> = ({
 
       {/* Main Tab View Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Human Takeover vs Autonomous Supervisor Status Banner */}
+        {currentState.takeoverMode ? (
+          <div className="px-4 py-2 bg-gradient-to-r from-amber-500/15 via-amber-500/5 to-transparent border-b border-amber-500/30 flex items-center justify-between text-xs animate-fade-in shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+              </span>
+              <span className="font-semibold text-amber-300">Human Takeover Active</span>
+              <span className="text-neutral-400 text-[11px] hidden sm:inline">
+                • Manual keyboard, terminal input, and browser controls enabled. Autonomous agent actions paused.
+              </span>
+            </div>
+            <button
+              onClick={handleToggleTakeover}
+              className="text-[11px] px-2.5 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/30 transition-colors font-medium cursor-pointer"
+            >
+              Release Control to Coworker
+            </button>
+          </div>
+        ) : (
+          <div className="px-4 py-1.5 bg-black/40 border-b border-white/[0.06] flex items-center justify-between text-xs text-neutral-400 font-mono shrink-0">
+            <div className="flex items-center gap-2">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+              <span>Autonomous Supervisor Active • Sandbox Container Isolated</span>
+            </div>
+            <button
+              onClick={handleToggleTakeover}
+              className="text-[11px] text-neutral-400 hover:text-white transition-colors underline underline-offset-2 cursor-pointer"
+            >
+              Takeover Session
+            </button>
+          </div>
+        )}
+
         {/* ================= BROWSER VIEW ================= */}
         {activeTab === 'browser' && (
           <div className="flex-1 flex flex-col overflow-hidden bg-[#0d0d0d]">

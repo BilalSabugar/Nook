@@ -29,6 +29,7 @@ interface AgentChatProps {
   onSendMessage: (text: string) => void;
   onApproveReview: (reviewId: string) => void;
   onDeclineReview: (reviewId: string, feedback?: string) => void;
+  onRollbackReview?: (reviewId: string) => void;
   onSwitchToComputer: () => void;
   onViewSavedPage?: (pageId: string) => void;
 }
@@ -40,6 +41,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
   onSendMessage,
   onApproveReview,
   onDeclineReview,
+  onRollbackReview,
   onSwitchToComputer,
   onViewSavedPage,
 }) => {
@@ -225,6 +227,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
                     review={msg.reviewRequest}
                     onApprove={onApproveReview}
                     onDecline={onDeclineReview}
+                    onRollback={onRollbackReview}
                     onViewSavedPage={onViewSavedPage}
                   />
                 )}

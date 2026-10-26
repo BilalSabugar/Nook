@@ -38,7 +38,7 @@ export interface ReviewRequest {
     toolName?: string;
     toolArgs?: Record<string, unknown>;
   };
-  status: 'pending' | 'approved' | 'declined';
+  status: 'pending' | 'approved' | 'declined' | 'rolled_back';
   createdPageId?: string;
   feedback?: string;
   createdAt: string;
@@ -60,6 +60,14 @@ export interface Message {
   reviewRequest?: ReviewRequest;
 }
 
+export interface DocumentVersion {
+  version: number;
+  content: string;
+  title: string;
+  updatedAt: string;
+  authorAgentId?: string;
+}
+
 export interface DocumentPage {
   id: string;
   spaceId: string;
@@ -71,6 +79,7 @@ export interface DocumentPage {
   createdAt: string;
   updatedAt: string;
   version: number;
+  history?: DocumentVersion[];
   tags: string[];
 }
 

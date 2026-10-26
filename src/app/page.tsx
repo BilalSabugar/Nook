@@ -357,6 +357,53 @@ export default function NookApp() {
     }));
   };
 
+  // Handle Review Rollback (Auto-rollback approved action)
+  const handleRollbackReview = (reviewId: string) => {
+    const currentAgentMsgs = messages[activeAgentId] || [];
+    let rolledBackReview: ReviewRequest | undefined;
+
+    const updatedMsgs = currentAgentMsgs.map((m) => {
+      if (m.reviewRequest && m.reviewRequest.id === reviewId) {
+        rolledBackReview = m.reviewRequest;
+        return {
+          ...m,
+          reviewRequest: {
+            ...m.reviewRequest,
+            status: 'rolled_back' as const,
+          },
+        };
+      }
+      return m;
+    });
+
+    setMessages((prev) => ({ ...prev, [activeAgentId]: updatedMsgs }));
+
+    if (rolledBackReview && rolledBackReview.type === 'save_page') {
+      const targetSpaceId = rolledBackReview.targetSpaceId || 'space-launch';
+      const createdPageId = rolledBackReview.createdPageId;
+      if (createdPageId) {
+        setSpaces((prev) =>
+          prev.map((s) =>
+            s.id === targetSpaceId
+              ? { ...s, pages: s.pages.filter((p) => p.id !== createdPageId) }
+              : s
+          )
+        );
+      }
+    }
+
+    const rollbackNotice: Message = {
+      id: `msg-rb-${Date.now()}`,
+      sender: 'system',
+      content: `Approved action for **"${rolledBackReview?.title || 'review'}"** was rolled back and reverted from Spaces.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    setMessages((prev) => ({
+      ...prev,
+      [activeAgentId]: [...(prev[activeAgentId] || []), rollbackNotice],
+    }));
+  };
+
   // Execute Command in Computer Sandbox
   const handleExecuteTerminalCommand = async (agentId: string, command: string) => {
     const currentComp = computerStates[agentId] || INITIAL_COMPUTER_STATES[agentId];
@@ -376,10 +423,11 @@ export default function NookApp() {
     });
 
     try {
+      const activeFiles = (computerStates[agentId] || currentComp).files;
       const res = await fetch('/api/sandbox/exec', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, agentId }),
+        body: JSON.stringify({ command, agentId, virtualFiles: activeFiles }),
       });
       const data = await res.json();
       const outputText = data.output || (data.error ? `Error: ${data.error}` : `Command executed. Exit code: ${data.exitCode ?? 0}`);
@@ -549,6 +597,7 @@ export default function NookApp() {
             onSendMessage={handleSendMessage}
             onApproveReview={handleApproveReview}
             onDeclineReview={handleDeclineReview}
+            onRollbackReview={handleRollbackReview}
             onSwitchToComputer={() => setActiveView('computer')}
             onViewSavedPage={(pageId) => {
               setActiveView('space');

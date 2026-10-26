@@ -21,6 +21,7 @@ interface ReviewCardProps {
   review: ReviewRequest;
   onApprove: (reviewId: string) => void;
   onDecline: (reviewId: string, feedback?: string) => void;
+  onRollback?: (reviewId: string) => void;
   onViewSavedPage?: (pageId: string) => void;
 }
 
@@ -28,6 +29,7 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
   review,
   onApprove,
   onDecline,
+  onRollback,
   onViewSavedPage,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -237,19 +239,38 @@ export const ReviewCard: React.FC<ReviewCardProps> = ({
 
           {/* Approved state badge & link */}
           {review.status === 'approved' && (
-            <div className="flex items-center justify-between text-xs text-emerald-400 pt-1">
-              <span className="flex items-center gap-1.5">
+            <div className="flex items-center justify-between text-xs pt-1">
+              <span className="flex items-center gap-1.5 text-emerald-400">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                 Approved by you. Page created in Space!
               </span>
-              {review.type === 'save_page' && onViewSavedPage && (
-                <button
-                  onClick={() => onViewSavedPage(review.createdPageId || 'page-nook-brief')}
-                  className="flex items-center gap-1 text-xs text-neutral-300 hover:text-white underline underline-offset-4 font-mono transition-colors"
-                >
-                  View in Space <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {onRollback && review.type === 'save_page' && (
+                  <button
+                    onClick={() => onRollback(review.id)}
+                    className="text-neutral-400 hover:text-amber-300 underline underline-offset-4 font-mono transition-colors text-xs"
+                    title="Rollback this approved page creation"
+                  >
+                    Rollback
+                  </button>
+                )}
+                {review.type === 'save_page' && onViewSavedPage && (
+                  <button
+                    onClick={() => onViewSavedPage(review.createdPageId || 'page-nook-brief')}
+                    className="flex items-center gap-1 text-xs text-neutral-300 hover:text-white underline underline-offset-4 font-mono transition-colors"
+                  >
+                    View in Space <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Rolled back state badge */}
+          {review.status === 'rolled_back' && (
+            <div className="flex items-center gap-1.5 text-xs text-amber-400 pt-1">
+              <Clock className="w-4 h-4 text-amber-400" />
+              <span>Action rolled back. Document page removed from Space.</span>
             </div>
           )}
 

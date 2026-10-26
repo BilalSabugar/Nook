@@ -83,6 +83,29 @@ export const INITIAL_SPACES: Space[] = [
         createdAt: new Date(Date.now() - 3600000 * 4).toISOString(),
         updatedAt: new Date(Date.now() - 3600000).toISOString(),
         version: 3,
+        history: [
+          {
+            version: 1,
+            title: 'Nook Product Concept',
+            content: '# Nook: The Autonomous AI Coworker OS\n\nInitial draft of the persistent AI coworker operating system concept.',
+            updatedAt: new Date(Date.now() - 3600000 * 4).toISOString(),
+            authorAgentId: 'agent-quill',
+          },
+          {
+            version: 2,
+            title: 'Nook: Autonomous AI Coworkers & Living Spaces',
+            content: '# Nook: The Autonomous AI Coworker OS\n\n## 1. Executive Summary\nNook provides persistent agent environments with virtual computers and living spaces.\n\n## 2. Core Architecture\nPersistent Coworkers, Agent Computers, and Living Spaces.',
+            updatedAt: new Date(Date.now() - 3600000 * 2).toISOString(),
+            authorAgentId: 'agent-quill',
+          },
+          {
+            version: 3,
+            title: 'Nook: Autonomous AI Coworker Operating System',
+            content: `# Nook: The Autonomous AI Coworker OS\n\n## 1. Executive Summary\n**Nook** is an open-source, persistent agent environment where human teams and specialist AI agents collaborate effortlessly across documents, sandboxed computers, and real-time communication.`,
+            updatedAt: new Date(Date.now() - 3600000).toISOString(),
+            authorAgentId: 'agent-quill',
+          },
+        ],
         tags: ['strategy', 'v1.0', 'architecture'],
         content: `# Nook: The Autonomous AI Coworker OS
 

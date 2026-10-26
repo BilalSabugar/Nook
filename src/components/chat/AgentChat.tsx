@@ -109,18 +109,18 @@ export const AgentChat: React.FC<AgentChatProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setIsCallModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-all"
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] hover:border-white/20 text-xs font-medium transition-all duration-200 hover:-translate-y-0.5 active:scale-95 active:translate-y-0 shadow-sm"
           >
-            <Phone className="w-3.5 h-3.5" />
+            <Phone className="w-3.5 h-3.5 text-neutral-300" />
             <span>Call</span>
           </button>
 
           {agent.computerEnabled && (
             <button
               onClick={onSwitchToComputer}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs font-medium transition-all"
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] hover:border-white/20 text-xs font-medium transition-all duration-200 hover:-translate-y-0.5 active:scale-95 active:translate-y-0 shadow-sm"
             >
-              <Monitor className="w-3.5 h-3.5" />
+              <Monitor className="w-3.5 h-3.5 text-neutral-300" />
               <span>Computer</span>
             </button>
           )}
@@ -266,7 +266,7 @@ export const AgentChat: React.FC<AgentChatProps> = ({
             <button
               key={idx}
               onClick={() => onSendMessage(p.text)}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-full glass-card hover:bg-white/[0.1] text-neutral-300 hover:text-white border border-white/[0.08] text-xs transition-all shrink-0 active:scale-95"
+              className="flex items-center gap-1.5 px-3 py-1 rounded-full glass-card hover:bg-white/[0.08] hover:border-white/20 text-neutral-300 hover:text-white border border-white/[0.08] text-xs transition-all duration-200 shrink-0 hover:-translate-y-0.5 active:scale-95 shadow-sm"
             >
               <Icon className="w-3 h-3 text-neutral-400" />
               <span>{p.label}</span>

@@ -28,6 +28,7 @@ interface SidebarProps {
   onOpenNewAgentModal: () => void;
   onOpenNewSpaceModal: () => void;
   onOpenSettingsModal: () => void;
+  onOpenCommandPalette?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -42,6 +43,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenNewAgentModal,
   onOpenNewSpaceModal,
   onOpenSettingsModal,
+  onOpenCommandPalette,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -99,7 +101,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <X className="w-3 h-3" />
             </button>
           ) : (
-            <kbd className="text-[9px] bg-white/[0.04] px-1 py-0.5 rounded text-neutral-500 font-mono border border-white/[0.06]">⌘K</kbd>
+            <button
+              type="button"
+              onClick={onOpenCommandPalette}
+              title="Open Command Palette (⌘K / Ctrl+K)"
+              className="text-[9px] bg-white/[0.04] hover:bg-white/[0.08] px-1 py-0.5 rounded text-neutral-400 hover:text-white font-mono border border-white/[0.06] transition-colors cursor-pointer"
+            >
+              ⌘K
+            </button>
           )}
         </div>
       </div>

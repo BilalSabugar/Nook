@@ -404,8 +404,8 @@ export const NookComputer: React.FC<NookComputerProps> = ({
               </div>
 
               {/* URL Bar */}
-              <form onSubmit={handleNavigate} className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-xs focus-within:border-white/30 transition-colors">
-                <Lock className="w-3 h-3 text-neutral-400 shrink-0" />
+              <form onSubmit={handleNavigate} className="flex-1 flex items-center gap-2 px-3.5 py-1.5 rounded-xl glass-input border border-white/[0.08] text-xs focus-within:border-white/30 transition-colors">
+                <Lock className="w-3 h-3 text-emerald-400 shrink-0" />
                 <input
                   type="text"
                   value={currentUrl}
@@ -413,31 +413,31 @@ export const NookComputer: React.FC<NookComputerProps> = ({
                   placeholder="Enter URL to navigate or inspect (e.g. news.ycombinator.com)..."
                   className="bg-transparent border-none outline-none text-white placeholder:text-neutral-500 w-full font-mono text-xs"
                 />
-                <button type="submit" className="text-neutral-400 hover:text-white transition-colors" title="Navigate">
+                <button type="submit" className="p-1 rounded hover:bg-white/[0.08] text-neutral-400 hover:text-white transition-colors" title="Navigate">
                   <Play className="w-3 h-3" />
                 </button>
               </form>
 
               <div className="flex items-center gap-2 text-xs text-neutral-400">
-                <div className="flex items-center bg-[#0d0d0d] p-0.5 rounded-lg border border-white/[0.08]">
+                <div className="flex items-center glass-panel p-0.5 rounded-xl border border-white/[0.08]">
                   <button
                     onClick={() => setViewportMode('desktop')}
                     title="Desktop View (1920x1080)"
-                    className={`p-1 rounded transition-colors ${viewportMode === 'desktop' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1.5 rounded-lg transition-all ${viewportMode === 'desktop' ? 'bg-white text-black font-semibold shadow-sm' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Monitor className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setViewportMode('tablet')}
                     title="Tablet View (768px)"
-                    className={`p-1 rounded transition-colors ${viewportMode === 'tablet' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1.5 rounded-lg transition-all ${viewportMode === 'tablet' ? 'bg-white text-black font-semibold shadow-sm' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Tablet className="w-3.5 h-3.5" />
                   </button>
                   <button
                     onClick={() => setViewportMode('mobile')}
                     title="Mobile View (375px)"
-                    className={`p-1 rounded transition-colors ${viewportMode === 'mobile' ? 'bg-white text-black font-semibold' : 'text-neutral-400 hover:text-white'}`}
+                    className={`p-1.5 rounded-lg transition-all ${viewportMode === 'mobile' ? 'bg-white text-black font-semibold shadow-sm' : 'text-neutral-400 hover:text-white'}`}
                   >
                     <Smartphone className="w-3.5 h-3.5" />
                   </button>

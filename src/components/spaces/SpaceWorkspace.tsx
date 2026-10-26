@@ -490,15 +490,13 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                         {page.title}
                       </h3>
                       <p className="text-xs text-neutral-400 line-clamp-2 mt-1 leading-relaxed">
-                        {page.excerpt || (
-                          page.content
-                            .replace(/^#+\s+/gm, '')
-                            .replace(/[*_`~[\]]/g, '')
-                            .replace(/\|.*?\|/g, '')
-                            .replace(/\n+/g, ' ')
-                            .trim()
-                            .slice(0, 110) + '...'
-                        )}
+                        {(page.excerpt || page.content)
+                          .replace(/#+/g, '')
+                          .replace(/[*_`~[\]]/g, '')
+                          .replace(/\|.*?\|/g, '')
+                          .replace(/\s+/g, ' ')
+                          .trim()
+                          .slice(0, 120)}...
                       </p>
                     </div>
                   </div>

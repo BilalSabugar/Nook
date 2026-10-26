@@ -32,6 +32,7 @@ import { McpManager } from '@/components/tools/McpManager';
 import { AgentModal } from '@/components/modals/AgentModal';
 import { SpaceModal } from '@/components/modals/SpaceModal';
 import { SettingsModal } from '@/components/modals/SettingsModal';
+import { CommandPalette } from '@/components/navigation/CommandPalette';
 
 export default function NookApp() {
   // Primary State
@@ -55,6 +56,19 @@ export default function NookApp() {
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
   const [isSpaceModalOpen, setIsSpaceModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+
+  // Global ⌘K / Ctrl+K keyboard shortcut listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Load from LocalStorage if available with automatic legacy emoji migration
   useEffect(() => {
@@ -255,7 +269,13 @@ export default function NookApp() {
         spaceId: targetSpace.id,
         title: targetReview.payload.pageTitle,
         content: targetReview.payload.pageContent || '',
-        excerpt: targetReview.payload.pageContent?.slice(0, 120),
+        excerpt: targetReview.payload.pageContent
+          ?.replace(/#+/g, '')
+          .replace(/[*_`~[\]]/g, '')
+          .replace(/\|.*?\|/g, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120),
         icon: 'file-text',
         authorAgentId: targetReview.agentId,
         createdAt: new Date().toISOString(),
@@ -515,6 +535,7 @@ export default function NookApp() {
         onOpenNewAgentModal={() => setIsAgentModalOpen(true)}
         onOpenNewSpaceModal={() => setIsSpaceModalOpen(true)}
         onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
       />
 
       {/* Main Viewport Container */}
@@ -625,6 +646,19 @@ export default function NookApp() {
           setLlmSettings(DEFAULT_LLM_SETTINGS);
           setIsSettingsModalOpen(false);
         }}
+      />
+
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+        agents={agents}
+        spaces={spaces}
+        onSelectAgent={handleSelectAgent}
+        onSelectSpace={handleSelectSpace}
+        onSelectView={setActiveView}
+        onOpenNewAgentModal={() => setIsAgentModalOpen(true)}
+        onOpenNewSpaceModal={() => setIsSpaceModalOpen(true)}
+        onOpenSettingsModal={() => setIsSettingsModalOpen(true)}
       />
     </div>
   );

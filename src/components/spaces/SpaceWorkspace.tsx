@@ -33,6 +33,7 @@ import { MarkdownViewer } from '@/components/spaces/MarkdownViewer';
 import { SlashCommandPalette } from '@/components/spaces/SlashCommandPalette';
 import { useToast } from '@/components/ui/Toast';
 import { AgentArchetypeIcon, SpaceArchetypeIcon } from '@/components/ui/ArchetypeIcon';
+import { SpotlightCard } from '@/components/ui/SpotlightCard';
 
 interface SpaceWorkspaceProps {
   space: Space;
@@ -469,10 +470,10 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
           {viewMode === 'grid' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filteredPages.map((page) => (
-                <div
+                <SpotlightCard
                   key={page.id}
                   onClick={() => onSelectPage(page.id)}
-                  className="group p-5 rounded-2xl glass-card glass-card-hover border border-white/[0.08] shadow-sm cursor-pointer transition-all duration-200 flex flex-col justify-between animate-slide-up"
+                  className="group p-5 border border-white/[0.08] shadow-sm cursor-pointer flex flex-col justify-between animate-slide-up"
                 >
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
@@ -512,7 +513,7 @@ export const SpaceWorkspace: React.FC<SpaceWorkspaceProps> = ({
                     </div>
                     <span>{new Date(page.updatedAt).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
                   </div>
-                </div>
+                </SpotlightCard>
               ))}
             </div>
           ) : (

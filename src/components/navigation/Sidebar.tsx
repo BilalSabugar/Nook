@@ -60,8 +60,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="h-14 px-4 border-b border-white/[0.08] flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           {/* Signature OpenDots monochrome emblem */}
-          <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center font-bold text-sm tracking-tight shadow-md">
-            <span>●</span>
+          <div className="w-7 h-7 rounded-lg bg-white text-black flex items-center justify-center shadow-md">
+            <div className="w-2.5 h-2.5 rounded-full bg-black" />
           </div>
           <div className="flex items-center gap-2">
             <span className="font-semibold text-white tracking-tight text-sm">Nook</span>

@@ -162,15 +162,16 @@ export async function POST(req: NextRequest) {
     // 6. Isolated Shell Execution with Clean Low-Privilege Environment
     // Critical: Do NOT leak host secrets or API keys into the execution environment.
     const isWin = process.platform === 'win32';
-    const cleanEnv: Record<string, string | undefined> = {
-      PATH: process.env.PATH,
-      SYSTEMROOT: process.env.SYSTEMROOT,
-      TEMP: process.env.TEMP || (isWin ? 'C:\\Temp' : '/tmp'),
-      TMP: process.env.TMP || (isWin ? 'C:\\Temp' : '/tmp'),
-      HOME: sandboxDir,
-      USER: `nook-${safeAgentId}`,
-      NODE_ENV: 'sandbox',
-    };
+    const cleanEnv: Record<string, string | undefined> = { ...process.env };
+    for (const key of Object.keys(cleanEnv)) {
+      const lower = key.toLowerCase();
+      if (lower.includes('secret') || lower.includes('api_key') || lower.includes('token') || lower.startsWith('nook_')) {
+        delete cleanEnv[key];
+      }
+    }
+    cleanEnv.HOME = sandboxDir;
+    cleanEnv.USER = `nook-${safeAgentId}`;
+    cleanEnv.NODE_ENV = 'test';
 
     let stdout = '';
     let exitCode = 0;

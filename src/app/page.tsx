@@ -27,6 +27,7 @@ import { AgentChat } from '@/components/chat/AgentChat';
 import { SpaceWorkspace } from '@/components/spaces/SpaceWorkspace';
 import { NookComputer } from '@/components/computer/NookComputer';
 import { McpManager } from '@/components/tools/McpManager';
+import { MissionDashboard } from '@/components/missions/MissionDashboard';
 
 // Modals
 import { AgentModal } from '@/components/modals/AgentModal';
@@ -44,7 +45,7 @@ export default function NookApp() {
   const [llmSettings, setLlmSettings] = useState<LLMSettings>(DEFAULT_LLM_SETTINGS);
 
   // Navigation State
-  const [activeView, setActiveView] = useState<'space' | 'agent' | 'computer' | 'tools'>('agent');
+  const [activeView, setActiveView] = useState<'space' | 'agent' | 'computer' | 'tools' | 'missions'>('agent');
   const [activeAgentId, setActiveAgentId] = useState<string>('agent-scout');
   const [activeSpaceId, setActiveSpaceId] = useState<string>('space-launch');
   const [activePageId, setActivePageId] = useState<string | null>(null);
@@ -767,6 +768,15 @@ export default function NookApp() {
             onToggleTool={handleToggleMcpTool}
             onToggleApproval={handleToggleMcpApproval}
             onAddCustomTool={handleAddCustomMcpTool}
+          />
+        )}
+
+        {/* VIEW 5: MISSIONS & EVIDENCE ENGINE */}
+        {activeView === 'missions' && (
+          <MissionDashboard
+            agents={agents}
+            onSwitchToComputer={() => setActiveView('computer')}
+            onSwitchToSpaces={() => setActiveView('space')}
           />
         )}
       </main>

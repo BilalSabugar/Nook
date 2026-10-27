@@ -18,10 +18,21 @@ This document outlines the planned milestones, upcoming features, and architectu
 
 ---
 
-## 📍 Version 1.1.0 — Real Container Supervisor & Sandboxing
+## 📍 Version 1.2.0 (Current Release) — Autonomous Missions & Evidence Engine
+- [x] **Aura Multi-Agent Orchestrator**: Objective decomposition, milestone dependency trees, and task delegation across Scout, Quill, and Cipher.
+- [x] **Persistent Missions System**: Durable multi-session objectives tracked in transactional SQLite with status lifecycles and recovery.
+- [x] **Immutable Evidence Engine**: Verifiable timeline with tool calls, source citations, command exit codes, and output artifacts.
+- [x] **Sovereign Local Self-Hostability**: Zero-cloud deployment support with local Ollama runners and complete workspace export/import.
+- [x] **Extensible Plugin Framework**: Typed manifests, JSON-RPC tools, per-agent permissions, and health checks.
+- [x] **Knowledge Workspace Full-Text Search**: Instant search across spaces, documents, excerpts, and tags.
+- [x] **Competitive Benchmark Harness**: Reproducible comparative evaluation vs CopilotKit OpenDots & OpenBot (`benchmarks/nook-vs-opendots/`).
+- [x] **Verified Real-World Demonstrations**: Automated end-to-end test scenarios covering research, engineering, multi-agent synthesis, and worker recovery.
+
+---
+
+## 📍 Version 1.3.0 — Real Container Supervisor & Sandboxing
 - [ ] **Docker Daemon Integration**: Run agent terminal commands inside real lightweight Alpine/Ubuntu containers via Docker socket.
 - [ ] **Headless Chromium / Playwright Remote**: Full interactive web browser streaming via WebRTC/VNC into the computer modal.
-- [ ] **Multi-Agent Cross-Mentions**: Automatic multi-coworker handoffs in the chat timeline (e.g. `@Scout` passes extracted research directly to `@Quill` to write a Space page).
 - [ ] **Git Integration in Workspace**: Direct branch creation, staging, and commit generation inside `/workspace`.
 
 ---

@@ -113,6 +113,63 @@ export function getDatabase(): DatabaseSync {
     );
 
     CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp);
+
+    CREATE TABLE IF NOT EXISTS missions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      status TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'medium',
+      assigned_agents_json TEXT NOT NULL,
+      milestones_json TEXT NOT NULL,
+      budget_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_missions_status ON missions(status);
+
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      goal TEXT NOT NULL,
+      assigned_agent_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      dependencies_json TEXT NOT NULL DEFAULT '[]',
+      priority TEXT NOT NULL DEFAULT 'medium',
+      inputs_json TEXT DEFAULT '{}',
+      outputs_json TEXT DEFAULT '{}',
+      observations_json TEXT NOT NULL DEFAULT '[]',
+      verification_json TEXT,
+      approval_id TEXT,
+      approval_token TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(mission_id) REFERENCES missions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tasks_mission ON agent_tasks(mission_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_status ON agent_tasks(status);
+
+    CREATE TABLE IF NOT EXISTS evidence_records (
+      id TEXT PRIMARY KEY,
+      mission_id TEXT,
+      task_id TEXT,
+      agent_id TEXT NOT NULL,
+      agent_name TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      action_type TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      details_json TEXT NOT NULL,
+      status TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_evidence_mission ON evidence_records(mission_id);
+    CREATE INDEX IF NOT EXISTS idx_evidence_task ON evidence_records(task_id);
   `);
 
   _dbInstance = db;
@@ -771,3 +828,503 @@ export function rollbackDocumentToVersion(documentId: string, targetVersion: num
     changeSummary: `Rolled back to version ${targetVersion}`,
   });
 }
+
+// ==========================================
+// MISSIONS & TASKS REPOSITORY (Stages 2 & 3)
+// ==========================================
+export interface DbMission {
+  id: string;
+  title: string;
+  objective: string;
+  status: 'draft' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  priority: 'low' | 'medium' | 'high';
+  assignedAgents: string[];
+  milestones: {
+    id: string;
+    title: string;
+    status: 'pending' | 'in_progress' | 'completed' | 'failed';
+    taskIds: string[];
+  }[];
+  budget?: {
+    maxToolCalls?: number;
+    usedToolCalls?: number;
+    maxDurationMs?: number;
+  };
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  tasks?: DbAgentTask[];
+}
+
+export interface DbAgentTask {
+  id: string;
+  missionId: string;
+  title: string;
+  goal: string;
+  assignedAgentId: string;
+  status: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'failed' | 'requires_approval';
+  dependencies: string[];
+  priority: 'low' | 'medium' | 'high';
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  observations: {
+    timestamp: string;
+    tool?: string;
+    input?: unknown;
+    output?: string;
+    status: 'success' | 'warning' | 'error';
+  }[];
+  verification?: {
+    verified: boolean;
+    verifiedAt?: string;
+    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval';
+    details: string;
+  };
+  approvalId?: string;
+  approvalToken?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export function createMission(mission: {
+  id?: string;
+  title: string;
+  objective: string;
+  priority?: 'low' | 'medium' | 'high';
+  assignedAgents?: string[];
+  milestones?: { id: string; title: string; status: 'pending' | 'in_progress' | 'completed' | 'failed'; taskIds: string[] }[];
+  budget?: { maxToolCalls?: number; usedToolCalls?: number; maxDurationMs?: number };
+}): DbMission {
+  const db = getDatabase();
+  const id = mission.id || `msn-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+
+  const assignedAgents = mission.assignedAgents || ['agent-aura', 'agent-scout', 'agent-quill', 'agent-cipher'];
+  const milestones = mission.milestones || [];
+
+  db.prepare(`
+    INSERT INTO missions (
+      id, title, objective, status, priority, assigned_agents_json, milestones_json, budget_json, created_at, updated_at
+    ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    mission.title,
+    mission.objective,
+    mission.priority || 'medium',
+    JSON.stringify(assignedAgents),
+    JSON.stringify(milestones),
+    JSON.stringify(mission.budget || { maxToolCalls: 20, usedToolCalls: 0 }),
+    now,
+    now
+  );
+
+  logAuditEvent('MISSION_CREATED', `Mission '${mission.title}' (${id}) created`, 'success', 'agent-aura');
+
+  return {
+    id,
+    title: mission.title,
+    objective: mission.objective,
+    status: 'draft',
+    priority: mission.priority || 'medium',
+    assignedAgents,
+    milestones,
+    budget: mission.budget,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getMissionById(id: string): DbMission | null {
+  const db = getDatabase();
+  const row = db.prepare(`SELECT * FROM missions WHERE id = ?`).get(id) as any;
+  if (!row) return null;
+
+  const tasks = listTasksForMission(id);
+
+  return {
+    id: row.id,
+    title: row.title,
+    objective: row.objective,
+    status: row.status,
+    priority: row.priority,
+    assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
+    milestones: JSON.parse(row.milestones_json || '[]'),
+    budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || undefined,
+    tasks,
+  };
+}
+
+export function listMissions(): DbMission[] {
+  const db = getDatabase();
+  const rows = db.prepare(`SELECT * FROM missions ORDER BY created_at DESC`).all() as any[];
+
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    objective: row.objective,
+    status: row.status,
+    priority: row.priority,
+    assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
+    milestones: JSON.parse(row.milestones_json || '[]'),
+    budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedAt: row.completed_at || undefined,
+  }));
+}
+
+export function updateMissionStatus(
+  id: string,
+  status: 'draft' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled'
+): void {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const completedAt = status === 'completed' || status === 'failed' || status === 'cancelled' ? now : null;
+
+  db.prepare(`
+    UPDATE missions
+    SET status = ?, updated_at = ?, completed_at = COALESCE(?, completed_at)
+    WHERE id = ?
+  `).run(status, now, completedAt, id);
+
+  logAuditEvent('MISSION_STATUS', `Mission ${id} status updated to ${status}`, 'success', 'agent-aura');
+}
+
+export function createAgentTask(task: {
+  id?: string;
+  missionId: string;
+  title: string;
+  goal: string;
+  assignedAgentId: string;
+  dependencies?: string[];
+  priority?: 'low' | 'medium' | 'high';
+  inputs?: Record<string, unknown>;
+}): DbAgentTask {
+  const db = getDatabase();
+  const id = task.id || `tsk-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+
+  db.prepare(`
+    INSERT INTO agent_tasks (
+      id, mission_id, title, goal, assigned_agent_id, status, dependencies_json,
+      priority, inputs_json, outputs_json, observations_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, '{}', '[]', ?, ?)
+  `).run(
+    id,
+    task.missionId,
+    task.title,
+    task.goal,
+    task.assignedAgentId,
+    JSON.stringify(task.dependencies || []),
+    task.priority || 'medium',
+    JSON.stringify(task.inputs || {}),
+    now,
+    now
+  );
+
+  logAuditEvent('TASK_CREATED', `Task '${task.title}' created for ${task.assignedAgentId}`, 'success', task.assignedAgentId);
+
+  return {
+    id,
+    missionId: task.missionId,
+    title: task.title,
+    goal: task.goal,
+    assignedAgentId: task.assignedAgentId,
+    status: 'pending',
+    dependencies: task.dependencies || [],
+    priority: task.priority || 'medium',
+    inputs: task.inputs || {},
+    outputs: {},
+    observations: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getAgentTaskById(id: string): DbAgentTask | null {
+  const db = getDatabase();
+  const r = db.prepare(`SELECT * FROM agent_tasks WHERE id = ?`).get(id) as any;
+  if (!r) return null;
+
+  return {
+    id: r.id,
+    missionId: r.mission_id,
+    title: r.title,
+    goal: r.goal,
+    assignedAgentId: r.assigned_agent_id,
+    status: r.status,
+    dependencies: JSON.parse(r.dependencies_json || '[]'),
+    priority: r.priority,
+    inputs: JSON.parse(r.inputs_json || '{}'),
+    outputs: JSON.parse(r.outputs_json || '{}'),
+    observations: JSON.parse(r.observations_json || '[]'),
+    verification: r.verification_json ? JSON.parse(r.verification_json) : undefined,
+    approvalId: r.approval_id || undefined,
+    approvalToken: r.approval_token || undefined,
+    error: r.error || undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    completedAt: r.completed_at || undefined,
+  };
+}
+
+export function listTasksForMission(missionId: string): DbAgentTask[] {
+  const db = getDatabase();
+  const rows = db.prepare(`SELECT * FROM agent_tasks WHERE mission_id = ? ORDER BY created_at ASC`).all(missionId) as any[];
+
+  return rows.map((r) => ({
+    id: r.id,
+    missionId: r.mission_id,
+    title: r.title,
+    goal: r.goal,
+    assignedAgentId: r.assigned_agent_id,
+    status: r.status,
+    dependencies: JSON.parse(r.dependencies_json || '[]'),
+    priority: r.priority,
+    inputs: JSON.parse(r.inputs_json || '{}'),
+    outputs: JSON.parse(r.outputs_json || '{}'),
+    observations: JSON.parse(r.observations_json || '[]'),
+    verification: r.verification_json ? JSON.parse(r.verification_json) : undefined,
+    approvalId: r.approval_id || undefined,
+    approvalToken: r.approval_token || undefined,
+    error: r.error || undefined,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    completedAt: r.completed_at || undefined,
+  }));
+}
+
+export function updateAgentTask(
+  id: string,
+  update: {
+    status?: 'pending' | 'in_progress' | 'blocked' | 'completed' | 'failed' | 'requires_approval';
+    outputs?: Record<string, unknown>;
+    error?: string;
+    approvalId?: string;
+    approvalToken?: string;
+  }
+): DbAgentTask | null {
+  const db = getDatabase();
+  const existing = getAgentTaskById(id);
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  const status = update.status || existing.status;
+  const outputs = update.outputs ? { ...existing.outputs, ...update.outputs } : existing.outputs;
+  const completedAt = status === 'completed' || status === 'failed' ? now : existing.completedAt;
+
+  db.prepare(`
+    UPDATE agent_tasks
+    SET status = ?, outputs_json = ?, error = ?, approval_id = ?, approval_token = ?, updated_at = ?, completed_at = ?
+    WHERE id = ?
+  `).run(
+    status,
+    JSON.stringify(outputs),
+    update.error || existing.error || null,
+    update.approvalId || existing.approvalId || null,
+    update.approvalToken || existing.approvalToken || null,
+    now,
+    completedAt || null,
+    id
+  );
+
+  return getAgentTaskById(id);
+}
+
+export function addAgentTaskObservation(
+  id: string,
+  obs: { tool?: string; input?: unknown; output?: string; status: 'success' | 'warning' | 'error' }
+): void {
+  const db = getDatabase();
+  const existing = getAgentTaskById(id);
+  if (!existing) return;
+
+  const observations = existing.observations;
+  observations.push({
+    timestamp: new Date().toISOString(),
+    tool: obs.tool,
+    input: obs.input,
+    output: obs.output,
+    status: obs.status,
+  });
+
+  db.prepare(`
+    UPDATE agent_tasks
+    SET observations_json = ?, updated_at = ?
+    WHERE id = ?
+  `).run(JSON.stringify(observations), new Date().toISOString(), id);
+}
+
+export function verifyAgentTask(
+  id: string,
+  verification: {
+    verified: boolean;
+    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval';
+    details: string;
+  }
+): void {
+  const db = getDatabase();
+  const payload = {
+    ...verification,
+    verifiedAt: new Date().toISOString(),
+  };
+
+  db.prepare(`
+    UPDATE agent_tasks
+    SET verification_json = ?, updated_at = ?
+    WHERE id = ?
+  `).run(JSON.stringify(payload), new Date().toISOString(), id);
+
+  logAuditEvent('TASK_VERIFIED', `Task ${id} verification: ${verification.verified ? 'PASSED' : 'FAILED'} (${verification.method})`, verification.verified ? 'success' : 'failed');
+}
+
+// ==========================================
+// EVIDENCE ENGINE (Stage 4)
+// ==========================================
+export interface DbEvidenceRecord {
+  id: string;
+  missionId?: string;
+  taskId?: string;
+  agentId: string;
+  agentName: string;
+  timestamp: string;
+  actionType: 'model_call' | 'tool_selection' | 'tool_exec' | 'human_approval' | 'browser_visit' | 'file_write' | 'shell_exec' | 'verification';
+  summary: string;
+  details: {
+    toolName?: string;
+    inputParams?: Record<string, unknown>;
+    output?: string;
+    exitCode?: number;
+    sourceCitations?: string[];
+    fileDiff?: string;
+    filePath?: string;
+    verificationResult?: boolean;
+  };
+  status: 'success' | 'warning' | 'failed' | 'blocked';
+}
+
+export function recordEvidence(record: {
+  missionId?: string;
+  taskId?: string;
+  agentId: string;
+  agentName: string;
+  actionType: 'model_call' | 'tool_selection' | 'tool_exec' | 'human_approval' | 'browser_visit' | 'file_write' | 'shell_exec' | 'verification';
+  summary: string;
+  details?: Record<string, unknown>;
+  status?: 'success' | 'warning' | 'failed' | 'blocked';
+}): DbEvidenceRecord {
+  const db = getDatabase();
+  const id = `ev-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+
+  // Sanitize details: strip secrets if present
+  const safeDetails = { ...(record.details || {}) };
+  for (const k of Object.keys(safeDetails)) {
+    if (k.toLowerCase().includes('key') || k.toLowerCase().includes('token') || k.toLowerCase().includes('secret')) {
+      safeDetails[k] = '[REDACTED]';
+    }
+  }
+
+  db.prepare(`
+    INSERT INTO evidence_records (
+      id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    record.missionId || null,
+    record.taskId || null,
+    record.agentId,
+    record.agentName,
+    now,
+    record.actionType,
+    record.summary,
+    JSON.stringify(safeDetails),
+    record.status || 'success'
+  );
+
+  return {
+    id,
+    missionId: record.missionId,
+    taskId: record.taskId,
+    agentId: record.agentId,
+    agentName: record.agentName,
+    timestamp: now,
+    actionType: record.actionType,
+    summary: record.summary,
+    details: safeDetails,
+    status: record.status || 'success',
+  };
+}
+
+export function listEvidence(filter?: { missionId?: string; taskId?: string; agentId?: string }): DbEvidenceRecord[] {
+  const db = getDatabase();
+  let query = `SELECT * FROM evidence_records WHERE 1=1`;
+  const params: any[] = [];
+
+  if (filter?.missionId) {
+    query += ` AND mission_id = ?`;
+    params.push(filter.missionId);
+  }
+  if (filter?.taskId) {
+    query += ` AND task_id = ?`;
+    params.push(filter.taskId);
+  }
+  if (filter?.agentId) {
+    query += ` AND agent_id = ?`;
+    params.push(filter.agentId);
+  }
+
+  query += ` ORDER BY timestamp ASC`;
+  const rows = db.prepare(query).all(...params) as any[];
+
+  return rows.map((r) => ({
+    id: r.id,
+    missionId: r.mission_id || undefined,
+    taskId: r.task_id || undefined,
+    agentId: r.agent_id,
+    agentName: r.agent_name,
+    timestamp: r.timestamp,
+    actionType: r.action_type,
+    summary: r.summary,
+    details: JSON.parse(r.details_json || '{}'),
+    status: r.status,
+  }));
+}
+
+export function exportRedactedActivityReport(missionId?: string): {
+  reportDate: string;
+  totalRecords: number;
+  missionId?: string;
+  timeline: {
+    time: string;
+    agent: string;
+    type: string;
+    summary: string;
+    status: string;
+    citations?: string[];
+    exitCode?: number;
+  }[];
+} {
+  const records = listEvidence({ missionId });
+
+  return {
+    reportDate: new Date().toISOString(),
+    totalRecords: records.length,
+    missionId,
+    timeline: records.map((r) => ({
+      time: r.timestamp,
+      agent: r.agentName,
+      type: r.actionType,
+      summary: r.summary,
+      status: r.status,
+      citations: r.details.sourceCitations,
+      exitCode: r.details.exitCode,
+    })),
+  };
+}
+

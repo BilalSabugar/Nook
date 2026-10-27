@@ -31,9 +31,12 @@
 
 **Nook** provides a dedicated, single-user operating environment for AI coworkers. Rather than disposable, stateless chat threads, Nook pairs each coworker with:
 - **Persistent Persona & Role**: Scout (Research), Quill (Technical Writing), Cipher (DevOps & Code), and Aura (Architecture & Strategy).
+- **Persistent Missions & Objectives**: Multi-milestone goals with dependency scheduling, autonomous coworker delegation, and verifiable progress.
+- **Immutable Evidence Engine**: Every agent action creates an inspectable execution record with tool inputs, citations, command exit codes, and output artifacts.
 - **Agent Computer**: An execution environment with shell execution, file synchronization, and web browsing.
-- **Living Spaces**: Markdown canvas with version tracking, immutable revision logs, and document rollbacks.
+- **Living Spaces**: Markdown canvas with version tracking, immutable revision logs, full-text search, and document rollbacks.
 - **Server-Side Governance**: Human-in-the-loop review cards requiring cryptographic single-use approvals before executing mutating actions.
+- **100% Sovereign & Self-Hostable**: Complete offline-first execution with local Ollama model integration and full workspace export/import.
 
 ---
 
@@ -46,17 +49,22 @@ graph TD
   subgraph Frontend [Client Workspace]
     Gateway <--> UI[Nook Desktop Interface]
     UI <--> Chat[Coworker Chat & Review Cards]
+    UI <--> Missions[Missions & Milestone Tracker]
     UI <--> Spaces[Living Spaces Editor & Revisions]
     UI <--> Computer[Agent Computer Modal]
   end
 
   subgraph BackendEngine [Security & Execution Services]
     Gateway <--> AuthRoute[/api/auth/session - HMAC Auth/]
+    Gateway <--> MissionRoute[/api/missions - Aura Orchestrator/]
+    Gateway <--> EvidenceRoute[/api/missions/evidence - Evidence Engine/]
     Gateway <--> ApprRoute[/api/approvals - Atomic Single-Use Approvals/]
     Gateway <--> ExecRoute[/api/sandbox/exec - Isolated Shell Runner/]
     Gateway <--> BrowseRoute[/api/sandbox/browse - SSRF-Protected Fetch/]
     Gateway <--> MCPRoute[/api/mcp - MCP JSON-RPC 2.0 Server/]
     Gateway <--> JobsRoute[/api/jobs - Durable Background Queue/]
+    Gateway <--> SearchRoute[/api/workspace/search - FTS Workspace Search/]
+    Gateway <--> ExportRoute[/api/workspace/export - Sovereign Data Backup/]
     Gateway <--> ChatRoute[/api/chat - Multi-Model Router/]
   end
 
@@ -112,6 +120,12 @@ Security and correctness take strict precedence over release claims or cosmetic 
 | **Filesystem & Path Traversal Guard** | **Implemented & Verified** | `path.resolve` containment checks, sanitized basenames, size limits. |
 | **SSRF Defense Engine** | **Implemented & Verified** | Blocks loopback, cloud metadata, private CIDRs, DNS rebinding. |
 | **Encrypted Secrets Vault** | **Implemented & Verified** | AES-256-GCM encryption with 0600 file permissions and masked UI display. |
+| **Aura Central Orchestrator** | **Implemented & Verified** | Multi-agent objective decomposition, milestone dependency trees, task delegation. |
+| **Persistent Missions Engine** | **Implemented & Verified** | SQLite WAL schema, status lifecycles, and persistent multi-session recovery. |
+| **Immutable Evidence Engine** | **Implemented & Verified** | Inspectable timeline of tool inputs, source citations, exit codes, diffs & report export. |
+| **Sovereign Local Self-Hostability** | **Implemented & Verified** | Zero-cloud deployment with Ollama, full workspace export/import without plaintext secrets. |
+| **Plugin & Extension System** | **Implemented & Verified** | Versioned manifests, JSON-RPC tools, per-agent permissions, execution timeouts. |
+| **Knowledge Workspace Search** | **Implemented & Verified** | High-performance SQLite full-text search across spaces, documents, excerpts, and tags. |
 | **Model Provider Router** | **Implemented & Verified** | Gemini, OpenAI, Claude, local Ollama; fails loud with HTTP 502 on provider errors. |
 | **Model Context Protocol (MCP)** | **Implemented & Verified** | JSON-RPC 2.0 (`web_search`, `fetch_url`, `calculate`, `format_document`). |
 | **Living Spaces Persistence** | **Implemented & Verified** | SQLite WAL engine, version increments (`v1`...`vN`), immutable revisions, rollback. |
@@ -120,6 +134,18 @@ Security and correctness take strict precedence over release claims or cosmetic 
 | **Browser / Web Scraper** | **Implemented & Verified** | SSRF-validated web content extraction and readable text generation. |
 | **Voice Calls** | **Simulation** | UI demonstration with reactive Web Audio API waveforms and captions. |
 | **Interactive Headless Browser** | **Planned (Roadmap)** | Remote interactive Playwright / WebRTC container streaming. |
+
+---
+
+## 🏆 Competitive Parity & Benchmarks
+
+Nook is benchmarked against CopilotKit OpenDots (`commit 8091324` / `c2569bb`) and OpenBot:
+
+- **Exhaustive Competitive Audit**: See [`docs/competitive/OPENDOTS_COMPARISON.md`](docs/competitive/OPENDOTS_COMPARISON.md) for side-by-side technical evaluation across 17 architectural categories.
+- **Reproducible Benchmark Suite**: See [`benchmarks/nook-vs-opendots/BENCHMARK_RESULTS.md`](benchmarks/nook-vs-opendots/BENCHMARK_RESULTS.md) for automated benchmarks (100% pass rate).
+- **Verified End-to-End Demonstrations**: See [`docs/demonstrations/DEMONSTRATIONS.md`](docs/demonstrations/DEMONSTRATIONS.md) covering autonomous research, sandbox testing, multi-agent collaboration, and persistent crash recovery.
+- **Sovereign Self-Hosting Guide**: See [`docs/deployment/SELF_HOSTED_GUIDE.md`](docs/deployment/SELF_HOSTED_GUIDE.md) for step-by-step local setup with Ollama.
+- **Plugin Developer Guide**: See [`docs/plugins/DEVELOPER_GUIDE.md`](docs/plugins/DEVELOPER_GUIDE.md) for creating custom tools.
 
 ---
 

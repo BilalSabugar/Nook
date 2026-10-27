@@ -14,7 +14,8 @@ import {
   FileText, 
   ArrowRight,
   Sparkles,
-  Command
+  Command,
+  Target
 } from 'lucide-react';
 import { AgentArchetypeIcon, SpaceArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
@@ -25,7 +26,7 @@ interface CommandPaletteProps {
   spaces: Space[];
   onSelectAgent: (agentId: string) => void;
   onSelectSpace: (spaceId: string) => void;
-  onSelectView: (view: 'space' | 'agent' | 'computer' | 'tools') => void;
+  onSelectView: (view: 'space' | 'agent' | 'computer' | 'tools' | 'missions') => void;
   onOpenNewAgentModal: () => void;
   onOpenNewSpaceModal: () => void;
   onOpenSettingsModal: () => void;
@@ -116,6 +117,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       },
     })),
     // Environments
+    {
+      id: 'env-missions',
+      category: 'Environments' as const,
+      title: 'Missions & Evidence Engine',
+      subtitle: 'Multi-agent orchestration, goals & verification trail',
+      icon: <Target className="w-4 h-4 text-purple-400" />,
+      action: () => {
+        onSelectView('missions');
+        onClose();
+      },
+    },
     {
       id: 'env-computer',
       category: 'Environments' as const,

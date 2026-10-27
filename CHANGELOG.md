@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-10-27
+
+### Phase 2: Multi-Agent Missions, Evidence Engine & Competitive Parity
+- **Aura Central Orchestrator & Task Delegation**:
+  - Implemented multi-agent task planning, milestone decomposition, and dependency scheduling in `@/lib/orchestrator.ts`.
+  - Autonomous task delegation across specialist personas: Scout (Research & Citations), Quill (Living Space Documentation), and Cipher (Isolated Execution & Testing).
+  - Deterministic stepping engine (`/api/missions`) executing one milestone per tick with output artifact verification.
+- **Persistent Missions Engine**:
+  - Added SQLite schema for persistent missions and agent tasks with milestones, status lifecycles, and priority management.
+  - Multi-session mission recovery surviving application and worker restarts.
+- **Immutable Evidence Engine & Verification Layer**:
+  - Unified inspectable task timeline recording tool calls, source citations, execution exit codes, and output artifacts.
+  - Secret redaction preventing sensitive environment variables from leaking into audit logs.
+  - Verification checks for research citations, code test suites, and file integrity.
+  - Redacted Markdown audit report export (`/api/missions/evidence?format=markdown`).
+- **Sovereign Local Self-Hostability & Portability**:
+  - Comprehensive zero-cloud local deployment guide with local Ollama model integration (`docs/deployment/SELF_HOSTED_GUIDE.md`).
+  - Full workspace export and import API (`/api/workspace/export` and `/api/workspace/import`), safely serializing spaces, documents, revisions, missions, and evidence while stripping secret credentials.
+- **Plugin & Extension Architecture**:
+  - Extensible plugin system (`@/lib/plugins.ts`) supporting JSON-RPC tools, per-agent permissions, typed schemas, and execution timeouts.
+  - Built-in GitHub repository inspector and document structure analyzer plugins.
+  - Developer plugin creation guide with security best practices (`docs/plugins/DEVELOPER_GUIDE.md`).
+- **Knowledge Workspace Search**:
+  - Instant SQLite full-text search across living spaces, documents, titles, excerpts, and tags (`/api/workspace/search`).
+- **Competitive Benchmark & Verification Harness**:
+  - Executable comparative benchmark suite (`benchmarks/nook-vs-opendots/run-benchmark.mjs`) evaluating multi-agent orchestration, permission bypass resistance, SSRF defense, and document revision throughput (100% pass rate).
+  - Executable real-world end-to-end demonstrations (`docs/demonstrations/run-demonstrations.mjs`) covering autonomous research, sandbox testing, multi-agent collaboration, and persistent worker crash recovery (100% pass rate).
+  - Exhaustive competitive audit vs CopilotKit OpenDots & OpenBot (`docs/competitive/OPENDOTS_COMPARISON.md`).
+- **User Interface Integration**:
+  - Dedicated Mission Dashboard (`MissionDashboard.tsx`) with goal decomposition forms, milestone progress bars, interactive task observation logs, and evidence inspection cards.
+  - Integrated into main sidebar and ⌘K command palette.
+
+---
+
 ## [1.1.0] - 2026-10-27
 
 ### Security Remediation & Architecture Upgrades

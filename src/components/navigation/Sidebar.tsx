@@ -12,7 +12,7 @@ import {
   Search, 
   X,
   Layers,
-  Circle
+  Target
 } from 'lucide-react';
 import { AgentArchetypeIcon, SpaceArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
@@ -21,10 +21,10 @@ interface SidebarProps {
   agents: Agent[];
   activeSpaceId: string | null;
   activeAgentId: string | null;
-  activeView: 'space' | 'agent' | 'computer' | 'tools';
+  activeView: 'space' | 'agent' | 'computer' | 'tools' | 'missions';
   onSelectSpace: (spaceId: string) => void;
   onSelectAgent: (agentId: string) => void;
-  onSelectView: (view: 'space' | 'agent' | 'computer' | 'tools') => void;
+  onSelectView: (view: 'space' | 'agent' | 'computer' | 'tools' | 'missions') => void;
   onOpenNewAgentModal: () => void;
   onOpenNewSpaceModal: () => void;
   onOpenSettingsModal: () => void;
@@ -233,6 +233,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <div className="space-y-0.5">
+            <button
+              onClick={() => onSelectView('missions')}
+              className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-2 transition-colors ${
+                activeView === 'missions'
+                  ? 'bg-purple-500/15 text-purple-200 font-medium border border-purple-500/30'
+                  : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+              }`}
+            >
+              <Target className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs truncate">Missions & Evidence</p>
+                <p className="text-[10px] text-neutral-500 truncate">Orchestration & Verification</p>
+              </div>
+            </button>
+
             <button
               onClick={() => onSelectView('computer')}
               className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-2 transition-colors ${

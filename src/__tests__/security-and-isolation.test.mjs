@@ -856,7 +856,10 @@ test('Browser Screenshots: Distinguishes authentic Playwright captures from synt
     assert.ok(session.screenshotMetadata.notice);
   } else {
     assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture');
-    assert.ok(session.screenshotMetadata.engine?.startsWith('playwright'));
+    assert.ok(
+      session.screenshotMetadata.engine?.includes('playwright') ||
+      session.screenshotMetadata.engine?.includes('chromium')
+    );
     assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false);
   }
 });

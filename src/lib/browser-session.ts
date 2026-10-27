@@ -241,7 +241,7 @@ export async function captureRealBrowserScreenshot(
     const pw = (await dynamicImport('playwright')) as typeof import('playwright');
     const { chromium } = pw;
     let browser: import('playwright').Browser | null = null;
-    let engine = 'chromium';
+    let engine = 'playwright_chromium';
 
     // 1. Try default bundled or installed chromium
     try {
@@ -249,6 +249,7 @@ export async function captureRealBrowserScreenshot(
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
       });
+      engine = 'playwright_chromium';
     } catch {
       // 2. Try system channels: msedge on Windows, chrome/chromium on Linux
       const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chromium', 'chrome'];

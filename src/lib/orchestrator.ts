@@ -13,6 +13,9 @@ import {
   createApproval,
   getApprovalById,
   verifyAndConsumeApproval,
+  acquireWorkerLease,
+  releaseWorkerLease,
+  validateWorkerLease,
 } from './db.ts';
 import type { DbMission, DbAgentTask } from './db.ts';
 import { safeFetch } from './ssrf.ts';
@@ -176,8 +179,16 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
     const retrievedSources = [...links];
 
     // Inspect actual source content via safeFetch to verify claims against primary text
-    const verifiedClaims: Array<{ sourceUrl: string; sourceTitle: string; snippet: string; verified: boolean }> = [];
+    const verifiedClaims: Array<{ sourceUrl: string; sourceTitle: string; snippet: string; verified: boolean; quotedEvidence?: string }> = [];
     const verifiedCitations: string[] = [];
+
+    // Extract substantive content terms from research query (excluding common stopwords)
+    const stopwords = new Set(['the', 'and', 'with', 'for', 'about', 'which', 'that', 'from', 'this', 'have', 'what', 'when', 'where', 'some', 'into', 'over', 'more', 'how', 'why', 'can']);
+    const claimKeywords = searchedQuery
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !stopwords.has(w));
 
     for (let idx = 0; idx < Math.min(links.length, 3); idx++) {
       const link = links[idx];
@@ -188,26 +199,55 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       try {
         const pageRes = await safeFetch(link, { timeoutMs: 4000 });
         if (pageRes.ok && pageRes.bodyText) {
-          const bodyLower = pageRes.bodyText.toLowerCase();
-          const queryWords = searchedQuery.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-          const hasKeywordMatch = queryWords.length === 0 || queryWords.some((w) => bodyLower.includes(w));
+          // Clean page text
+          const cleanText = pageRes.bodyText
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
 
-          if (hasKeywordMatch) {
-            const cleanText = pageRes.bodyText
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim()
-              .slice(0, 300);
+          // Split into sentences for claim-to-source evidence verification
+          const sentences = cleanText
+            .split(/(?<=[.!?])\s+/)
+            .map((s) => s.trim())
+            .filter((s) => s.length >= 35 && s.length <= 450);
 
-            if (cleanText.length > 30) {
-              verifiedCitations.push(link);
-              verifiedClaims.push({
-                sourceUrl: link,
-                sourceTitle: title,
-                snippet: cleanText,
-                verified: true,
-              });
+          let bestSentence = '';
+          let maxMatches = 0;
+
+          for (const sentence of sentences) {
+            const sLower = sentence.toLowerCase();
+            if (sLower.includes('may refer to') || sLower.includes('disambiguation') || sLower.includes('external links')) {
+              continue;
             }
+            const matchCount = claimKeywords.filter((kw) => sLower.includes(kw)).length;
+            if (matchCount > maxMatches) {
+              maxMatches = matchCount;
+              bestSentence = sentence;
+            }
+          }
+
+          // Rigorous evidentiary threshold: sentence must substantiate the claim
+          const minRequiredMatches = Math.min(2, Math.max(1, Math.ceil(claimKeywords.length * 0.4)));
+          const claimSupported = maxMatches >= minRequiredMatches && bestSentence.length > 0;
+
+          if (claimSupported) {
+            verifiedCitations.push(link);
+            verifiedClaims.push({
+              sourceUrl: link,
+              sourceTitle: title,
+              snippet: bestSentence,
+              quotedEvidence: bestSentence,
+              verified: true,
+            });
+          } else {
+            verifiedClaims.push({
+              sourceUrl: link,
+              sourceTitle: title,
+              snippet: bestSentence || 'Source document does not contain verifiable sentence substantiating the claim.',
+              verified: false,
+            });
           }
         }
       } catch {
@@ -592,48 +632,89 @@ ${citationsList}
  * Ticks an active mission:
  * Finds pending tasks whose dependencies are met, executes them,
  * and updates milestone and mission status.
+ * Enforces atomic SQLite database leases and fencing tokens across all execution paths.
  */
-export async function tickMission(missionId: string): Promise<DbMission> {
+export async function tickMission(
+  missionId: string,
+  actorId: string = 'nook-orchestrator',
+  leaseDurationMs: number = 30000
+): Promise<DbMission & { leaseBusy?: boolean; fencingToken?: number }> {
   const mission = getMissionById(missionId);
   if (!mission || mission.status === 'completed' || mission.status === 'cancelled') {
     return mission!;
   }
 
-  updateMissionStatus(missionId, 'active');
-  const tasks = listTasksForMission(missionId);
+  // Enforce atomic SQLite lease to prevent concurrent stepping across workers or API calls
+  const leaseResource = `mission:${missionId}`;
+  const lease = acquireWorkerLease(leaseResource, actorId, leaseDurationMs);
+  if (!lease.acquired) {
+    return {
+      ...mission,
+      leaseBusy: true,
+    };
+  }
 
-  for (const task of tasks) {
-    // If pending, or blocked waiting on an approval that may now be decided
-    if (task.status === 'pending' || (task.status === 'blocked' && task.approvalId)) {
-      await executeTaskStep(task);
-      break; // Execute one task step per tick for deterministic progression
+  try {
+    // Validate lease before state transitions
+    const isLeaseValid = validateWorkerLease(leaseResource, actorId, lease.fencingToken);
+    if (!isLeaseValid) {
+      throw new Error(`Worker lease invalidated for mission ${missionId} by superseding token`);
+    }
+
+    updateMissionStatus(missionId, 'active');
+    const tasks = listTasksForMission(missionId);
+
+    for (const task of tasks) {
+      // If pending, or blocked waiting on an approval that may now be decided
+      if (task.status === 'pending' || (task.status === 'blocked' && task.approvalId)) {
+        await executeTaskStep(task);
+        break; // Execute one task step per tick for deterministic progression
+      }
+    }
+
+    // Refresh tasks after step
+    const updatedTasks = listTasksForMission(missionId);
+    const allCompleted = updatedTasks.every((t) => t.status === 'completed');
+    const anyFailed = updatedTasks.some((t) => t.status === 'failed');
+    const anyBlocked = updatedTasks.some((t) => t.status === 'blocked');
+
+    if (allCompleted) {
+      const allVerified = updatedTasks.every((t) => t.verification?.verified !== false);
+      updateMissionStatus(missionId, 'completed');
+      recordEvidence({
+        missionId,
+        agentId: 'agent-aura',
+        agentName: 'Aura',
+        actionType: 'verification',
+        summary: allVerified
+          ? `Mission "${mission.title}" successfully completed all milestones with full verification`
+          : `Mission "${mission.title}" completed all milestones with preliminary/unverified caveats`,
+        status: allVerified ? 'success' : 'warning',
+      });
+    } else if (anyFailed) {
+      updateMissionStatus(missionId, 'failed');
+    } else if (anyBlocked) {
+      updateMissionStatus(missionId, 'paused');
+    }
+
+    const finalMission = getMissionById(missionId)!;
+    return {
+      ...finalMission,
+      leaseBusy: false,
+      fencingToken: lease.fencingToken,
+    };
+  } finally {
+    // Release lease if mission reached terminal/paused state, or if this was an ephemeral manual API tick
+    const current = getMissionById(missionId);
+    if (
+      actorId.startsWith('api-') ||
+      !current ||
+      current.status === 'completed' ||
+      current.status === 'failed' ||
+      current.status === 'paused' ||
+      current.status === 'cancelled'
+    ) {
+      releaseWorkerLease(leaseResource, actorId);
     }
   }
-
-  // Refresh tasks after step
-  const updatedTasks = listTasksForMission(missionId);
-  const allCompleted = updatedTasks.every((t) => t.status === 'completed');
-  const anyFailed = updatedTasks.some((t) => t.status === 'failed');
-  const anyBlocked = updatedTasks.some((t) => t.status === 'blocked');
-
-  if (allCompleted) {
-    const allVerified = updatedTasks.every((t) => t.verification?.verified !== false);
-    updateMissionStatus(missionId, 'completed');
-    recordEvidence({
-      missionId,
-      agentId: 'agent-aura',
-      agentName: 'Aura',
-      actionType: 'verification',
-      summary: allVerified
-        ? `Mission "${mission.title}" successfully completed all milestones with full verification`
-        : `Mission "${mission.title}" completed all milestones with preliminary/unverified caveats`,
-      status: allVerified ? 'success' : 'warning',
-    });
-  } else if (anyFailed) {
-    updateMissionStatus(missionId, 'failed');
-  } else if (anyBlocked) {
-    updateMissionStatus(missionId, 'paused');
-  }
-
-  return getMissionById(missionId)!;
 }

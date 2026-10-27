@@ -237,6 +237,129 @@ export interface DbApprovalRecord {
 
 export type RedactedApprovalRecord = Omit<DbApprovalRecord, 'singleUseToken'>;
 
+interface ApprovalRow {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  type: 'run_command' | 'save_page' | 'mcp_action';
+  title: string;
+  description?: string;
+  target_space_id?: string;
+  payload_json: string;
+  status: 'pending' | 'approved' | 'declined' | 'consumed' | 'rolled_back';
+  created_at: string;
+  expires_at: string;
+  single_use_token: string;
+  decision_at?: string;
+  decision_reason?: string;
+  execution_result_json?: string;
+}
+
+interface JobRow {
+  id: string;
+  agent_id: string;
+  task_type: 'research' | 'code_test' | 'doc_generation' | 'multi_agent_workflow';
+  title: string;
+  prompt?: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  progress: number;
+  steps_json?: string;
+  result_json?: string;
+  error?: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+interface SpaceRow {
+  id: string;
+  name: string;
+  icon?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DocumentRow {
+  id: string;
+  space_id: string;
+  title: string;
+  content: string;
+  excerpt?: string;
+  icon?: string;
+  author_agent_id: string;
+  version: number;
+  tags_json?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RevisionRow {
+  id: string;
+  document_id: string;
+  version: number;
+  title: string;
+  content: string;
+  author_agent_id: string;
+  created_at: string;
+  change_summary?: string;
+}
+
+interface MissionRow {
+  id: string;
+  title: string;
+  objective: string;
+  status: 'draft' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  priority: 'low' | 'medium' | 'high';
+  assigned_agents_json?: string;
+  milestones_json?: string;
+  budget_json?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+interface AgentTaskRow {
+  id: string;
+  mission_id: string;
+  title: string;
+  goal: string;
+  assigned_agent_id: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'blocked' | 'requires_approval';
+  dependencies_json?: string;
+  priority: 'low' | 'medium' | 'high';
+  inputs_json?: string;
+  outputs_json?: string;
+  observations_json?: string;
+  verification_json?: string;
+  approval_id?: string;
+  approval_token?: string;
+  error?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+}
+
+interface EvidenceRow {
+  id: string;
+  mission_id?: string;
+  task_id?: string;
+  agent_id: string;
+  agent_name: string;
+  timestamp: string;
+  action_type: 'human_approval' | 'model_call' | 'tool_selection' | 'tool_exec' | 'browser_visit' | 'file_write' | 'shell_exec' | 'verification';
+  summary: string;
+  details_json?: string;
+  status: string;
+}
+
+interface WorkerLeaseRow {
+  resource_id: string;
+  owner_id: string;
+  fencing_token: number;
+  acquired_at: string;
+  expires_at: string;
+}
+
 export function redactApproval(record: DbApprovalRecord): RedactedApprovalRecord;
 export function redactApproval(record: undefined): undefined;
 export function redactApproval(record?: DbApprovalRecord): RedactedApprovalRecord | undefined;
@@ -254,7 +377,7 @@ export function createApproval(record: {
   title: string;
   description?: string;
   targetSpaceId?: string;
-  payload: Record<string, any>;
+  payload: Record<string, unknown>;
   ttlMs?: number;
 }): DbApprovalRecord {
   const db = getDatabase();
@@ -306,7 +429,7 @@ export function createApproval(record: {
 export function listApprovals(includeSecretTokens: boolean = false): DbApprovalRecord[] {
   const db = getDatabase();
   const stmt = db.prepare(`SELECT * FROM approvals ORDER BY created_at DESC`);
-  const rows = stmt.all() as any[];
+  const rows = stmt.all() as unknown as ApprovalRow[];
 
   return rows.map((r) => ({
     id: r.id,
@@ -330,7 +453,7 @@ export function listApprovals(includeSecretTokens: boolean = false): DbApprovalR
 export function getApprovalById(id: string): DbApprovalRecord | null {
   const db = getDatabase();
   const stmt = db.prepare(`SELECT * FROM approvals WHERE id = ?`);
-  const r = stmt.get(id) as any;
+  const r = stmt.get(id) as unknown as ApprovalRow | undefined;
   if (!r) return null;
 
   return {
@@ -517,7 +640,7 @@ export function enqueueJob(job: {
 
 export function listJobs(): DbBackgroundJob[] {
   const db = getDatabase();
-  const rows = db.prepare(`SELECT * FROM background_jobs ORDER BY created_at DESC`).all() as any[];
+  const rows = db.prepare(`SELECT * FROM background_jobs ORDER BY created_at DESC`).all() as unknown as JobRow[];
 
   return rows.map((r) => ({
     id: r.id,
@@ -538,7 +661,7 @@ export function listJobs(): DbBackgroundJob[] {
 
 export function getJobById(id: string): DbBackgroundJob | null {
   const db = getDatabase();
-  const r = db.prepare(`SELECT * FROM background_jobs WHERE id = ?`).get(id) as any;
+  const r = db.prepare(`SELECT * FROM background_jobs WHERE id = ?`).get(id) as unknown as JobRow | undefined;
   if (!r) return null;
 
   return {
@@ -561,7 +684,7 @@ export function getJobById(id: string): DbBackgroundJob | null {
 export function claimNextQueuedJob(): DbBackgroundJob | null {
   const db = getDatabase();
   // Find oldest queued job
-  const next = db.prepare(`SELECT id FROM background_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1`).get() as any;
+  const next = db.prepare(`SELECT id FROM background_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1`).get() as unknown as { id: string } | undefined;
   if (!next) return null;
 
   const now = new Date().toISOString();
@@ -686,15 +809,15 @@ export function saveSpace(space: { id: string; name: string; icon: string }): vo
   `).run(space.id, space.name, space.icon, now, now);
 }
 
-export function listSpacesWithDocuments(): any[] {
+export function listSpacesWithDocuments(): Array<{ id: string; name: string; icon: string; createdAt: string; updatedAt: string; pages: Array<{ id: string; spaceId: string; title: string; content: string; excerpt?: string; icon?: string; authorAgentId: string; version: number; tags: string[]; createdAt: string; updatedAt: string }> }> {
   const db = getDatabase();
-  const spaces = db.prepare(`SELECT * FROM spaces ORDER BY created_at ASC`).all() as any[];
-  const docs = db.prepare(`SELECT * FROM documents ORDER BY updated_at DESC`).all() as any[];
+  const spaces = db.prepare(`SELECT * FROM spaces ORDER BY created_at ASC`).all() as unknown as SpaceRow[];
+  const docs = db.prepare(`SELECT * FROM documents ORDER BY updated_at DESC`).all() as unknown as DocumentRow[];
 
   return spaces.map((s) => ({
     id: s.id,
     name: s.name,
-    icon: s.icon,
+    icon: s.icon || 'folder',
     createdAt: s.created_at,
     updatedAt: s.updated_at,
     pages: docs
@@ -730,7 +853,7 @@ export function saveDocumentWithRevision(doc: {
   const now = new Date().toISOString();
 
   // Check if document exists to increment version
-  const existing = db.prepare(`SELECT version FROM documents WHERE id = ?`).get(doc.id) as any;
+  const existing = db.prepare(`SELECT version FROM documents WHERE id = ?`).get(doc.id) as unknown as { version: number } | undefined;
   const newVersion = existing ? existing.version + 1 : 1;
 
   // Transaction for atomic document update + revision log
@@ -815,7 +938,7 @@ export function listDocumentRevisions(documentId: string): DbDocumentRevision[] 
     SELECT * FROM document_revisions
     WHERE document_id = ?
     ORDER BY version DESC
-  `).all(documentId) as any[];
+  `).all(documentId) as unknown as RevisionRow[];
 
   return rows.map((r) => ({
     id: r.id,
@@ -834,7 +957,7 @@ export function rollbackDocumentToVersion(documentId: string, targetVersion: num
   const rev = db.prepare(`
     SELECT * FROM document_revisions
     WHERE document_id = ? AND version = ?
-  `).get(documentId, targetVersion) as any;
+  `).get(documentId, targetVersion) as unknown as RevisionRow | undefined;
 
   if (!rev) {
     throw new Error(`Revision v${targetVersion} for document ${documentId} not found.`);
@@ -959,7 +1082,7 @@ export function createMission(mission: {
 
 export function getMissionById(id: string): DbMission | null {
   const db = getDatabase();
-  const row = db.prepare(`SELECT * FROM missions WHERE id = ?`).get(id) as any;
+  const row = db.prepare(`SELECT * FROM missions WHERE id = ?`).get(id) as unknown as MissionRow | undefined;
   if (!row) return null;
 
   const tasks = listTasksForMission(id);
@@ -968,8 +1091,8 @@ export function getMissionById(id: string): DbMission | null {
     id: row.id,
     title: row.title,
     objective: row.objective,
-    status: row.status,
-    priority: row.priority,
+    status: row.status as DbMission['status'],
+    priority: row.priority as DbMission['priority'],
     assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
     milestones: JSON.parse(row.milestones_json || '[]'),
     budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
@@ -982,14 +1105,14 @@ export function getMissionById(id: string): DbMission | null {
 
 export function listMissions(): DbMission[] {
   const db = getDatabase();
-  const rows = db.prepare(`SELECT * FROM missions ORDER BY created_at DESC`).all() as any[];
+  const rows = db.prepare(`SELECT * FROM missions ORDER BY created_at DESC`).all() as unknown as MissionRow[];
 
   return rows.map((row) => ({
     id: row.id,
     title: row.title,
     objective: row.objective,
-    status: row.status,
-    priority: row.priority,
+    status: row.status as DbMission['status'],
+    priority: row.priority as DbMission['priority'],
     assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
     milestones: JSON.parse(row.milestones_json || '[]'),
     budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
@@ -1069,7 +1192,7 @@ export function createAgentTask(task: {
 
 export function getAgentTaskById(id: string): DbAgentTask | null {
   const db = getDatabase();
-  const r = db.prepare(`SELECT * FROM agent_tasks WHERE id = ?`).get(id) as any;
+  const r = db.prepare(`SELECT * FROM agent_tasks WHERE id = ?`).get(id) as unknown as AgentTaskRow | undefined;
   if (!r) return null;
 
   return {
@@ -1078,9 +1201,9 @@ export function getAgentTaskById(id: string): DbAgentTask | null {
     title: r.title,
     goal: r.goal,
     assignedAgentId: r.assigned_agent_id,
-    status: r.status,
+    status: r.status as DbAgentTask['status'],
     dependencies: JSON.parse(r.dependencies_json || '[]'),
-    priority: r.priority,
+    priority: r.priority as DbAgentTask['priority'],
     inputs: JSON.parse(r.inputs_json || '{}'),
     outputs: JSON.parse(r.outputs_json || '{}'),
     observations: JSON.parse(r.observations_json || '[]'),
@@ -1096,7 +1219,7 @@ export function getAgentTaskById(id: string): DbAgentTask | null {
 
 export function listTasksForMission(missionId: string): DbAgentTask[] {
   const db = getDatabase();
-  const rows = db.prepare(`SELECT * FROM agent_tasks WHERE mission_id = ? ORDER BY created_at ASC`).all(missionId) as any[];
+  const rows = db.prepare(`SELECT * FROM agent_tasks WHERE mission_id = ? ORDER BY created_at ASC`).all(missionId) as unknown as AgentTaskRow[];
 
   return rows.map((r) => ({
     id: r.id,
@@ -1104,7 +1227,7 @@ export function listTasksForMission(missionId: string): DbAgentTask[] {
     title: r.title,
     goal: r.goal,
     assignedAgentId: r.assigned_agent_id,
-    status: r.status,
+    status: r.status as DbAgentTask['status'],
     dependencies: JSON.parse(r.dependencies_json || '[]'),
     priority: r.priority,
     inputs: JSON.parse(r.inputs_json || '{}'),
@@ -1285,7 +1408,7 @@ export function recordEvidence(record: {
 export function listEvidence(filter?: { missionId?: string; taskId?: string; agentId?: string }): DbEvidenceRecord[] {
   const db = getDatabase();
   let query = `SELECT * FROM evidence_records WHERE 1=1`;
-  const params: any[] = [];
+  const params: (string | number)[] = [];
 
   if (filter?.missionId) {
     query += ` AND mission_id = ?`;
@@ -1301,7 +1424,7 @@ export function listEvidence(filter?: { missionId?: string; taskId?: string; age
   }
 
   query += ` ORDER BY timestamp ASC`;
-  const rows = db.prepare(query).all(...params) as any[];
+  const rows = db.prepare(query).all(...params) as unknown as EvidenceRow[];
 
   return rows.map((r) => ({
     id: r.id,
@@ -1313,7 +1436,7 @@ export function listEvidence(filter?: { missionId?: string; taskId?: string; age
     actionType: r.action_type,
     summary: r.summary,
     details: JSON.parse(r.details_json || '{}'),
-    status: r.status,
+    status: r.status as DbEvidenceRecord['status'],
   }));
 }
 
@@ -1389,7 +1512,7 @@ export function acquireWorkerLease(
 
   const info = stmt.run(resourceId, ownerId, acquiredAt, expiresAt, acquiredAt, ownerId);
   if (info.changes === 0) {
-    const current = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as any;
+    const current = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as unknown as WorkerLeaseRow | undefined;
     return {
       acquired: false,
       fencingToken: current ? current.fencing_token : 0,
@@ -1397,7 +1520,7 @@ export function acquireWorkerLease(
     };
   }
 
-  const updated = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as any;
+  const updated = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as unknown as WorkerLeaseRow;
   return {
     acquired: true,
     fencingToken: updated.fencing_token,
@@ -1427,7 +1550,7 @@ export function validateWorkerLease(resourceId: string, ownerId: string, expecte
   const db = getDatabase();
   const nowIso = new Date().toISOString();
   let query = `SELECT * FROM worker_leases WHERE resource_id = ? AND owner_id = ? AND expires_at > ?`;
-  const params: any[] = [resourceId, ownerId, nowIso];
+  const params: (string | number)[] = [resourceId, ownerId, nowIso];
   if (expectedFencingToken !== undefined) {
     query += ` AND fencing_token = ?`;
     params.push(expectedFencingToken);

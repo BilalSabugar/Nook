@@ -27,6 +27,12 @@ export interface ObservableBrowserSession {
   links: Array<{ text: string; href: string }>;
   interactiveElements: InteractiveElement[];
   screenshotPath?: string;
+  screenshotMetadata?: {
+    isSyntheticPlaceholder: boolean;
+    captureType: 'synthetic_placeholder' | 'chromium_headless';
+    capturedAt: string;
+    notice: string;
+  };
   consoleLogs: string[];
   lastAction: string;
   updatedAt: string;
@@ -201,6 +207,12 @@ export function getOrCreateBrowserSession(agentId: string): ObservableBrowserSes
     headings: ['Welcome to Nook Coworker Browser'],
     links: [],
     interactiveElements: [],
+    screenshotMetadata: {
+      isSyntheticPlaceholder: true,
+      captureType: 'synthetic_placeholder',
+      capturedAt: new Date().toISOString(),
+      notice: 'Synthetic viewport preview. Headless Chromium capture not provisioned in this environment.',
+    },
     consoleLogs: ['[Supervisor] Sandboxed durable browser session initialized'],
     lastAction: 'initialized',
     updatedAt: new Date().toISOString(),
@@ -323,6 +335,12 @@ export async function navigateBrowser(
   session.links = links;
   session.interactiveElements = interactiveElements;
   session.screenshotPath = `/api/sandbox/browse/screenshot?file=${screenshotFileName}`;
+  session.screenshotMetadata = {
+    isSyntheticPlaceholder: true,
+    captureType: 'synthetic_placeholder',
+    capturedAt: new Date().toISOString(),
+    notice: 'Synthetic viewport preview. Headless Chromium capture not provisioned in this environment.',
+  };
   session.lastAction = `navigate(${response.finalUrl})`;
   session.updatedAt = new Date().toISOString();
   session.consoleLogs.push(`[Navigation Complete] Rendered "${title}" (Status ${response.status})`);
@@ -382,6 +400,12 @@ export function captureSessionScreenshot(agentId: string): string {
     // ignore write error
   }
   session.screenshotPath = `/api/sandbox/browse/screenshot?file=${screenshotFileName}`;
+  session.screenshotMetadata = {
+    isSyntheticPlaceholder: true,
+    captureType: 'synthetic_placeholder',
+    capturedAt: new Date().toISOString(),
+    notice: 'Synthetic viewport preview. Headless Chromium capture not provisioned in this environment.',
+  };
   return session.screenshotPath;
 }
 

@@ -4,47 +4,177 @@
  * Runs as an isolated execution supervisor in a separate restricted container/service.
  * Web applications and workers communicate with this runner via internal network only,
  * never exposing host Docker sockets or granting privileged access to the web tier.
+ * 
+ * Enforces:
+ * 1. Authenticated, short-lived, action-bound execution tickets signed with HMAC-SHA256.
+ * 2. Replay attack rejection.
+ * 3. Strict schema validation and 64KB payload limits.
+ * 4. Per-task workspace directory isolation with path traversal containment.
+ * 5. Environment scrub (whitelisting only safe OS vars, no host secrets).
+ * 6. Process-group termination on timeout or error (no orphaned processes).
+ * 7. Memory and output buffer constraints.
  */
 
 import http from 'http';
 import path from 'path';
 import fs from 'fs/promises';
 import { spawn } from 'child_process';
+import crypto from 'crypto';
 
 const PORT = Number(process.env.PORT || process.env.SANDBOX_PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
-const SANDBOXES_BASE = path.join(process.cwd(), '.nook_sandboxes');
+const SANDBOXES_BASE = path.resolve(process.cwd(), '.nook_sandboxes');
+const RUNNER_SECRET = process.env.SANDBOX_RUNNER_SECRET || 'nook_internal_runner_auth_secret_v1';
+const MAX_BODY_BYTES = 64 * 1024; // 64KB strict body limit
 
 const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
 
-function spawnBuffer(executable, args, options = {}) {
+// In-memory replay cache: ticketId -> expiresAt
+const consumedTickets = new Map();
+
+// Periodic cleanup of expired replay prevention tokens
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, expiresAt] of consumedTickets.entries()) {
+    if (now > expiresAt) {
+      consumedTickets.delete(id);
+    }
+  }
+}, 60000);
+
+function computeCommandHash(cmd) {
+  return crypto.createHash('sha256').update(cmd.trim()).digest('hex');
+}
+
+/**
+ * Validates the HMAC-SHA256 execution ticket.
+ */
+function validateTicket(rawTicketHeader, command, agentId) {
+  if (!rawTicketHeader) {
+    return { valid: false, status: 401, error: 'Unauthorized: Missing execution ticket. Direct unauthenticated execution is forbidden.' };
+  }
+
+  let ticket;
+  try {
+    const rawJson = rawTicketHeader.startsWith('Bearer ')
+      ? Buffer.from(rawTicketHeader.slice(7).trim(), 'base64').toString('utf8')
+      : rawTicketHeader;
+    ticket = JSON.parse(rawJson);
+  } catch {
+    return { valid: false, status: 400, error: 'Malformed execution ticket JSON or base64 encoding.' };
+  }
+
+  if (!ticket || !ticket.ticketId || !ticket.signature) {
+    return { valid: false, status: 400, error: 'Malformed ticket: missing ticketId or signature.' };
+  }
+
+  const now = Date.now();
+  if (now > ticket.expiresAt) {
+    return { valid: false, status: 403, error: 'Execution ticket has expired.' };
+  }
+
+  if (ticket.issuedAt > now + 5000) {
+    return { valid: false, status: 403, error: 'Execution ticket issued in future.' };
+  }
+
+  if (ticket.expiresAt - ticket.issuedAt > 60000) {
+    return { valid: false, status: 403, error: 'Ticket validity window exceeds 60s maximum.' };
+  }
+
+  if (ticket.action !== 'sandboxed_exec') {
+    return { valid: false, status: 403, error: 'Ticket action mismatch.' };
+  }
+
+  if (consumedTickets.has(ticket.ticketId)) {
+    return { valid: false, status: 403, error: 'Execution ticket already consumed (replay attack detected).' };
+  }
+
+  // Cryptographic HMAC check
+  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
+  const expectedSig = crypto.createHmac('sha256', RUNNER_SECRET).update(payload).digest('hex');
+
+  const sigBuf = Buffer.from(ticket.signature, 'hex');
+  const expBuf = Buffer.from(expectedSig, 'hex');
+
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return { valid: false, status: 403, error: 'Invalid execution ticket cryptographic signature.' };
+  }
+
+  // Bound command check
+  const expectedHash = computeCommandHash(command);
+  if (ticket.commandHash !== expectedHash) {
+    return { valid: false, status: 403, error: 'Ticket command hash mismatch: ticket is bound to a different command.' };
+  }
+
+  // Bound agent check
+  if (ticket.agentId !== agentId) {
+    return { valid: false, status: 403, error: 'Ticket agent mismatch: ticket is bound to a different agent.' };
+  }
+
+  // Mark ticket consumed
+  consumedTickets.set(ticket.ticketId, ticket.expiresAt);
+  return { valid: true };
+}
+
+/**
+ * Spawns an isolated child process with process-group cleanup and stream limits.
+ */
+function spawnIsolatedBuffer(executable, args, options = {}) {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let completed = false;
+    const maxBuffer = options.maxBuffer || 512 * 1024;
+    const isWin = process.platform === 'win32';
 
     const child = spawn(executable, args, {
       cwd: options.cwd || process.cwd(),
       env: options.env || {},
       shell: false,
+      detached: !isWin, // Process group leader on POSIX
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    const cleanupProcessGroup = () => {
+      try {
+        if (!isWin && child.pid) {
+          process.kill(-child.pid, 'SIGKILL');
+        } else if (child.pid) {
+          child.kill('SIGKILL');
+          spawn('taskkill', ['/pid', String(child.pid), '/t', '/f']).on('error', () => {});
+        }
+      } catch {}
+    };
 
     const timer = options.timeout ? setTimeout(() => {
       if (!completed) {
         completed = true;
-        try { child.kill('SIGKILL'); } catch {}
-        resolve({ stdout, stderr: `${stderr}\nExecution timed out after ${options.timeout}ms`, exitCode: 124 });
+        cleanupProcessGroup();
+        resolve({
+          stdout: stdout.slice(0, maxBuffer),
+          stderr: `${stderr}\nExecution timed out after ${options.timeout}ms (process group terminated)`,
+          exitCode: 124,
+        });
       }
     }, options.timeout) : null;
 
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.stdout.on('data', (d) => {
+      if (stdout.length < maxBuffer) {
+        stdout += d.toString();
+      }
+    });
+
+    child.stderr.on('data', (d) => {
+      if (stderr.length < maxBuffer) {
+        stderr += d.toString();
+      }
+    });
 
     child.on('error', (err) => {
       if (timer) clearTimeout(timer);
       if (!completed) {
         completed = true;
+        cleanupProcessGroup();
         resolve({ stdout, stderr: err.message, exitCode: 1 });
       }
     });
@@ -53,51 +183,131 @@ function spawnBuffer(executable, args, options = {}) {
       if (timer) clearTimeout(timer);
       if (!completed) {
         completed = true;
-        resolve({ stdout, stderr, exitCode: code ?? 0 });
+        resolve({
+          stdout: stdout.slice(0, maxBuffer),
+          stderr: stderr.slice(0, maxBuffer),
+          exitCode: code ?? 0,
+        });
       }
     });
   });
 }
 
 const server = http.createServer(async (req, res) => {
+  // Health check
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/api/health')) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'healthy', runner: 'dedicated_sandbox_runner', time: new Date().toISOString() }));
+    res.end(JSON.stringify({
+      status: 'healthy',
+      runner: 'dedicated_sandbox_runner',
+      authRequired: true,
+      time: new Date().toISOString(),
+    }));
     return;
   }
 
+  // Command Execution Endpoint
   if (req.method === 'POST' && req.url === '/exec') {
+    let bodyBytes = 0;
     let bodyText = '';
-    req.on('data', (chunk) => { bodyText += chunk; });
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(bodyText || '{}');
-        const { agentId, command, timeoutMs = 15000, maxBufferBytes = 1024 * 512, virtualFiles = [] } = body;
+    let payloadExceeded = false;
 
-        if (!command || typeof command !== 'string') {
+    req.on('data', (chunk) => {
+      bodyBytes += chunk.length;
+      if (bodyBytes > MAX_BODY_BYTES) {
+        payloadExceeded = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payload Too Large: maximum allowed body size is 64KB' }));
+        req.destroy();
+        return;
+      }
+      bodyText += chunk;
+    });
+
+    req.on('end', async () => {
+      if (payloadExceeded) return;
+
+      try {
+        let body;
+        try {
+          body = JSON.parse(bodyText || '{}');
+        } catch {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'command is required' }));
+          res.end(JSON.stringify({ error: 'Invalid JSON request body' }));
+          return;
+        }
+
+        const {
+          agentId,
+          command,
+          taskId,
+          timeoutMs = 15000,
+          maxBufferBytes = 1024 * 512,
+          virtualFiles = [],
+        } = body;
+
+        // 1. Strict schema validation
+        if (!command || typeof command !== 'string' || command.trim().length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'command is required and must be a non-empty string' }));
+          return;
+        }
+
+        if (command.length > 4096) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'command exceeds maximum length of 4096 characters' }));
           return;
         }
 
         const safeAgentId = (agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
-        const agentSandboxDir = path.resolve(SANDBOXES_BASE, safeAgentId);
-        await fs.mkdir(agentSandboxDir, { recursive: true });
+        if (safeAgentId.length > 64) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'agentId exceeds maximum length of 64 characters' }));
+          return;
+        }
 
-        // Write virtual files
+        const clampedTimeout = Math.max(500, Math.min(120000, Number(timeoutMs) || 15000));
+        const clampedBuffer = Math.max(1024, Math.min(2 * 1024 * 1024, Number(maxBufferBytes) || 512 * 1024));
+
+        // 2. Mandatory Authentication & Execution Ticket Verification
+        const ticketHeader = req.headers['x-nook-sandbox-ticket'] || req.headers['authorization'];
+        const authCheck = validateTicket(ticketHeader, command, safeAgentId);
+        if (!authCheck.valid) {
+          res.writeHead(authCheck.status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: authCheck.error }));
+          return;
+        }
+
+        // 3. Per-Task Workspace Jail & Filesystem Boundary
+        const agentSandboxDir = path.resolve(SANDBOXES_BASE, safeAgentId);
+        const safeTaskId = (taskId || crypto.randomUUID()).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const taskWorkspaceDir = path.resolve(agentSandboxDir, 'tasks', safeTaskId);
+
+        // Path containment check: ensure workspace is strictly within SANDBOXES_BASE
+        if (!agentSandboxDir.startsWith(SANDBOXES_BASE + path.sep) && agentSandboxDir !== SANDBOXES_BASE) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Security violation: Sandbox boundary escape blocked' }));
+          return;
+        }
+
+        await fs.mkdir(taskWorkspaceDir, { recursive: true, mode: 0o700 });
+        const tmpDir = path.resolve(agentSandboxDir, 'tmp');
+        await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+
+        // Write virtual files strictly within task workspace
         if (Array.isArray(virtualFiles)) {
           for (const f of virtualFiles) {
             const rawName = f.name || f.path;
             if (!rawName || typeof f.content !== 'string') continue;
             const sanitizedName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-            const targetFilePath = path.resolve(agentSandboxDir, sanitizedName);
-            if (targetFilePath.startsWith(agentSandboxDir + path.sep)) {
-              await fs.writeFile(targetFilePath, f.content, 'utf8');
+            const targetFilePath = path.resolve(taskWorkspaceDir, sanitizedName);
+            if (targetFilePath.startsWith(taskWorkspaceDir + path.sep)) {
+              await fs.writeFile(targetFilePath, f.content, { encoding: 'utf8', mode: 0o600 });
             }
           }
         }
 
-        // Scrub environment
+        // 4. Scrub environment (zero host secrets, safe whitelist only)
         const sanitizedEnv = {};
         for (const key of Object.keys(process.env)) {
           if (SAFE_ENV_WHITELIST.includes(key.toUpperCase())) {
@@ -105,28 +315,36 @@ const server = http.createServer(async (req, res) => {
           }
         }
         sanitizedEnv.NODE_ENV = 'production';
-        sanitizedEnv.HOME = agentSandboxDir;
+        sanitizedEnv.HOME = taskWorkspaceDir;
+        sanitizedEnv.PWD = taskWorkspaceDir;
+        sanitizedEnv.TMPDIR = tmpDir;
+        sanitizedEnv.TEMP = tmpDir;
         sanitizedEnv.USER = `agent_${safeAgentId}`;
+        sanitizedEnv.NODE_OPTIONS = '--max-old-space-size=512';
 
+        // 5. Select isolated shell
         const isWin = process.platform === 'win32';
         const executable = isWin ? 'powershell.exe' : '/bin/sh';
         const args = isWin
           ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command]
           : ['-c', command];
 
-        const result = await spawnBuffer(executable, args, {
-          cwd: agentSandboxDir,
+        // 6. Execute with process group supervision
+        const result = await spawnIsolatedBuffer(executable, args, {
+          cwd: taskWorkspaceDir,
           env: sanitizedEnv,
-          timeout: timeoutMs,
+          timeout: clampedTimeout,
+          maxBuffer: clampedBuffer,
         });
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
-          stdout: result.stdout.slice(0, maxBufferBytes),
-          stderr: result.stderr.slice(0, maxBufferBytes),
+          stdout: result.stdout,
+          stderr: result.stderr,
           exitCode: result.exitCode,
           isolatedRuntime: 'docker_container',
-          sandboxDir: agentSandboxDir,
+          sandboxDir: taskWorkspaceDir,
+          agentId: safeAgentId,
         }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -141,5 +359,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`[Nook Sandbox Runner] Dedicated execution daemon active on http://${HOST}:${PORT}`);
+  console.log(`[Nook Sandbox Runner] Dedicated execution daemon active on http://${HOST}:${PORT} (authenticated execution tickets required)`);
 });

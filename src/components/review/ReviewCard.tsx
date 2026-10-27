@@ -9,7 +9,6 @@ import {
   Terminal, 
   Clock, 
   ArrowRight, 
-  ExternalLink,
   ChevronDown,
   ChevronUp,
   Sparkles

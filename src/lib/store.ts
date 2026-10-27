@@ -1,4 +1,4 @@
-import type { Agent, Space, ComputerState, MCPTool, LLMSettings, Message, ReviewRequest } from '../types/index.ts';
+import type { Agent, Space, ComputerState, MCPTool, LLMSettings, Message } from '../types/index.ts';
 
 export const INITIAL_AGENTS: Agent[] = [
   {

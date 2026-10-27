@@ -55,7 +55,7 @@ export const AGENT_TOOLS: ToolDefinition[] = [
 function decomposeDirective(agent: Agent, userMessage: string): {
   intent: 'research' | 'code_execution' | 'document_draft' | 'general';
   toolName: string;
-  parameters: Record<string, any>;
+  parameters: Record<string, unknown>;
 } {
   const clean = userMessage.trim();
 

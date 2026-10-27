@@ -9,13 +9,6 @@ import { executeSandboxedCommand } from '@/lib/sandbox';
 
 const execPromise = util.promisify(exec);
 
-interface VirtualFileContext {
-  path?: string;
-  name?: string;
-  content?: string;
-  size?: string;
-}
-
 const DEFAULT_VIRTUAL_FILES: Record<string, string> = {
   'deploy.sh': `#!/bin/bash\necho "Building Nook container..."\nnpm run build\necho "Deploying to production supervisor..."`,
   'notes.md': `# Agent Coworker Notes\n\n- Real model-driven agent tool execution\n- Isolated sandbox filesystem boundaries\n- Model Context Protocol (MCP) tool engine`,

@@ -157,10 +157,11 @@ export async function validateOutboundUrl(rawUrl: string): Promise<SsrfValidatio
     }
 
     return { allowed: true, resolvedIps };
-  } catch (dnsErr: any) {
+  } catch (dnsErr: unknown) {
+    const error = dnsErr as Error;
     return {
       allowed: false,
-      reason: `DNS lookup failed for '${hostname}': ${dnsErr.message || 'Host unresolvable'}`,
+      reason: `DNS lookup failed for '${hostname}': ${error.message || 'Host unresolvable'}`,
     };
   }
 }
@@ -234,9 +235,9 @@ export async function safeFetch(
             ...(options.headers || {}),
           },
           servername: parsedUrl.hostname,
-          lookup: (_hostname: string, optionsOrCallback: any, maybeCallback?: any) => {
-            const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
-            const isAll = optionsOrCallback && typeof optionsOrCallback === 'object' && optionsOrCallback.all;
+          lookup: (_hostname: string, optionsOrCallback: unknown, maybeCallback?: unknown) => {
+            const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : (maybeCallback as ((err: Error | null, resOrAddress: unknown, family?: number) => void) | undefined);
+            const isAll = optionsOrCallback && typeof optionsOrCallback === 'object' && 'all' in optionsOrCallback && Boolean((optionsOrCallback as { all?: boolean }).all);
             if (typeof cb === 'function') {
               if (isAll) {
                 cb(null, [{ address: pinnedIp, family: pinnedFamily }]);

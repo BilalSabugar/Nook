@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { Agent, Message, ReviewRequest } from '@/types';
+import { Agent, Message } from '@/types';
 import { ReviewCard } from '@/components/review/ReviewCard';
 import { 
   ArrowUp, 

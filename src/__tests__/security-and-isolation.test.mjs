@@ -31,6 +31,7 @@ import {
   releaseWorkerLease,
   validateWorkerLease,
   redactApproval,
+  getDatabase,
 } from '../lib/db.ts';
 import {
   loadEncryptedSecrets,
@@ -38,7 +39,7 @@ import {
   maskSecret,
   SUPPORTED_MODELS,
 } from '../lib/secrets.ts';
-import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions, WORKER_INSTANCE_ID } from '../lib/worker.ts';
+import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions } from '../lib/worker.ts';
 import { executeSandboxedCommand, validateCommandSafety } from '../lib/sandbox.ts';
 import { planMission, tickMission, planSolutionAndTests, verifyStructuredTestOutput } from '../lib/orchestrator.ts';
 import {
@@ -48,6 +49,10 @@ import {
   captureSessionScreenshot,
   renderBrowserScreenshotPng,
 } from '../lib/browser-session.ts';
+import {
+  createSandboxExecutionTicket,
+  verifySandboxExecutionTicket,
+} from '../lib/sandbox-ticket.ts';
 import fs from 'fs';
 import path from 'path';
 
@@ -365,6 +370,9 @@ test('Living Spaces: Document revision tracking and version rollback', () => {
 // 5. DURABLE BACKGROUND WORKER & CANCELLATION TESTS
 // =========================================================================
 test('Background Worker: Queue claiming, genuine step execution, and cancellation', async () => {
+  // 0. Ensure clean queue
+  getDatabase().prepare(`DELETE FROM background_jobs WHERE status = 'queued'`).run();
+
   // 1. Enqueue job
   const job = enqueueJob({
     agentId: 'agent-scout',
@@ -789,5 +797,121 @@ test('Browser Screenshots: Generates genuine binary PNG with valid IHDR and IDAT
   assert.ok(pngBuf.includes(Buffer.from('IDAT')), 'Must contain valid IDAT chunk');
   assert.ok(pngBuf.includes(Buffer.from('IEND')), 'Must contain valid IEND chunk');
 });
+
+// =========================================================================
+// 20. SANDBOX RUNNER EXECUTION TICKET AUTHENTICATION & REPLAY DEFENSE
+// =========================================================================
+test('Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered, replayed, or expired requests', () => {
+  const secret = 'test-audit-runner-secret-key-32bytes';
+  const command = 'node -e "console.log(process.version)"';
+  const agentId = 'agent-cipher-audit';
+
+  // 1. Generate valid ticket
+  const ticket = createSandboxExecutionTicket(command, agentId, 30000, secret);
+  assert.ok(ticket.signature.length > 20, 'Ticket must contain valid HMAC signature');
+  assert.equal(ticket.agentId, agentId);
+
+  // 2. Legitimate verification succeeds
+  const verified = verifySandboxExecutionTicket(ticket, command, agentId, undefined, secret);
+  assert.equal(verified.valid, true, 'Matching ticket and payload must verify successfully');
+
+  // 3. Command tampering fails
+  const tamperedCommand = verifySandboxExecutionTicket(ticket, 'rm -rf / && node -v', agentId, undefined, secret);
+  assert.equal(tamperedCommand.valid, false, 'Tampered command must be rejected');
+  assert.ok(tamperedCommand.error?.includes('different command'));
+
+  // 4. Agent identity spoofing fails
+  const spoofedAgent = verifySandboxExecutionTicket(ticket, command, 'attacker-agent', undefined, secret);
+  assert.equal(spoofedAgent.valid, false, 'Spoofed agent ID must be rejected');
+  assert.ok(spoofedAgent.error?.includes('different agent'));
+
+  // 5. Wrong secret fails
+  const badSecret = verifySandboxExecutionTicket(ticket, command, agentId, undefined, 'wrong-secret-key');
+  assert.equal(badSecret.valid, false, 'Wrong secret must be rejected');
+  assert.ok(badSecret.error?.includes('cryptographic signature is invalid'));
+
+  // 6. Expired ticket fails
+  const expiredTicket = createSandboxExecutionTicket(command, agentId, -1000, secret);
+  const expiredRes = verifySandboxExecutionTicket(expiredTicket, command, agentId, undefined, secret);
+  assert.equal(expiredRes.valid, false, 'Expired ticket must be rejected');
+  assert.ok(expiredRes.error?.includes('expired'));
+
+  // 7. Replay protection fails
+  const consumedTickets = new Set([ticket.ticketId]);
+  const replayed = verifySandboxExecutionTicket(ticket, command, agentId, consumedTickets, secret);
+  assert.equal(replayed.valid, false, 'Replayed ticket must be rejected');
+  assert.ok(replayed.error?.includes('replay detected'));
+});
+
+// =========================================================================
+// 21. BROWSER SCREENSHOT METADATA & SYNTHETIC PLACEHOLDER LABELING
+// =========================================================================
+test('Browser Screenshots: Explicitly labels synthetic captures with honest metadata', async () => {
+  const session = getOrCreateBrowserSession('agent-audit-inspector');
+  await navigateBrowser('agent-audit-inspector', 'https://example.com/checkout');
+
+  assert.ok(session.screenshotMetadata, 'Session must expose screenshotMetadata');
+  assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, true, 'Must declare placeholder status honestly');
+  assert.equal(session.screenshotMetadata.captureType, 'synthetic_placeholder', 'Must specify synthetic placeholder capture type');
+});
+
+// =========================================================================
+// 22. MISSION LEASE CONCURRENCY & FENCING DEFENSE
+// =========================================================================
+test('Missions: Atomic SQLite leases prevent concurrent ticks and enforce fencing', async () => {
+  const mission = planMission({
+    title: 'Concurrent Lease Hardening Mission',
+    objective: 'Verify SQLite worker lease fencing',
+    priority: 'high',
+  });
+  assert.ok(mission.id);
+
+  // Worker 1 acquires lease and ticks
+  const tick1 = await tickMission(mission.id, 'worker-1', 10000);
+  assert.equal(tick1.leaseBusy, false, 'Worker 1 should acquire lease and execute tick');
+
+  // Manually lock lease under worker-1
+  acquireWorkerLease(`mission:${mission.id}`, 'worker-1', 30000);
+
+  // Concurrent worker 2 attempts to tick while held -> must report leaseBusy
+  const tick2 = await tickMission(mission.id, 'worker-2', 10000);
+  assert.equal(tick2.leaseBusy, true, 'Worker 2 must receive leaseBusy when lease is locked by worker 1');
+
+  // Release lease
+  releaseWorkerLease(`mission:${mission.id}`, 'worker-1');
+});
+
+// =========================================================================
+// 23. BACKGROUND JOBS REQUIRE GENUINE EXECUTION EVIDENCE
+// =========================================================================
+test('Background Worker: Code test jobs require verified sandboxed execution evidence', async () => {
+  const job = enqueueJob({
+    agentId: 'agent-cipher',
+    taskType: 'code_test',
+    title: 'Self-executing test verification',
+    prompt: 'node -e "process.exit(0)"',
+  });
+
+  // Execute job
+  await executeJob(job);
+  const executed = getJobById(job.id);
+  assert.ok(executed);
+  assert.equal(executed.status, 'completed', 'Job with passing node exit code 0 must complete');
+  assert.ok(executed.result, 'Job must return execution result');
+  assert.ok(executed.result.artifacts?.includes('node -e "process.exit(0)"'));
+
+  // Failing job must fail
+  const failingJob = enqueueJob({
+    agentId: 'agent-cipher',
+    taskType: 'code_test',
+    title: 'Failing command test',
+    prompt: 'node -e "process.exit(1)"',
+  });
+  await executeJob(failingJob);
+  const failingExec = getJobById(failingJob.id);
+  assert.ok(failingExec);
+  assert.equal(failingExec.status, 'failed', 'Job with non-zero exit code must be marked failed');
+});
+
 
 

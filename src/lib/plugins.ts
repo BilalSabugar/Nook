@@ -11,7 +11,7 @@ export interface NookPluginTool {
     properties: Record<string, { type: string; description: string }>;
     required: string[];
   };
-  handler: (args: Record<string, any>) => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>;
+  handler: (args: Record<string, unknown>) => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>;
 }
 
 export interface NookPluginManifest {
@@ -176,7 +176,7 @@ export function getAllPluginTools(): { pluginId: string; tool: NookPluginTool }[
 
 export async function executePluginTool(
   toolName: string,
-  args: Record<string, any>,
+  args: Record<string, unknown>,
   agentId = 'agent-system'
 ): Promise<{ content: { type: string; text: string }[]; isError?: boolean }> {
   for (const p of REGISTERED_PLUGINS.values()) {
@@ -195,10 +195,11 @@ export async function executePluginTool(
         const result = await Promise.race([executionPromise, timeoutPromise]);
         logAuditEvent('PLUGIN_TOOL_COMPLETE', `Tool "${toolName}" finished successfully`, 'success', agentId);
         return result;
-      } catch (err: any) {
-        logAuditEvent('PLUGIN_TOOL_FAIL', `Tool "${toolName}" failed: ${err.message}`, 'error', agentId);
+      } catch (err: unknown) {
+        const error = err as Error;
+        logAuditEvent('PLUGIN_TOOL_FAIL', `Tool "${toolName}" failed: ${error.message}`, 'error', agentId);
         return {
-          content: [{ type: 'text', text: `Plugin tool error: ${err.message}` }],
+          content: [{ type: 'text', text: `Plugin tool error: ${error.message}` }],
           isError: true,
         };
       }

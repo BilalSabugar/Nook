@@ -8,12 +8,11 @@ import {
   logAuditEvent,
   listMissions,
   getDatabase,
-  acquireWorkerLease,
-  releaseWorkerLease,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';
 import { safeFetch } from './ssrf.ts';
 import { tickMission } from './orchestrator.ts';
+import { executeSandboxedCommand } from './sandbox.ts';
 
 let isWorkerRunning = false;
 let workerInterval: NodeJS.Timeout | null = null;
@@ -40,7 +39,7 @@ export function recoverStaleJobsAndMissions(): { recoveredJobs: number; recovere
     const staleJobs = db.prepare(`
       SELECT * FROM background_jobs
       WHERE status = 'running'
-    `).all() as any[];
+    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; retry_count?: number; agent_id: string }>;
 
     for (const j of staleJobs) {
       const updatedAtMs = new Date(j.updated_at || j.created_at).getTime();
@@ -73,7 +72,7 @@ export function recoverStaleJobsAndMissions(): { recoveredJobs: number; recovere
     const staleTasks = db.prepare(`
       SELECT * FROM agent_tasks
       WHERE status = 'in_progress'
-    `).all() as any[];
+    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; assigned_agent_id: string }>;
 
     for (const t of staleTasks) {
       const updatedAtMs = new Date(t.updated_at || t.created_at).getTime();
@@ -105,6 +104,12 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
     let current = getJobById(job.id);
     if (!current || current.status === 'cancelled') return;
 
+    if (current.status === 'queued') {
+      const db = getDatabase();
+      const now = new Date().toISOString();
+      db.prepare(`UPDATE background_jobs SET status = 'running', started_at = ? WHERE id = ?`).run(now, job.id);
+    }
+
     // Step 1: Initialization
     updateJobProgress(job.id, 20, {
       step: 'Worker claimed job and validated task parameters',
@@ -132,8 +137,9 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
           titles = parsed[1] || [];
           links = parsed[3] || [];
         }
-      } catch (err: any) {
-        logAuditEvent('WORKER_SEARCH_FAIL', `Research query network error: ${err.message}`, 'warning');
+      } catch (err: unknown) {
+        const error = err as Error;
+        logAuditEvent('WORKER_SEARCH_FAIL', `Research query network error: ${error.message}`, 'warning');
       }
 
       current = getJobById(job.id);
@@ -192,25 +198,56 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
       return;
     }
 
-    // Default code_test or general task
-    current = getJobById(job.id);
-    if (!current || current.status === 'cancelled') return;
+    // Real code_test execution in isolated sandbox
+    if (job.taskType === 'code_test') {
+      current = getJobById(job.id);
+      if (!current || current.status === 'cancelled') return;
 
-    updateJobProgress(job.id, 60, {
-      step: 'Running sandbox environment checks',
-      tool: 'sandbox_check',
-    });
+      const testCmd = job.prompt.trim() || 'node --version';
+      updateJobProgress(job.id, 40, {
+        step: `Executing sandbox command: "${testCmd}"`,
+        tool: 'sandbox_exec',
+      });
 
-    completeJob(job.id, {
-      summary: `Task "${job.title}" executed successfully in background supervisor.`,
-    });
-  } catch (err: any) {
-    failJob(job.id, err.message || 'Worker execution failed');
+      const sandboxRes = await executeSandboxedCommand({
+        agentId: job.agentId || 'cipher',
+        command: testCmd,
+        timeoutMs: 10000,
+        allowHostFallback: process.env.NODE_ENV !== 'production',
+      });
+
+      current = getJobById(job.id);
+      if (!current || current.status === 'cancelled') return;
+
+      if (sandboxRes.exitCode !== 0) {
+        failJob(job.id, `Sandbox execution failed with exit code ${sandboxRes.exitCode}: ${sandboxRes.stderr || sandboxRes.stdout}`);
+        return;
+      }
+
+      updateJobProgress(job.id, 90, {
+        step: `Command finished with exit code 0. Collected execution evidence.`,
+        tool: 'evidence_collection',
+        output: sandboxRes.stdout.slice(0, 300),
+      });
+
+      completeJob(job.id, {
+        summary: `Executed "${testCmd}" with verified evidence (exit code ${sandboxRes.exitCode}).`,
+        artifacts: [testCmd],
+      });
+      return;
+    }
+
+    // Generic or undefined tasks without execution evidence cannot be marked successful
+    failJob(job.id, `Job "${job.title}" rejected: unexecutable task type "${job.taskType}" lacks verifiable execution payload or evidence.`);
+  } catch (err: unknown) {
+    const error = err as Error;
+    failJob(job.id, error.message || 'Worker execution failed');
   }
 }
 
 /**
  * Automatically advances any active background missions without requiring an open browser.
+ * Relies on tickMission's atomic database lease enforcement.
  */
 export async function tickActiveMissions(): Promise<boolean> {
   const missions = listMissions();
@@ -219,24 +256,16 @@ export async function tickActiveMissions(): Promise<boolean> {
   for (const m of missions) {
     if (m.status !== 'active' && m.status !== 'draft') continue;
 
-    // Acquire atomic SQLite lease with ownership and fencing to prevent concurrent stepping
-    const lease = acquireWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID, LEASE_DURATION_MS);
-    if (!lease.acquired) {
-      // Lease is currently held by another worker instance or web process
-      continue;
-    }
-
     try {
-      const updated = await tickMission(m.id);
-      advancedAny = true;
-
-      // If mission reached terminal or paused state, release lease
-      if (updated.status === 'completed' || updated.status === 'failed' || updated.status === 'paused' || updated.status === 'cancelled') {
-        releaseWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID);
+      const updated = await tickMission(m.id, WORKER_INSTANCE_ID, LEASE_DURATION_MS);
+      if (updated.leaseBusy) {
+        // Lease currently held by another worker or manual API process
+        continue;
       }
-    } catch (err: any) {
-      releaseWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID);
-      logAuditEvent('MISSION_WORKER_ERROR', `Worker ${WORKER_INSTANCE_ID} failed ticking mission ${m.id}: ${err.message}`, 'error', 'agent-aura');
+      advancedAny = true;
+    } catch (err: unknown) {
+      const error = err as Error;
+      logAuditEvent('MISSION_WORKER_ERROR', `Worker ${WORKER_INSTANCE_ID} failed ticking mission ${m.id}: ${error.message}`, 'error', 'agent-aura');
     }
   }
 

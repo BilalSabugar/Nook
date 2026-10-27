@@ -4,8 +4,6 @@ import fs from 'fs/promises';
 
 // Import Nook core infrastructure
 import {
-  createMission,
-  getMissionById,
   createApproval,
   decideApproval,
   verifyAndConsumeApproval,
@@ -13,7 +11,6 @@ import {
   saveSpace,
   saveDocumentWithRevision,
   rollbackDocumentToVersion,
-  listSpacesWithDocuments,
 } from '../../src/lib/db.ts';
 import { planMission, tickMission } from '../../src/lib/orchestrator.ts';
 import { validateOutboundUrl } from '../../src/lib/ssrf.ts';

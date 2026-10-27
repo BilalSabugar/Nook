@@ -169,8 +169,9 @@ export function validateApiRequest(req: Request): AuthValidationResult {
   const sessionTokenHeader = req.headers.get('x-nook-session-token') || '';
 
   let cookieSession = '';
-  if ((req as any).cookies?.get) {
-    cookieSession = (req as any).cookies.get('nook_session')?.value || '';
+  const maybeNextReq = req as unknown as { cookies?: { get: (name: string) => { value?: string } | undefined } };
+  if (typeof maybeNextReq.cookies?.get === 'function') {
+    cookieSession = maybeNextReq.cookies.get('nook_session')?.value || '';
   } else {
     const rawCookie = req.headers.get('cookie') || '';
     const match = rawCookie.match(/nook_session=([^;]+)/);

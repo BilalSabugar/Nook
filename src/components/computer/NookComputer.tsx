@@ -18,8 +18,6 @@ import {
   Check, 
   Copy,
   ExternalLink,
-  ShieldCheck,
-  Maximize2,
   Plus,
   Trash2,
   Save,
@@ -60,10 +58,6 @@ export const NookComputer: React.FC<NookComputerProps> = ({
   const [viewportMode, setViewportMode] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [copiedFile, setCopiedFile] = useState(false);
   const [fileSaveSuccess, setFileSaveSuccess] = useState(false);
-
-  const getFileIconColor = (name: string) => {
-    return 'text-neutral-400';
-  };
 
 
   const currentAgent = agents.find((a) => a.id === activeAgentId) || agents[0];

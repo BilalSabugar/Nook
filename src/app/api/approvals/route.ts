@@ -88,29 +88,30 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. User interactive direct session execution: strictly restricted to human interactive session
+    // 3. User interactive direct session execution: strictly restricted to authenticated human owner session
     if (action === 'create_and_approve') {
-      const { agentId, agentName, type, title, description, targetSpaceId, payload, missionId } = body;
+      const { agentId, type, title, description, targetSpaceId, payload, missionId } = body;
 
       // Strict security boundary: autonomous agents and missions CANNOT auto-approve privileged operations!
-      if ((agentId && agentId.startsWith('agent-')) || missionId) {
-        logAuditEvent('APPROVAL_BYPASS_ATTEMPT', `Blocked automated self-approval attempt by ${agentId}`, 'denied', agentId);
+      if (agentId || missionId) {
+        logAuditEvent('APPROVAL_BYPASS_ATTEMPT', `Blocked automated self-approval attempt: agent/mission parameters detected`, 'denied', agentId || 'unknown');
         return NextResponse.json({
           error: 'Security violation: Autonomous agents and missions cannot auto-approve privileged commands. Review card human approval required.',
         }, { status: 403 });
       }
 
+      // Server-established actor identity: ignore any client-supplied agent identity
       const record = createApproval({
-        agentId: agentId || 'user',
-        agentName: agentName || 'User Session',
+        agentId: 'authenticated-human-owner',
+        agentName: 'Human Owner (Interactive Terminal)',
         type: type || 'run_command',
         title: title || 'User Interactive Execution',
-        description: description || 'Executed directly by authenticated user in interactive terminal',
+        description: description || 'Executed directly by authenticated human owner in interactive terminal',
         targetSpaceId,
         payload: payload || {},
       });
 
-      const outcome = decideApproval(record.id, 'approve', 'Authorized directly in authenticated interactive terminal');
+      const outcome = decideApproval(record.id, 'approve', 'Authorized directly by authenticated human owner session');
       return NextResponse.json({
         success: true,
         approval: redactApproval(outcome.approval),

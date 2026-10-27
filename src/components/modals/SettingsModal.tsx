@@ -27,7 +27,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [provider, setProvider] = useState<LLMProvider>(settings.provider);
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [openaiApiKey, setOpenaiApiKey] = useState('');
-  const [anthropicApiKey, setAnthropicApiKey] = useState('');
   const [ollamaEndpoint, setOllamaEndpoint] = useState(settings.ollamaEndpoint || 'http://localhost:11434');
   const [model, setModel] = useState(settings.model);
   const [temperature, setTemperature] = useState(settings.temperature);
@@ -75,7 +74,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           ollamaEndpoint: ollamaEndpoint.trim(),
           geminiApiKey: geminiApiKey.trim() || undefined,
           openaiApiKey: openaiApiKey.trim() || undefined,
-          anthropicApiKey: anthropicApiKey.trim() || undefined,
+          anthropicApiKey: undefined,
         }),
       });
 
@@ -101,8 +100,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         setSavedSuccess(false);
         onClose();
       }, 700);
-    } catch (err: any) {
-      setErrorMessage(err.message || 'Network error saving settings');
+    } catch (err: unknown) {
+      const error = err as Error;
+      setErrorMessage(error.message || 'Network error saving settings');
     }
   };
 

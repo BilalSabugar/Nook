@@ -64,6 +64,9 @@ export async function GET(req: NextRequest) {
       'Content-Length': fileBytes.length.toString(),
       'Cache-Control': 'public, max-age=120, immutable',
       'X-Content-Type-Options': 'nosniff',
+      'X-Nook-Capture-Type': 'synthetic_placeholder',
+      'X-Nook-Verified-Browser': 'false',
+      'X-Nook-Placeholder-Notice': 'Synthetic viewport placeholder; Chromium headless capture not provisioned',
     },
   });
 }

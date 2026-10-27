@@ -26,7 +26,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
   const [systemPrompt, setSystemPrompt] = useState('');
   const [computerEnabled, setComputerEnabled] = useState(true);
   const [selectedTools, setSelectedTools] = useState<string[]>(['tool-web-search', 'tool-save-page']);
-  const [selectedSpaces, setSelectedSpaces] = useState<string[]>(availableSpaces.map((s) => s.id));
+  const [selectedSpaces] = useState<string[]>(availableSpaces.map((s) => s.id));
 
   const archetypeIcons = [
     { key: 'compass', label: 'Research' },

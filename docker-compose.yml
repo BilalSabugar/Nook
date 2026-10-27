@@ -19,6 +19,7 @@ services:
       - NOOK_PASSWORD=${NOOK_PASSWORD:-}
       - NOOK_API_KEY=${NOOK_API_KEY:-}
       - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
+      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:-nook_internal_runner_auth_secret_v1}
     depends_on:
       sandbox-runner:
         condition: service_healthy
@@ -49,6 +50,7 @@ services:
       - NODE_ENV=production
       - NOOK_WORKER_ROLE=dedicated_worker
       - SANDBOX_SERVICE_URL=http://sandbox-runner:4000
+      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:-nook_internal_runner_auth_secret_v1}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -77,6 +79,15 @@ services:
     environment:
       - PORT=4000
       - NODE_ENV=production
+      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:-nook_internal_runner_auth_secret_v1}
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
 

@@ -6,19 +6,13 @@ import {
   PenTool, 
   Cpu, 
   Sparkles, 
-  Crown, 
   Terminal, 
   FolderKanban, 
   Layers, 
-  Search, 
-  BookOpen, 
   FileText, 
-  FileCode,
-  Rocket,
   Palette,
   BarChart3,
-  Plug,
-  Bot
+  Plug
 } from 'lucide-react';
 
 interface ArchetypeIconProps {
@@ -34,7 +28,7 @@ export const AgentArchetypeIcon: React.FC<ArchetypeIconProps> = ({
   avatarKey = '',
   className = '',
   size = 'md',
-  showAura = false,
+  showAura: _showAura = false,
 }) => {
   const normalizedKey = (avatarKey || '').toLowerCase();
   const normalizedName = (name || '').toLowerCase();

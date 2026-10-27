@@ -86,7 +86,15 @@ export async function POST(req: NextRequest) {
 
     // 2. Tick / step mission execution
     if (action === 'tick' && missionId) {
-      const updated = await tickMission(missionId);
+      const actorId = `api-req-${Date.now()}`;
+      const updated = await tickMission(missionId, actorId);
+      if (updated.leaseBusy) {
+        return NextResponse.json({
+          error: 'Mission execution lease is currently held by a background worker or another active process. Retry shortly.',
+          leaseBusy: true,
+        }, { status: 409 });
+      }
+
       const tasks = listTasksForMission(missionId);
       const evidence = listEvidence({ missionId });
 

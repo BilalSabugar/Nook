@@ -4,16 +4,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Agent, Space } from '@/types';
 import { 
   Search, 
-  Bot, 
-  FolderKanban, 
   Terminal, 
   Layers, 
   Settings2, 
   Plus, 
   Phone, 
-  FileText, 
   ArrowRight,
-  Sparkles,
   Command,
   Target
 } from 'lucide-react';
@@ -82,9 +78,12 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   // Focus input on open
   useEffect(() => {
     if (isOpen) {
-      setSearch('');
-      setSelectedIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 50);
+      const timer = setTimeout(() => {
+        setSearch('');
+        setSelectedIndex(0);
+        inputRef.current?.focus();
+      }, 20);
+      return () => clearTimeout(timer);
     }
   }, [isOpen]);
 

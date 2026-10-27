@@ -5,20 +5,16 @@ import {
   Target, 
   Play, 
   CheckCircle2, 
-  Clock, 
-  AlertCircle, 
   ShieldCheck, 
   FileText, 
   Terminal, 
-  Search, 
   Download, 
   RefreshCw, 
   Layers, 
   ChevronRight,
   ChevronDown,
   Sparkles,
-  ExternalLink,
-  Code2
+  ExternalLink
 } from 'lucide-react';
 import { Agent } from '@/types';
 
@@ -75,8 +71,8 @@ interface MissionDashboardProps {
 
 export const MissionDashboard: React.FC<MissionDashboardProps> = ({
   agents,
-  onSwitchToComputer,
-  onSwitchToSpaces
+  onSwitchToComputer: _onSwitchToComputer,
+  onSwitchToSpaces: _onSwitchToSpaces
 }) => {
   const [activeTab, setActiveTab] = useState<'missions' | 'evidence'>('missions');
   const [missions, setMissions] = useState<Mission[]>([]);
@@ -130,12 +126,18 @@ export const MissionDashboard: React.FC<MissionDashboardProps> = ({
   }, []);
 
   useEffect(() => {
-    fetchMissions();
+    const timer = setTimeout(() => {
+      fetchMissions();
+    }, 10);
+    return () => clearTimeout(timer);
   }, [fetchMissions]);
 
   useEffect(() => {
     if (activeTab === 'evidence') {
-      fetchEvidence(selectedMissionId || undefined);
+      const timer = setTimeout(() => {
+        fetchEvidence(selectedMissionId || undefined);
+      }, 10);
+      return () => clearTimeout(timer);
     }
   }, [activeTab, selectedMissionId, fetchEvidence]);
 

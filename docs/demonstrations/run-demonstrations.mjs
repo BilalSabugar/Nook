@@ -5,8 +5,6 @@ import util from 'util';
 
 // Import Nook core infrastructure
 import {
-  saveSpace,
-  saveDocumentWithRevision,
   createApproval,
   decideApproval,
   verifyAndConsumeApproval,

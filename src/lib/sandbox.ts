@@ -3,6 +3,7 @@ import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
 import { logAuditEvent } from './db.ts';
+import { createSandboxExecutionTicket } from './sandbox-ticket.ts';
 
 const execPromise = util.promisify(exec);
 
@@ -231,9 +232,15 @@ export async function executeSandboxedCommand(
   const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL;
   if (sandboxServiceUrl) {
     try {
+      const ticket = createSandboxExecutionTicket(cleanCmd, safeAgentId, timeoutMs + 10000);
+      const ticketBase64 = Buffer.from(JSON.stringify(ticket)).toString('base64');
       const response = await fetch(`${sandboxServiceUrl}/exec`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${ticketBase64}`,
+          'X-Nook-Sandbox-Ticket': JSON.stringify(ticket),
+        },
         body: JSON.stringify({
           agentId: safeAgentId,
           command: cleanCmd,
@@ -244,7 +251,7 @@ export async function executeSandboxedCommand(
       });
 
       if (response.ok) {
-        const result = (await response.json()) as any;
+        const result = (await response.json()) as { stdout?: string; stderr?: string; exitCode?: number };
         return {
           stdout: result.stdout || '',
           stderr: result.stderr || '',

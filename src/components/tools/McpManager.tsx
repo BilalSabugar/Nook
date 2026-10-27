@@ -13,7 +13,6 @@ import {
   FileCode, 
   Database, 
   Sparkles,
-  ExternalLink,
   Play,
   X
 } from 'lucide-react';
@@ -21,7 +20,7 @@ import { useToast } from '@/components/ui/Toast';
 
 interface McpManagerProps {
   tools: MCPTool[];
-  agents: Agent[];
+  agents?: Agent[];
   onToggleTool: (toolId: string) => void;
   onToggleApproval: (toolId: string) => void;
   onAddCustomTool: (tool: MCPTool) => void;
@@ -29,7 +28,7 @@ interface McpManagerProps {
 
 export const McpManager: React.FC<McpManagerProps> = ({
   tools,
-  agents,
+  agents: _agents,
   onToggleTool,
   onToggleApproval,
   onAddCustomTool,
@@ -241,7 +240,7 @@ export const McpManager: React.FC<McpManagerProps> = ({
                 <label className="block text-neutral-300 mb-1 font-medium">Category</label>
                 <select
                   value={newCategory}
-                  onChange={(e) => setNewCategory(e.target.value as any)}
+                  onChange={(e) => setNewCategory(e.target.value as MCPTool['category'])}
                   className="w-full px-3 py-2 rounded-lg bg-[#0d0d0d] border border-white/[0.1] text-white outline-none"
                 >
                   <option value="web">Web & Scraping</option>

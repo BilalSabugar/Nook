@@ -9,9 +9,7 @@ import {
   Volume2, 
   VolumeX, 
   Minimize2, 
-  Maximize2, 
-  Sparkles,
-  Waves
+  Maximize2
 } from 'lucide-react';
 import { AgentArchetypeIcon } from '@/components/ui/ArchetypeIcon';
 
@@ -39,14 +37,13 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const animFrameRef = useRef<number | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const recognitionRef = useRef<any>(null);
 
   // Call timer effect
   useEffect(() => {
     if (!isOpen) {
-      setCallDuration(0);
-      return;
+      const timer = setTimeout(() => setCallDuration(0), 10);
+      return () => clearTimeout(timer);
     }
     const interval = setInterval(() => {
       setCallDuration((prev) => prev + 1);
@@ -168,7 +165,6 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
 
     // Initialize Web Speech Recognition
     if (typeof window !== 'undefined') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
       if (SpeechRecognition) {
         try {
@@ -177,7 +173,6 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
           recognition.interimResults = true;
           recognition.lang = 'en-US';
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           recognition.onresult = (event: any) => {
             if (isMuted) return;
             let currentTranscript = '';
@@ -237,7 +232,8 @@ export const VoiceCallModal: React.FC<VoiceCallModalProps> = ({
   useEffect(() => {
     if (isSpeakerMuted && typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
-      setAgentSpeaking(false);
+      const timer = setTimeout(() => setAgentSpeaking(false), 10);
+      return () => clearTimeout(timer);
     }
   }, [isSpeakerMuted]);
 

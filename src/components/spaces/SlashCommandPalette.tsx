@@ -11,7 +11,6 @@ import {
   Table, 
   Minus, 
   Bot, 
-  Sparkles,
   X 
 } from 'lucide-react';
 

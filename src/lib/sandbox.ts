@@ -210,7 +210,7 @@ export async function executeSandboxedCommand(
 
   // 5. Hardened Process Jail Execution
   // Scrub environment: Drop all secrets, API keys, tokens, and host env variables
-  const sanitizedEnv: NodeJS.ProcessEnv = {};
+  const sanitizedEnv: Record<string, string | undefined> = {};
   for (const key of Object.keys(process.env)) {
     if (SAFE_ENV_WHITELIST.includes(key.toUpperCase())) {
       sanitizedEnv[key] = process.env[key];
@@ -238,7 +238,7 @@ export async function executeSandboxedCommand(
       timeout: timeoutMs,
       maxBuffer,
       shell,
-      env: sanitizedEnv,
+      env: sanitizedEnv as unknown as NodeJS.ProcessEnv,
     });
 
     return {

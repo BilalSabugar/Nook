@@ -1,7 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'path';
-import fs from 'fs/promises';
 
 // Import core security and infrastructure libraries
 import {
@@ -38,7 +36,7 @@ import {
 } from '../lib/secrets.ts';
 import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions } from '../lib/worker.ts';
 import { executeSandboxedCommand, validateCommandSafety } from '../lib/sandbox.ts';
-import { planMission, tickMission, planSolutionAndTests } from '../lib/orchestrator.ts';
+import { planMission, tickMission } from '../lib/orchestrator.ts';
 import { getOrCreateBrowserSession, navigateBrowser } from '../lib/browser-session.ts';
 
 // =========================================================================

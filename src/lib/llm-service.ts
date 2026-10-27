@@ -1,5 +1,5 @@
 import { Agent, ComputerState, LLMSettings, Message, ReviewRequest, Space } from '@/types';
-import { planSolutionAndTests } from './orchestrator';
+import { planSolutionAndTests } from './orchestrator.ts';
 
 export interface AgentExecutionResponse {
   reply: string;
@@ -416,11 +416,11 @@ export async function executeAgentTurn({
         id: approvalId,
         agentId: agent.id,
         agentName: agent.name,
-        type: 'create_document',
+        type: 'save_page',
         title: `Publish: "${title}"`,
         description: `Commit to Space: ${targetSpace.name}`,
         targetSpaceId: targetSpace.id,
-        payload: { title, content, targetSpaceId: targetSpace.id },
+        payload: { pageTitle: title, pageContent: content },
         status: 'pending',
         createdAt: new Date().toISOString(),
       },

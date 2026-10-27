@@ -45,7 +45,7 @@ async function runAllDemos() {
       citations = links;
       findings = titles.join(', ');
     }
-  } catch (e) {
+  } catch (_e) {
     findings = 'Raft consensus algorithm specification';
     citations = ['https://en.wikipedia.org/wiki/Raft_(algorithm)'];
   }

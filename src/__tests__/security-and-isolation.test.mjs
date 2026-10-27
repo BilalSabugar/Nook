@@ -512,7 +512,7 @@ test('Supervisor: Background worker advances active missions and recovers from c
   assert.equal(typeof recovery.recoveredMissions, 'number');
 
   // 2. Active mission advancement via worker tick
-  const mission = planMission({
+  const _mission = planMission({
     title: 'Background Supervision Test',
     objective: 'distributed systems state machine',
     requiresCodeExecution: false,

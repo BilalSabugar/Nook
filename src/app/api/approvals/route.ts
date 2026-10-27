@@ -5,7 +5,6 @@ import {
   listApprovals,
   decideApproval,
   verifyAndConsumeApproval,
-  getApprovalById,
   logAuditEvent,
 } from '@/lib/db';
 
@@ -146,7 +145,8 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+  } catch (err: unknown) {
+    const error = err as Error;
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

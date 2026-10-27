@@ -10,7 +10,6 @@ import {
   createApproval,
   decideApproval,
   verifyAndConsumeApproval,
-  getApprovalById,
   enqueueJob,
   claimNextQueuedJob,
   getJobById,
@@ -45,7 +44,7 @@ async function runAllDemos() {
       citations = links;
       findings = titles.join(', ');
     }
-  } catch (_e) {
+  } catch {
     findings = 'Raft consensus algorithm specification';
     citations = ['https://en.wikipedia.org/wiki/Raft_(algorithm)'];
   }

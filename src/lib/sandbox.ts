@@ -48,9 +48,15 @@ const SENSITIVE_PATTERNS = [
 let dockerAvailableCache: boolean | null = null;
 async function isDockerAvailable(): Promise<boolean> {
   if (dockerAvailableCache !== null) return dockerAvailableCache;
+  if (process.env.NOOK_DISABLE_DOCKER === 'true') {
+    dockerAvailableCache = false;
+    return false;
+  }
   try {
-    const { stdout } = await execPromise('docker --version', { timeout: 2000 });
-    dockerAvailableCache = Boolean(stdout && stdout.toLowerCase().includes('docker'));
+    // Fast check: verify Docker daemon is responsive AND node:22-alpine image is locally cached.
+    // Inspecting avoids slow image pulls or Docker Hub rate limits during unprivileged execution.
+    await execPromise('docker image inspect node:22-alpine', { timeout: 1500 });
+    dockerAvailableCache = true;
   } catch {
     dockerAvailableCache = false;
   }
@@ -194,17 +200,8 @@ export async function executeSandboxedCommand(
         sandboxDir: `/workspace/${safeAgentId}`,
       };
     } catch (dockerErr: any) {
-      // If docker fails to run image, fall back gracefully to hardened process jail
-      if (dockerErr.code && dockerErr.code !== 127) {
-        return {
-          stdout: dockerErr.stdout || '',
-          stderr: dockerErr.stderr || dockerErr.message || 'Container execution failure',
-          exitCode: typeof dockerErr.code === 'number' ? dockerErr.code : 1,
-          isolatedRuntime: 'docker_container',
-          executionTimeMs: Date.now() - startTime,
-          sandboxDir: `/workspace/${safeAgentId}`,
-        };
-      }
+      // If docker fails to launch container or image, fall through seamlessly to hardened process jail
+      logAuditEvent('SANDBOX_FALLBACK', `Container runtime error (${dockerErr.message || 'error'}), falling back to process jail`, 'fallback', safeAgentId);
     }
   }
 

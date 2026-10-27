@@ -172,7 +172,8 @@ function validateTicket(rawTicketHeader, command, agentId, taskId) {
   }
 
   // Cryptographic HMAC check over full authorization chain
-  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
+  const workspaceField = ticket.workspacePath || '';
+  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${workspaceField}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
   const expectedSig = crypto.createHmac('sha256', RUNNER_SECRET).update(payload).digest('hex');
 
   const sigBuf = Buffer.from(ticket.signature, 'hex');
@@ -196,6 +197,15 @@ function validateTicket(rawTicketHeader, command, agentId, taskId) {
   // Bound task check if taskId is provided
   if (taskId && ticket.taskId && ticket.taskId !== taskId) {
     return { valid: false, status: 403, error: 'Ticket task mismatch: ticket is bound to a different task.' };
+  }
+
+  // Bound workspace check if workspace is provided
+  if (ticket.workspacePath) {
+    const safeTaskId = (ticket.taskId || taskId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const expectedWorkspace = `/workspace/${agentId}/tasks/${safeTaskId}`;
+    if (ticket.workspacePath !== expectedWorkspace && !ticket.workspacePath.endsWith(safeTaskId)) {
+      return { valid: false, status: 403, error: `Ticket workspace mismatch: ticket bound to "${ticket.workspacePath}", expected "${expectedWorkspace}".` };
+    }
   }
 
   // Authorization chain verification
@@ -423,35 +433,72 @@ const server = http.createServer(async (req, res) => {
             sanitizedEnv[key] = process.env[key];
           }
         }
+        delete sanitizedEnv.SANDBOX_RUNNER_SECRET;
+        delete sanitizedEnv.RUNNER_SECRET;
+        delete sanitizedEnv.PORT;
+        delete sanitizedEnv.SANDBOX_PORT;
         sanitizedEnv.NODE_ENV = 'production';
         sanitizedEnv.HOME = taskWorkspaceDir;
         sanitizedEnv.PWD = taskWorkspaceDir;
         sanitizedEnv.TMPDIR = tmpDir;
         sanitizedEnv.TEMP = tmpDir;
         sanitizedEnv.USER = `agent_${safeAgentId}`;
-        sanitizedEnv.NODE_OPTIONS = '--max-old-space-size=512';
+        sanitizedEnv.NODE_OPTIONS = '--max-old-space-size=128';
 
-        // 5. Select isolated shell
+        // 5. Select isolated shell or container runtime
         const isWin = process.platform === 'win32';
         const executable = isWin ? 'powershell.exe' : '/bin/sh';
         const args = isWin
           ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command]
           : ['-c', command];
 
-        // 6. Execute with process group supervision
-        const result = await spawnIsolatedBuffer(executable, args, {
-          cwd: taskWorkspaceDir,
-          env: sanitizedEnv,
-          timeout: clampedTimeout,
-          maxBuffer: clampedBuffer,
-        });
+        // 6. Execute with container isolation if Docker is available, or unprivileged task workspace jail
+        let result;
+        let runtimeUsed = 'process_jail';
+
+        if (process.env.NOOK_DISABLE_DOCKER !== 'true') {
+          try {
+            const hasDocker = await new Promise((resolve) => {
+              const p = spawn('docker', ['version'], { stdio: 'ignore' });
+              p.on('close', (c) => resolve(c === 0));
+              p.on('error', () => resolve(false));
+            });
+            if (hasDocker) {
+              const dockerArgs = [
+                'run', '--rm',
+                '--network', 'none',
+                '--memory', '128m',
+                '--cpus', '1.0',
+                '--pids-limit', '32',
+                '-v', `${taskWorkspaceDir}:/workspace:rw`,
+                '-w', '/workspace',
+                'node:22-alpine',
+                'sh', '-c', command,
+              ];
+              result = await spawnIsolatedBuffer('docker', dockerArgs, {
+                timeout: clampedTimeout,
+                maxBuffer: clampedBuffer,
+              });
+              runtimeUsed = 'docker_container';
+            }
+          } catch {}
+        }
+
+        if (!result) {
+          result = await spawnIsolatedBuffer(executable, args, {
+            cwd: taskWorkspaceDir,
+            env: sanitizedEnv,
+            timeout: clampedTimeout,
+            maxBuffer: clampedBuffer,
+          });
+        }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
-          isolatedRuntime: 'docker_container',
+          isolatedRuntime: runtimeUsed,
           sandboxDir: taskWorkspaceDir,
           agentId: safeAgentId,
         }));

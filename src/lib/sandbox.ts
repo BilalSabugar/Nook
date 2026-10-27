@@ -1,11 +1,8 @@
-import { exec, spawn } from 'child_process';
-import util from 'util';
+import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
 import { logAuditEvent } from './db.ts';
 import { createSandboxExecutionTicket } from './sandbox-ticket.ts';
-
-const execPromise = util.promisify(exec);
 
 /**
  * Spawns an executable directly with arguments array, bypassing host shell parsing.
@@ -89,9 +86,6 @@ export interface SandboxExecutionResult {
 }
 
 const SANDBOXES_BASE = path.join(process.cwd(), '.nook_sandboxes');
-
-// Whitelisted minimal safe environment variables for unprivileged execution
-const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
 
 // Sensitive host paths that isolated commands must NEVER access or reference
 const SENSITIVE_PATTERNS = [
@@ -214,11 +208,13 @@ export async function executeSandboxedCommand(
     };
   }
 
-  // 2. Setup isolated agent workspace directory
+  // 2. Setup isolated task workspace directory
   const agentSandboxDir = path.resolve(SANDBOXES_BASE, safeAgentId);
-  await fs.mkdir(agentSandboxDir, { recursive: true });
+  const safeTaskId = (options.taskId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const taskWorkspaceDir = path.resolve(agentSandboxDir, 'tasks', safeTaskId);
+  await fs.mkdir(taskWorkspaceDir, { recursive: true });
 
-  // 3. Write virtual files securely within sandbox directory
+  // 3. Write virtual files securely within task workspace directory
   if (Array.isArray(options.virtualFiles)) {
     for (const f of options.virtualFiles) {
       const rawName = f.name || f.path;
@@ -226,10 +222,10 @@ export async function executeSandboxedCommand(
 
       // Prevent traversal in file creation
       const sanitizedName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const targetFilePath = path.resolve(agentSandboxDir, sanitizedName);
+      const targetFilePath = path.resolve(taskWorkspaceDir, sanitizedName);
 
-      // Verify path does not escape sandbox
-      if (!targetFilePath.startsWith(agentSandboxDir + path.sep) && targetFilePath !== agentSandboxDir) {
+      // Verify path does not escape task workspace
+      if (!targetFilePath.startsWith(taskWorkspaceDir + path.sep) && targetFilePath !== taskWorkspaceDir) {
         continue;
       }
 
@@ -249,6 +245,7 @@ export async function executeSandboxedCommand(
         command: cleanCmd,
         agentId: safeAgentId,
         taskId: options.taskId,
+        workspacePath: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
         approvalId: options.approvalId,
         authorizationType: options.authorizationType || (options.approvalId ? 'human_approval' : 'system_verified_test'),
         ttlMs: timeoutMs + 10000,
@@ -281,7 +278,7 @@ export async function executeSandboxedCommand(
           exitCode: result.exitCode ?? 0,
           isolatedRuntime: 'docker_container',
           executionTimeMs: Date.now() - startTime,
-          sandboxDir: `/workspace/${safeAgentId}`,
+          sandboxDir: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
         };
       }
     } catch (serviceErr: unknown) {
@@ -289,11 +286,11 @@ export async function executeSandboxedCommand(
     }
   }
 
-  // 5. Try Containerized Docker Execution if available
+  // 5. Try Containerized Docker Execution with per-task mounted workspace
   const hasDocker = await isDockerAvailable();
   if (hasDocker) {
     try {
-      // Ephemeral, network-isolated, resource-capped container
+      // Ephemeral, network-isolated, per-task container
       const dockerArgs = [
         'run',
         '--rm',
@@ -301,7 +298,7 @@ export async function executeSandboxedCommand(
         '--memory', '256m', // 256MB memory cap
         '--cpus', '1.0', // CPU quota
         '--pids-limit', '64', // Process fork bomb protection
-        '-v', `${agentSandboxDir}:/workspace:rw`,
+        '-v', `${taskWorkspaceDir}:/workspace:rw`,
         '-w', '/workspace',
         'node:22-alpine',
         'sh', '-c', cleanCmd,
@@ -320,7 +317,7 @@ export async function executeSandboxedCommand(
           exitCode: dockerRes.exitCode,
           isolatedRuntime: 'docker_container',
           executionTimeMs: Date.now() - startTime,
-          sandboxDir: `/workspace/${safeAgentId}`,
+          sandboxDir: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
         };
       }
       logAuditEvent('SANDBOX_FALLBACK', `Container runtime exit code ${dockerRes.exitCode}: ${dockerRes.stderr}`, 'fallback', safeAgentId);
@@ -330,79 +327,19 @@ export async function executeSandboxedCommand(
     }
   }
 
-  // Fail-closed security guard: automatic host execution fallback is completely eliminated.
-  // Execution strictly fails closed unless explicitly permitted via options.allowHostFallback === true.
-  const allowHostFallback = options.allowHostFallback === true;
-
-  if (!allowHostFallback) {
-    logAuditEvent(
-      'SANDBOX_FAIL_CLOSED',
-      'Execution denied: Container isolation is unavailable and host fallback is blocked by security policy',
-      'blocked',
-      safeAgentId
-    );
-    return {
-      stdout: '',
-      stderr: 'Security Policy Violation: Isolated container runtime (Docker) is unavailable. Command execution aborted to prevent unconfined host shell access. (Set allowHostFallback: true in test options or run with dedicated container runtime).',
-      exitCode: 126,
-      isolatedRuntime: 'none',
-      executionTimeMs: Date.now() - startTime,
-      sandboxDir: `/workspace/${safeAgentId}`,
-    };
-  }
-
-  logAuditEvent('SANDBOX_HOST_FALLBACK', 'Warning: Executing command in host process jail (container runtime unavailable)', 'fallback', safeAgentId);
-
-  // 5. Hardened Process Jail Execution
-  // Scrub environment: Drop all secrets, API keys, tokens, and host env variables
-  const sanitizedEnv: Record<string, string | undefined> = {};
-  for (const key of Object.keys(process.env)) {
-    if (SAFE_ENV_WHITELIST.includes(key.toUpperCase())) {
-      sanitizedEnv[key] = process.env[key];
-    }
-  }
-
-  // Set unprivileged agent context
-  sanitizedEnv.HOME = agentSandboxDir;
-  sanitizedEnv.TMPDIR = agentSandboxDir;
-  sanitizedEnv.TEMP = agentSandboxDir;
-  sanitizedEnv.USER = `nook-${safeAgentId}`;
-  sanitizedEnv.NODE_ENV = 'test';
-  // Explicitly deny network access flags
-  sanitizedEnv.NODE_EXTRA_CA_CERTS = '';
-  sanitizedEnv.HTTP_PROXY = 'http://127.0.0.1:0';
-  sanitizedEnv.HTTPS_PROXY = 'http://127.0.0.1:0';
-  sanitizedEnv.ALL_PROXY = 'http://127.0.0.1:0';
-
-  const isWin = process.platform === 'win32';
-  const shell = isWin ? 'powershell.exe' : '/bin/sh';
-
-  try {
-    const execResult = await execPromise(cleanCmd, {
-      cwd: agentSandboxDir,
-      timeout: timeoutMs,
-      maxBuffer,
-      shell,
-      env: sanitizedEnv as unknown as NodeJS.ProcessEnv,
-    });
-
-    return {
-      stdout: execResult.stdout || '',
-      stderr: execResult.stderr || '',
-      exitCode: 0,
-      isolatedRuntime: 'process_jail',
-      executionTimeMs: Date.now() - startTime,
-      sandboxDir: `/workspace/${safeAgentId}`,
-    };
-  } catch (err: unknown) {
-    const error = err as { stdout?: string; stderr?: string; message?: string; code?: number };
-    return {
-      stdout: error.stdout || '',
-      stderr: error.stderr || error.message || 'Execution error',
-      exitCode: typeof error.code === 'number' ? error.code : 1,
-      isolatedRuntime: 'process_jail',
-      executionTimeMs: Date.now() - startTime,
-      sandboxDir: `/workspace/${safeAgentId}`,
-    };
-  }
+  // Strict Fail-Closed Security Policy: Host execution fallback is completely eliminated.
+  logAuditEvent(
+    'SANDBOX_FAIL_CLOSED',
+    'Execution denied: Neither dedicated sandbox runner service nor isolated container runtime is available. Host execution is strictly eliminated by security policy.',
+    'blocked',
+    safeAgentId
+  );
+  return {
+    stdout: '',
+    stderr: 'Security Policy Violation: Isolated container runtime (Docker) and sandbox runner service are unavailable. Command execution refused to eliminate unconfined host shell execution.',
+    exitCode: 126,
+    isolatedRuntime: 'none',
+    executionTimeMs: Date.now() - startTime,
+    sandboxDir: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
+  };
 }

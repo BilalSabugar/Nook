@@ -1,7 +1,6 @@
 import {
   createMission,
   getMissionById,
-  updateMissionStatus,
   createAgentTask,
   getAgentTaskById,
   listTasksForMission,
@@ -16,6 +15,8 @@ import {
   acquireWorkerLease,
   releaseWorkerLease,
   validateWorkerLease,
+  renewWorkerLeaseHeartbeat,
+  commitMissionStateWithFencing,
 } from './db.ts';
 import type { DbMission, DbAgentTask } from './db.ts';
 import { safeFetch } from './ssrf.ts';
@@ -28,11 +29,18 @@ export interface MissionPlanInput {
   objective: string;
   priority?: 'low' | 'medium' | 'high';
   requiresCodeExecution?: boolean;
+  codeGenerationMode?: 'model' | 'template' | 'auto';
+  modelOptions?: {
+    apiKey?: string;
+    model?: string;
+    provider?: string;
+    endpoint?: string;
+  };
 }
 
-import { planSolutionAndTests } from './solution-planner.ts';
+import { planSolutionAndTests, synthesizeSolutionWithModel } from './solution-planner.ts';
 import { verifyStructuredTestOutput } from './test-verifier.ts';
-export { planSolutionAndTests, verifyStructuredTestOutput };
+export { planSolutionAndTests, synthesizeSolutionWithModel, verifyStructuredTestOutput };
 
 /**
  * Aura's planning engine: decomposes high-level user objective into structured,
@@ -654,6 +662,11 @@ export async function tickMission(
     };
   }
 
+  // Start periodic heartbeat renewal while holding lease
+  const heartbeatTimer = setInterval(() => {
+    renewWorkerLeaseHeartbeat(leaseResource, actorId, lease.fencingToken, leaseDurationMs);
+  }, Math.max(3000, Math.floor(leaseDurationMs / 3)));
+
   try {
     // Validate lease before state transitions
     const isLeaseValid = validateWorkerLease(leaseResource, actorId, lease.fencingToken);
@@ -661,7 +674,11 @@ export async function tickMission(
       throw new Error(`Worker lease invalidated for mission ${missionId} by superseding token`);
     }
 
-    updateMissionStatus(missionId, 'active');
+    const initialCommit = commitMissionStateWithFencing(missionId, actorId, lease.fencingToken, 'active');
+    if (!initialCommit.committed) {
+      throw new Error(`Fencing violation: ${initialCommit.error}`);
+    }
+
     const tasks = listTasksForMission(missionId);
 
     for (const task of tasks) {
@@ -680,7 +697,10 @@ export async function tickMission(
 
     if (allCompleted) {
       const allVerified = updatedTasks.every((t) => t.verification?.verified !== false);
-      updateMissionStatus(missionId, 'completed');
+      const commitRes = commitMissionStateWithFencing(missionId, actorId, lease.fencingToken, 'completed');
+      if (!commitRes.committed) {
+        throw new Error(`Fencing token mismatch completing mission: ${commitRes.error}`);
+      }
       recordEvidence({
         missionId,
         agentId: 'agent-aura',
@@ -692,9 +712,15 @@ export async function tickMission(
         status: allVerified ? 'success' : 'warning',
       });
     } else if (anyFailed) {
-      updateMissionStatus(missionId, 'failed');
+      const commitRes = commitMissionStateWithFencing(missionId, actorId, lease.fencingToken, 'failed');
+      if (!commitRes.committed) {
+        throw new Error(`Fencing token mismatch failing mission: ${commitRes.error}`);
+      }
     } else if (anyBlocked) {
-      updateMissionStatus(missionId, 'paused');
+      const commitRes = commitMissionStateWithFencing(missionId, actorId, lease.fencingToken, 'paused');
+      if (!commitRes.committed) {
+        throw new Error(`Fencing token mismatch pausing mission: ${commitRes.error}`);
+      }
     }
 
     const finalMission = getMissionById(missionId)!;
@@ -704,6 +730,7 @@ export async function tickMission(
       fencingToken: lease.fencingToken,
     };
   } finally {
+    clearInterval(heartbeatTimer);
     // Release lease if mission reached terminal/paused state, or if this was an ephemeral manual API tick
     const current = getMissionById(missionId);
     if (

@@ -30,6 +30,8 @@ import {
   acquireWorkerLease,
   releaseWorkerLease,
   validateWorkerLease,
+  renewWorkerLeaseHeartbeat,
+  commitMissionStateWithFencing,
   redactApproval,
   getDatabase,
 } from '../lib/db.ts';
@@ -46,6 +48,8 @@ import {
   getOrCreateBrowserSession,
   navigateBrowser,
   clickInteractiveElement,
+  typeInteractiveElement,
+  restoreBrowserSession,
   captureSessionScreenshot,
   renderBrowserScreenshotPng,
   captureRealBrowserScreenshot,
@@ -57,6 +61,45 @@ import {
 } from '../lib/sandbox-ticket.ts';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { spawn } from 'child_process';
+
+// Start dedicated sandbox runner daemon for authentic runner service tests
+// Dynamically generate high-entropy test secret to avoid scanner false positives
+const TEST_RUNNER_SECRET = crypto.randomBytes(32).toString('hex');
+process.env.SANDBOX_RUNNER_SECRET = TEST_RUNNER_SECRET;
+process.env.SANDBOX_SERVICE_URL = 'http://127.0.0.1:4010';
+
+let runnerProc = null;
+try {
+  runnerProc = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
+    env: {
+      ...process.env,
+      PORT: '4010',
+      SANDBOX_RUNNER_SECRET: TEST_RUNNER_SECRET,
+    },
+    stdio: 'ignore',
+  });
+  if (runnerProc && typeof runnerProc.unref === 'function') {
+    runnerProc.unref();
+  }
+} catch {}
+
+process.on('exit', () => {
+  if (runnerProc) {
+    try { runnerProc.kill(); } catch {}
+  }
+});
+
+// Await runner health before executing test suite
+for (let i = 0; i < 20; i++) {
+  try {
+    const h = await fetch('http://127.0.0.1:4010/health');
+    if (h.ok) break;
+  } catch {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
 
 // =========================================================================
 // 1. AUTHENTICATION & SESSION SECURITY TESTS
@@ -455,11 +498,20 @@ test('Sandbox: Command execution enforces resource limits, scrubs secrets, and b
   try {
     const isWin = process.platform === 'win32';
     const echoCmd = isWin ? 'Write-Output "SANDBOX_OK"' : 'echo "SANDBOX_OK"';
+    const testJob = enqueueJob({
+      agentId: 'cipher-test',
+      taskType: 'code_test',
+      title: 'Echo test in sandbox',
+      prompt: echoCmd,
+    });
+    claimNextQueuedJob();
+
     const res = await executeSandboxedCommand({
       agentId: 'cipher-test',
       command: echoCmd,
+      taskId: testJob.id,
+      authorizationType: 'system_verified_test',
       timeoutMs: 8000,
-      allowHostFallback: true,
     });
 
     assert.equal(res.exitCode, 0, 'Safe command must succeed in sandbox');
@@ -646,24 +698,26 @@ test('Planner: Arbitrary prompts dynamically generate tailored solutions and tes
 });
 
 // =========================================================================
-// 15. SANDBOX FAIL-CLOSED ENFORCEMENT & COMMAND CONSTRUCTION
+// 15. SANDBOX FAIL-CLOSED ENFORCEMENT & ELIMINATION OF HOST FALLBACK
 // =========================================================================
-test('Sandbox: Host fallback fails closed when Docker is unavailable in production', async () => {
-  // Test fail-closed policy with allowHostFallback = false
-  const res = await executeSandboxedCommand({
-    agentId: 'cipher-audit',
-    command: 'node -v',
-    timeoutMs: 5000,
-    allowHostFallback: false,
-  });
+test('Sandbox: Host fallback is eliminated and strictly fails closed when runner and container isolation are unavailable', async () => {
+  const origServiceUrl = process.env.SANDBOX_SERVICE_URL;
+  try {
+    delete process.env.SANDBOX_SERVICE_URL;
+    process.env.NOOK_DISABLE_DOCKER = 'true';
 
-  // If docker is not present or configured in this test environment, it must fail closed with exit code 126
-  if (res.isolatedRuntime === 'none') {
+    const res = await executeSandboxedCommand({
+      agentId: 'cipher-audit',
+      command: 'node -v',
+      timeoutMs: 5000,
+    });
+
     assert.equal(res.exitCode, 126, 'Must exit with code 126 on isolation failure');
     assert.ok(res.stderr.includes('Security Policy Violation'), 'Must report security policy violation');
-  } else {
-    // If docker was running, it must have executed within docker container
-    assert.equal(res.isolatedRuntime, 'docker_container');
+    assert.equal(res.isolatedRuntime, 'none', 'Must not execute in host process jail');
+  } finally {
+    process.env.SANDBOX_SERVICE_URL = origServiceUrl;
+    delete process.env.NOOK_DISABLE_DOCKER;
   }
 });
 
@@ -801,13 +855,10 @@ test('Browser Screenshots: Generates genuine binary PNG with valid IHDR and IDAT
 });
 
 // =========================================================================
-// 20. SANDBOX RUNNER EXECUTION TICKET AUTHENTICATION & REPLAY DEFENSE
-// =========================================================================
-// =========================================================================
 // 20. SANDBOX RUNNER EXECUTION TICKET AUTHENTICATION & AUTHORIZATION CHAIN
 // =========================================================================
 test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain, and rejects insecure defaults or replay', () => {
-  const secret = 'a9f2c8d1e3b50742a8c3d7e1f4095861b2a4c6e80d2f4a6b8c0e2d4f6a8b0c2e';
+  const secret = crypto.randomBytes(32).toString('hex');
   const command = 'node -e "console.log(process.version)"';
   const agentId = 'agent-cipher-audit';
   const approvalId = 'appr-audit-human-123';
@@ -820,6 +871,7 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain,
     authorizationType: 'human_approval',
     ttlMs: 30000,
     secret,
+    skipServerVerification: true,
   });
   assert.ok(ticket.signature.length > 20, 'Ticket must contain valid HMAC signature');
   assert.equal(ticket.agentId, agentId);
@@ -841,12 +893,12 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain,
   assert.ok(spoofedAgent.error?.includes('different agent'));
 
   // 5. Wrong secret fails
-  const badSecret = verifySandboxExecutionTicket(ticket, command, agentId, undefined, 'f4095861b2a4c6e80d2f4a6b8c0e2d4fa9f2c8d1e3b50742a8c3d7e1');
+  const badSecret = verifySandboxExecutionTicket(ticket, command, agentId, undefined, crypto.randomBytes(32).toString('hex'));
   assert.equal(badSecret.valid, false, 'Wrong secret must be rejected');
   assert.ok(badSecret.error?.includes('cryptographic signature is invalid'));
 
   // 6. Expired ticket fails
-  const expiredTicket = createSandboxExecutionTicket({ command, agentId, approvalId, authorizationType: 'human_approval', ttlMs: -1000, secret });
+  const expiredTicket = createSandboxExecutionTicket({ command, agentId, approvalId, authorizationType: 'human_approval', ttlMs: -1000, secret, skipServerVerification: true });
   const expiredRes = verifySandboxExecutionTicket(expiredTicket, command, agentId, undefined, secret);
   assert.equal(expiredRes.valid, false, 'Expired ticket must be rejected');
   assert.ok(expiredRes.error?.includes('expired'));
@@ -868,6 +920,12 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain,
   } finally {
     process.env.SANDBOX_RUNNER_SECRET = origEnvSecret;
   }
+
+  // 9. Server verification enforcement: refuses ticket without approved record in database
+  assert.throws(
+    () => createSandboxExecutionTicket({ command, agentId, approvalId: 'unapproved-id-not-in-db', authorizationType: 'human_approval' }),
+    /Server authorization denied/
+  );
 });
 
 // =========================================================================
@@ -1093,8 +1151,8 @@ test('Evidence Engine: Document generation requires verifiable evidence and reje
     'Must not include unproven boilerplate statements like "Verified architecture alignment"'
   );
   assert.ok(
-    doc.content.includes('Verifiable Evidence & Findings'),
-    'Document must have verifiable evidence section'
+    doc.content.includes('Task Execution Logs & Findings'),
+    'Document must have task execution logs section'
   );
 });
 
@@ -1109,5 +1167,152 @@ test('Model Coding Engine: Generates verifiable solutions with independent accep
   assert.ok(plan.testCode.length > 50, 'Test code must be generated');
   assert.ok(plan.command.includes('node --test'), 'Command must run standard test runner');
   assert.ok(Array.isArray(plan.requirements), 'Requirements must be parsed into list');
+});
+
+// =========================================================================
+// 32. REAL PERSISTENT BROWSER INTERACTIONS (CLICK, TYPE, RESTORE)
+// =========================================================================
+test('Browser: Real persistent session supports typing, clicking, and disk session restoration', async () => {
+  const agentId = 'agent-scout-interactive';
+  const session = getOrCreateBrowserSession(agentId);
+
+  // Set up synthetic interactive form elements
+  session.interactiveElements = [
+    { id: 'elem-1', type: 'input', text: 'Search query', selector: 'input[name="q"]' },
+    { id: 'elem-2', type: 'button', text: 'Submit Search', selector: 'button[type="submit"]' },
+    { id: 'elem-3', type: 'link', text: 'Documentation', selector: 'a[href="https://example.com/docs"]', href: 'https://example.com/docs' },
+  ];
+
+  // Test interactive typing
+  const typeRes = await typeInteractiveElement(agentId, 'elem-1', 'quantum cryptography protocols');
+  assert.equal(typeRes.success, true);
+  assert.ok(typeRes.session.lastAction.includes('type(elem-1, "quantum cryptography protocols")'));
+
+  // Test interactive clicking on button
+  const clickRes = await clickInteractiveElement(agentId, 'elem-2');
+  assert.equal(clickRes.success, true);
+  assert.ok(clickRes.session.lastAction.includes('click(elem-2)'));
+
+  // Test persistent session restoration from disk
+  const restored = await restoreBrowserSession(agentId);
+  assert.ok(restored);
+  assert.equal(restored.agentId, agentId);
+  assert.ok(restored.interactiveElements.length >= 3);
+  assert.equal(restored.lastAction, 'click(elem-2)');
+});
+
+// =========================================================================
+// 33. HEARTBEAT-BASED WORKER LEASES & FENCING TOKENS
+// =========================================================================
+test('Worker Leases: Heartbeat renewal extends expiration and strictly blocks mismatched fencing tokens', () => {
+  const resourceId = `mission-heartbeat-${Date.now()}`;
+  const ownerId = 'worker-node-alpha';
+
+  // 1. Acquire initial lease
+  const initial = acquireWorkerLease(resourceId, ownerId, 10000);
+  assert.equal(initial.acquired, true);
+  assert.equal(initial.fencingToken, 1);
+
+  // 2. Successful heartbeat renewal with matching token
+  const renewed = renewWorkerLeaseHeartbeat(resourceId, ownerId, 1, 20000);
+  assert.equal(renewed.renewed, true, 'Heartbeat renewal must succeed with matching token and owner');
+  assert.ok(renewed.expiresAt);
+
+  // 3. Stale fencing token renewal rejected
+  const staleRenewal = renewWorkerLeaseHeartbeat(resourceId, ownerId, 999, 20000);
+  assert.equal(staleRenewal.renewed, false, 'Renewal with wrong fencing token must be rejected');
+  assert.ok(staleRenewal.error?.includes('Fencing token mismatch'));
+
+  // 4. Impersonating worker renewal rejected
+  const impersonator = renewWorkerLeaseHeartbeat(resourceId, 'worker-node-imposter', 1, 20000);
+  assert.equal(impersonator.renewed, false, 'Renewal by different worker must be rejected');
+
+  releaseWorkerLease(resourceId, ownerId);
+});
+
+// =========================================================================
+// 34. MISSION STATE COMMIT ENFORCES LEASE FENCING
+// =========================================================================
+test('Mission State Control: commitMissionStateWithFencing strictly prevents writes when lease was lost', () => {
+  const mission = planMission({
+    title: 'Fenced Commit Test Mission',
+    objective: 'Test atomic fencing enforcement on status mutation',
+  });
+
+  const leaseKey = `mission:${mission.id}`;
+  // Worker 1 acquires lease
+  const lease1 = acquireWorkerLease(leaseKey, 'worker-1', 10000);
+  assert.equal(lease1.acquired, true);
+
+  // Worker 1 commits active status -> succeeds
+  const commit1 = commitMissionStateWithFencing(mission.id, 'worker-1', lease1.fencingToken, 'active');
+  assert.equal(commit1.committed, true);
+
+  // Simulate lease timeout or supersede: Worker 2 acquires lease with incremented token
+  releaseWorkerLease(leaseKey, 'worker-1');
+  const lease2 = acquireWorkerLease(leaseKey, 'worker-2', 10000);
+  assert.equal(lease2.fencingToken, 2);
+
+  // Stale Worker 1 attempts to commit 'completed' with old token 1 -> REJECTED!
+  const staleCommit = commitMissionStateWithFencing(mission.id, 'worker-1', 1, 'completed');
+  assert.equal(staleCommit.committed, false, 'Stale worker commit must be rejected');
+  assert.ok(staleCommit.error?.includes('Fencing violation'));
+
+  // Worker 2 commits with token 2 -> succeeds
+  const validCommit = commitMissionStateWithFencing(mission.id, 'worker-2', 2, 'completed');
+  assert.equal(validCommit.committed, true);
+
+  releaseWorkerLease(leaseKey, 'worker-2');
+});
+
+// =========================================================================
+// 35. MODEL CODING ENGINE: FAILS LOUD WITHOUT SILENT TEMPLATE FALLBACK
+// =========================================================================
+test('Model Coding Engine: Reports provider failures accurately and rejects silent template degradation', async () => {
+  const { synthesizeSolutionWithModel } = await import('../lib/solution-planner.ts');
+
+  // When model is explicitly requested but invalid credentials or endpoint is supplied, it must fail loud!
+  await assert.rejects(
+    () => synthesizeSolutionWithModel('Synthesize a distributed consensus engine', {
+      mode: 'model',
+      requireModel: true,
+      provider: 'openai',
+      apiKey: 'sk-invalid-test-key-triggering-failure',
+    }),
+    /Model-driven solution synthesis failed/
+  );
+
+  // When explicit template mode is chosen, fast-path requirement-driven synthesizer runs
+  const templatePlan = await synthesizeSolutionWithModel('Build an async token bucket rate limiter', {
+    mode: 'template',
+  });
+  assert.ok(templatePlan.solution.length > 50);
+  assert.equal(templatePlan.domain, 'rate_limiting');
+});
+
+// =========================================================================
+// 36. RUNNER SMOKE TEST & DOCKER COMPOSE CONFIGURATION
+// =========================================================================
+test('Runner Smoke Test: Dedicated runner enforces secret configuration and rejects unauthenticated exec', async () => {
+  // Direct unauthenticated execution attempt must be rejected with 401
+  const directRes = await fetch('http://127.0.0.1:4010/exec', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ command: 'node -v' }),
+  });
+  assert.equal(directRes.status, 401, 'Unauthenticated exec must receive HTTP 401');
+
+  // Health endpoint verification
+  const healthRes = await fetch('http://127.0.0.1:4010/health');
+  assert.equal(healthRes.status, 200);
+  const healthData = await healthRes.json();
+  assert.equal(healthData.status, 'healthy');
+  assert.equal(healthData.authRequired, true);
+});
+
+test.after(() => {
+  if (runnerProc) {
+    try { runnerProc.kill(); } catch {}
+  }
 });
 

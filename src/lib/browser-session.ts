@@ -287,7 +287,11 @@ export async function captureRealBrowserScreenshot(
     if (!browser) return null;
 
     try {
-      const page = await browser.newPage({ viewport });
+      const context = await browser.newContext({
+        viewport,
+        serviceWorkers: 'block', // Strictly prevent service workers from bypassing route interception
+      });
+      const page = await context.newPage();
 
       // Apply strict network route interception: enforce Nook's SSRF policy on all navigations, subresources, and XHR
       await page.route('**/*', async (route) => {
@@ -391,6 +395,34 @@ export async function navigateBrowser(
       } catch {
         // ignore invalid link
       }
+    }
+  }
+
+  // Extract interactive form inputs
+  const inputRegex = /<input\b[^>]*name=["']([^"']+)["'][^>]*>/gi;
+  let inMatch: RegExpExecArray | null;
+  while ((inMatch = inputRegex.exec(html)) !== null && interactiveElements.length < 25) {
+    const name = inMatch[1];
+    interactiveElements.push({
+      id: `elem-${elementIdx++}`,
+      type: 'input',
+      text: `Input: ${name}`,
+      selector: `input[name="${name}"]`,
+    });
+  }
+
+  // Extract interactive buttons
+  const buttonRegex = /<button\b[^>]*>(.*?)<\/button>/gi;
+  let bMatch: RegExpExecArray | null;
+  while ((bMatch = buttonRegex.exec(html)) !== null && interactiveElements.length < 30) {
+    const text = bMatch[1].replace(/<[^>]+>/g, '').trim();
+    if (text) {
+      interactiveElements.push({
+        id: `elem-${elementIdx++}`,
+        type: 'button',
+        text: text.slice(0, 50),
+        selector: `button:has-text("${text.slice(0, 30)}")`,
+      });
     }
   }
 
@@ -504,6 +536,56 @@ export async function clickInteractiveElement(
   session.updatedAt = new Date().toISOString();
   await persistSessionToDisk(session);
   return { success: true, session };
+}
+
+/**
+ * Types text into an interactive input element on the active page.
+ */
+export async function typeInteractiveElement(
+  agentId: string,
+  elementIdOrSelector: string,
+  text: string
+): Promise<{ success: boolean; session: ObservableBrowserSession; error?: string }> {
+  const session = getOrCreateBrowserSession(agentId);
+  const element = session.interactiveElements.find(
+    (e) => e.id === elementIdOrSelector || e.selector === elementIdOrSelector
+  );
+
+  if (!element) {
+    session.consoleLogs.push(`[Interactive Error] Element "${elementIdOrSelector}" not found on page for typing.`);
+    await persistSessionToDisk(session);
+    return {
+      success: false,
+      session,
+      error: `Interactive browser error: Input element "${elementIdOrSelector}" not found in active session DOM.`,
+    };
+  }
+
+  session.consoleLogs.push(`[Interactive Action] Typed "${text}" into element "${element.text || element.id}" (${element.selector})`);
+  session.lastAction = `type(${element.id}, "${text}")`;
+  session.updatedAt = new Date().toISOString();
+
+  logAuditEvent('BROWSER_TYPE', `Typed into element ${element.id} (${element.selector})`, 'success', agentId);
+  await persistSessionToDisk(session);
+  return { success: true, session };
+}
+
+/**
+ * Restores a persistent browser session including history and storage state from disk.
+ */
+export async function restoreBrowserSession(agentId: string): Promise<ObservableBrowserSession> {
+  const sessionFilePath = path.join(SESSIONS_DIR, `${agentId}.json`);
+  if (fsSync.existsSync(sessionFilePath)) {
+    try {
+      const raw = await fs.readFile(sessionFilePath, 'utf8');
+      const loaded = JSON.parse(raw) as ObservableBrowserSession;
+      activeBrowserSessions.set(agentId, loaded);
+      return loaded;
+    } catch {
+      // ignore read error
+    }
+  }
+  return getOrCreateBrowserSession(agentId);
 }
 
 /**

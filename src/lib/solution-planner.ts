@@ -915,22 +915,41 @@ export function planRequirementDrivenSolution(objective: string): GeneratedPlan 
  * (Ollama, Gemini, OpenAI, Claude) to produce custom ES module solutions and specification-driven tests.
  * Falls back to requirement-driven synthesis as an optional fast-path when no model is configured or available.
  */
+export interface SynthesizeSolutionOptions {
+  apiKey?: string;
+  model?: string;
+  provider?: string;
+  endpoint?: string;
+  mode?: 'model' | 'template' | 'auto';
+  requireModel?: boolean;
+}
+
+/**
+ * Model-driven plan synthesis.
+ * Implements actual iterative code generation by querying configured LLM providers
+ * (Ollama, Gemini, OpenAI, Claude) to produce custom ES module solutions and specification-driven tests.
+ * Accurately reports failures when model execution is expected; templates are available via explicit mode: 'template'.
+ */
 export async function synthesizeSolutionWithModel(
   objective: string,
-  modelOptions?: {
-    apiKey?: string;
-    model?: string;
-    provider?: string;
-    endpoint?: string;
-  }
+  modelOptions?: SynthesizeSolutionOptions
 ): Promise<GeneratedPlan & { solution: string; testCode: string; requirements: string[] }> {
+  // If template mode is explicitly requested, use fast-path requirement-driven synthesizer
+  if (modelOptions?.mode === 'template') {
+    return planRequirementDrivenSolution(objective);
+  }
+
   const provider = modelOptions?.provider || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : (process.env.OLLAMA_BASE_URL ? 'ollama' : undefined));
   const apiKey = modelOptions?.apiKey || (provider === 'gemini' ? process.env.GEMINI_API_KEY : provider === 'openai' ? process.env.OPENAI_API_KEY : provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : undefined);
   const endpoint = modelOptions?.endpoint || process.env.OLLAMA_BASE_URL;
 
-  if (provider && (apiKey || endpoint || provider === 'ollama')) {
-    try {
-      const prompt = `You are an expert software engineer. Implement a robust ES module solution and comprehensive unit tests for this exact engineering objective:
+  // When model is required or auto-detected with provider credentials:
+  if (modelOptions?.requireModel || modelOptions?.mode === 'model' || (provider && (apiKey || endpoint || provider === 'ollama'))) {
+    if (!provider || (!apiKey && !endpoint && provider !== 'ollama')) {
+      throw new Error('Model execution requested, but no model provider (Gemini, OpenAI, Anthropic, or Ollama) is configured.');
+    }
+
+    const prompt = `You are an expert software engineer. Implement a robust ES module solution and comprehensive unit tests for this exact engineering objective:
 "${objective}"
 
 Return ONLY valid JSON with this exact schema (no markdown formatting, no code fences):
@@ -942,8 +961,10 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
   "testContent": "import test from 'node:test'; import assert from 'node:assert/strict'; ..."
 }`;
 
-      let rawResponseText = '';
+    let rawResponseText = '';
+    let lastError: string | null = null;
 
+    try {
       if (provider === 'gemini' && apiKey) {
         const model = modelOptions?.model || 'gemini-1.5-flash';
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
@@ -954,7 +975,10 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
             generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
           }),
         });
-        if (res.ok) {
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          lastError = `Gemini API HTTP ${res.status}: ${errBody}`;
+        } else {
           const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
           rawResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
         }
@@ -970,7 +994,10 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
             temperature: 0.2,
           }),
         });
-        if (res.ok) {
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          lastError = `OpenAI API HTTP ${res.status}: ${errBody}`;
+        } else {
           const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
           rawResponseText = data.choices?.[0]?.message?.content || '';
         }
@@ -987,13 +1014,26 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
             stream: false,
           }),
         });
-        if (res.ok) {
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          lastError = `Ollama API HTTP ${res.status}: ${errBody}`;
+        } else {
           const data = (await res.json()) as { response?: string };
           rawResponseText = data.response || '';
         }
       }
+    } catch (netErr: unknown) {
+      lastError = `Network or connection failure: ${netErr instanceof Error ? netErr.message : String(netErr)}`;
+    }
 
-      if (rawResponseText) {
+    if (lastError) {
+      if (modelOptions?.requireModel || modelOptions?.mode === 'model') {
+        throw new Error(`Model-driven solution synthesis failed: ${lastError}`);
+      }
+    }
+
+    if (rawResponseText) {
+      try {
         const cleanJson = rawResponseText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
         const parsed = JSON.parse(cleanJson);
         if (parsed.className && parsed.solutionContent && parsed.testContent) {
@@ -1011,9 +1051,11 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
             requirements: Array.isArray(parsed.methods) ? parsed.methods : ['execute'],
           };
         }
+      } catch (jsonErr: unknown) {
+        if (modelOptions?.requireModel || modelOptions?.mode === 'model') {
+          throw new Error(`Model returned invalid structured JSON output: ${jsonErr instanceof Error ? jsonErr.message : String(jsonErr)}`);
+        }
       }
-    } catch {
-      // Model call or JSON parse failure: safely fall through to requirement-driven fast path
     }
   }
 

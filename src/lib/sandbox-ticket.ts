@@ -1,10 +1,12 @@
 import crypto from 'crypto';
+import { getApprovalById, getJobById, getAgentTaskById } from './db.ts';
 
 export interface SandboxExecutionTicket {
   ticketId: string;
   commandHash: string;
   agentId: string;
   taskId: string;
+  workspacePath: string;
   approvalId?: string;
   authorizationType: 'human_approval' | 'system_verified_test';
   action: string;
@@ -17,10 +19,12 @@ export interface CreateTicketOptions {
   command: string;
   agentId: string;
   taskId?: string;
+  workspacePath?: string;
   approvalId?: string;
   authorizationType?: 'human_approval' | 'system_verified_test';
   ttlMs?: number;
   secret?: string;
+  skipServerVerification?: boolean;
 }
 
 const INSECURE_DEFAULT_SECRETS = new Set([
@@ -70,6 +74,55 @@ export function computeCommandHash(command: string): string {
 }
 
 /**
+ * Verifies that the execution ticket corresponds to an actual server-authorized record in the database:
+ * 1. human_approval requires an existing database approval record in 'approved' or 'consumed' state matching agent & command.
+ * 2. system_verified_test requires an active running background job or mission task matching taskId.
+ */
+function verifyServerAuthorization(options: {
+  command: string;
+  agentId: string;
+  taskId: string;
+  approvalId?: string;
+  authorizationType: 'human_approval' | 'system_verified_test';
+}): void {
+  if (options.authorizationType === 'human_approval') {
+    if (!options.approvalId) {
+      throw new Error('Server authorization denied: Human approval ticket requires a bound approvalId.');
+    }
+    const appr = getApprovalById(options.approvalId);
+    if (!appr) {
+      throw new Error(`Server authorization denied: Approval record "${options.approvalId}" does not exist.`);
+    }
+    if (appr.agentId !== options.agentId) {
+      throw new Error(`Server authorization denied: Approval agent mismatch (expected "${options.agentId}", found "${appr.agentId}").`);
+    }
+    if (appr.status !== 'approved' && appr.status !== 'consumed') {
+      throw new Error(`Server authorization denied: Approval status must be "approved" or "consumed" (found "${appr.status}").`);
+    }
+    if (appr.payload?.command && appr.payload.command.trim() !== options.command.trim()) {
+      throw new Error('Server authorization denied: Approval command mismatch.');
+    }
+  } else if (options.authorizationType === 'system_verified_test') {
+    if (!options.taskId) {
+      throw new Error('Server authorization denied: System verified test ticket requires bound taskId.');
+    }
+    const job = getJobById(options.taskId);
+    const agentTask = getAgentTaskById(options.taskId);
+    if (job) {
+      if (job.status !== 'running' && job.status !== 'queued') {
+        throw new Error(`Server authorization denied: Background job "${options.taskId}" is in "${job.status}" state (must be active).`);
+      }
+    } else if (agentTask) {
+      if (agentTask.status !== 'in_progress' && agentTask.status !== 'pending' && agentTask.status !== 'blocked') {
+        throw new Error(`Server authorization denied: Mission task "${options.taskId}" is in "${agentTask.status}" state.`);
+      }
+    } else {
+      throw new Error(`Server authorization denied: No verified background job or mission task found for taskId "${options.taskId}".`);
+    }
+  }
+}
+
+/**
  * Creates an authenticated, short-lived, action-bound execution ticket.
  * The ticket is signed with HMAC-SHA256 and expires in 30 seconds.
  */
@@ -82,10 +135,12 @@ export function createSandboxExecutionTicket(
   let command: string;
   let safeAgentId: string;
   let taskId: string;
+  let workspacePath: string;
   let approvalId: string | undefined;
   let authorizationType: 'human_approval' | 'system_verified_test';
   let ttl: number;
   let signingSecret: string;
+  let skipServerVerification = false;
 
   if (typeof commandOrOptions === 'object') {
     command = commandOrOptions.command;
@@ -93,16 +148,30 @@ export function createSandboxExecutionTicket(
     taskId = commandOrOptions.taskId || crypto.randomUUID();
     approvalId = commandOrOptions.approvalId;
     authorizationType = commandOrOptions.authorizationType || (approvalId ? 'human_approval' : 'system_verified_test');
+    workspacePath = commandOrOptions.workspacePath || `/workspace/${safeAgentId}/tasks/${taskId}`;
     ttl = commandOrOptions.ttlMs ?? 30000;
     signingSecret = commandOrOptions.secret || getSandboxRunnerSecret();
+    skipServerVerification = Boolean(commandOrOptions.skipServerVerification);
   } else {
     command = commandOrOptions;
     safeAgentId = agentId || 'default';
     taskId = crypto.randomUUID();
     approvalId = undefined;
     authorizationType = 'system_verified_test';
+    workspacePath = `/workspace/${safeAgentId}/tasks/${taskId}`;
     ttl = ttlMs;
     signingSecret = secret || getSandboxRunnerSecret();
+  }
+
+  // Enforce server authorization verification unless explicitly skipped (in mock crypto unit tests)
+  if (!skipServerVerification) {
+    verifyServerAuthorization({
+      command,
+      agentId: safeAgentId,
+      taskId,
+      approvalId,
+      authorizationType,
+    });
   }
 
   const ticketId = crypto.randomUUID();
@@ -111,7 +180,7 @@ export function createSandboxExecutionTicket(
   const expiresAt = issuedAt + ttl;
   const action = 'sandboxed_exec';
 
-  const payload = `${ticketId}:${commandHash}:${safeAgentId}:${taskId}:${approvalId || 'none'}:${authorizationType}:${issuedAt}:${expiresAt}:${action}`;
+  const payload = `${ticketId}:${commandHash}:${safeAgentId}:${taskId}:${workspacePath}:${approvalId || 'none'}:${authorizationType}:${issuedAt}:${expiresAt}:${action}`;
   const signature = crypto.createHmac('sha256', signingSecret).update(payload).digest('hex');
 
   return {
@@ -119,6 +188,7 @@ export function createSandboxExecutionTicket(
     commandHash,
     agentId: safeAgentId,
     taskId,
+    workspacePath,
     approvalId,
     authorizationType,
     action,
@@ -136,7 +206,8 @@ export function verifySandboxExecutionTicket(
   command: string,
   agentId: string,
   consumedTicketIds?: Set<string> | Map<string, number>,
-  secret?: string
+  secret?: string,
+  expectedWorkspace?: string
 ): { valid: boolean; error?: string } {
   if (!ticket || !ticket.ticketId || !ticket.signature) {
     return { valid: false, error: 'Malformed or missing execution ticket fields' };
@@ -179,8 +250,9 @@ export function verifySandboxExecutionTicket(
     }
   }
 
-  // Verify HMAC signature
-  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
+  // Verify HMAC signature over full authorization chain including workspace
+  const workspaceField = ticket.workspacePath || '';
+  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${workspaceField}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
   const expectedSig = crypto.createHmac('sha256', verifyingSecret).update(payload).digest('hex');
 
   const sigBuf = Buffer.from(ticket.signature, 'hex');
@@ -199,6 +271,11 @@ export function verifySandboxExecutionTicket(
   // Verify bound agent
   if (ticket.agentId !== agentId) {
     return { valid: false, error: 'Execution ticket is bound to a different agent' };
+  }
+
+  // Verify workspace binding if expected
+  if (expectedWorkspace && ticket.workspacePath && ticket.workspacePath !== expectedWorkspace) {
+    return { valid: false, error: `Execution ticket workspace mismatch: expected ${expectedWorkspace}, found ${ticket.workspacePath}` };
   }
 
   // Verify authorization chain

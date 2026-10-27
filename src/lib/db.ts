@@ -1559,4 +1559,90 @@ export function validateWorkerLease(resourceId: string, ownerId: string, expecte
   return Boolean(row);
 }
 
+/**
+ * Renews an active worker lease via heartbeat.
+ * Strictly checks that:
+ * 1. ownerId matches the current lease owner.
+ * 2. fencingToken matches the current lease token.
+ * 3. The current lease has not already expired.
+ */
+export function renewWorkerLeaseHeartbeat(
+  resourceId: string,
+  ownerId: string,
+  fencingToken: number,
+  durationMs: number = 25000
+): { renewed: boolean; expiresAt?: string; error?: string } {
+  const db = getDatabase();
+  const now = Date.now();
+  const nowIso = new Date(now).toISOString();
+  const newExpiresAt = new Date(now + durationMs).toISOString();
+
+  const stmt = db.prepare(`
+    UPDATE worker_leases
+    SET expires_at = ?
+    WHERE resource_id = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+  `);
+  const info = stmt.run(newExpiresAt, resourceId, ownerId, fencingToken, nowIso);
+  if (info.changes === 0) {
+    const current = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as unknown as WorkerLeaseRow | undefined;
+    return {
+      renewed: false,
+      error: !current
+        ? 'Lease not found'
+        : current.owner_id !== ownerId
+        ? `Lease acquired by another worker (${current.owner_id})`
+        : current.fencing_token !== fencingToken
+        ? `Fencing token mismatch (current: ${current.fencing_token}, provided: ${fencingToken})`
+        : 'Lease expired before heartbeat',
+    };
+  }
+
+  return { renewed: true, expiresAt: newExpiresAt };
+}
+
+/**
+ * Atomically commits a mission status change and verifies the fencing token.
+ * Prevents split-brain state writes if the worker lost the lease during task execution.
+ */
+export function commitMissionStateWithFencing(
+  missionId: string,
+  ownerId: string,
+  fencingToken: number,
+  newStatus: 'active' | 'completed' | 'failed' | 'paused' | 'cancelled'
+): { committed: boolean; error?: string } {
+  const db = getDatabase();
+  const leaseResource = `mission:${missionId}`;
+  const nowIso = new Date().toISOString();
+
+  // Validate lease inside transaction
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    const validLease = db.prepare(`
+      SELECT * FROM worker_leases
+      WHERE resource_id = ? AND owner_id = ? AND fencing_token = ? AND expires_at > ?
+    `).get(leaseResource, ownerId, fencingToken, nowIso);
+
+    if (!validLease) {
+      db.exec('ROLLBACK;');
+      return {
+        committed: false,
+        error: `Fencing violation: Worker ${ownerId} token ${fencingToken} does not hold an active lease for ${leaseResource}`,
+      };
+    }
+
+    db.prepare(`
+      UPDATE missions
+      SET status = ?, updated_at = ?
+      WHERE id = ?
+    `).run(newStatus, nowIso, missionId);
+
+    db.exec('COMMIT;');
+    return { committed: true };
+  } catch (err: unknown) {
+    db.exec('ROLLBACK;');
+    return { committed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+
 

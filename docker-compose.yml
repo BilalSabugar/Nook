@@ -90,6 +90,7 @@ services:
           memory: 128M
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   nook_data:

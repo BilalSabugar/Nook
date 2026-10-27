@@ -31,9 +31,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Install Chromium and system dependencies for authentic headless browser rendering
+# Install Chromium, Docker CLI, and system dependencies for authentic headless browser rendering and per-task container isolation
 RUN apk add --no-cache \
     chromium \
+    docker-cli \
     nss \
     freetype \
     harfbuzz \

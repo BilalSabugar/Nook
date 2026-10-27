@@ -271,12 +271,17 @@ export async function executeSandboxedCommand(
       });
 
       if (response.ok) {
-        const result = (await response.json()) as { stdout?: string; stderr?: string; exitCode?: number };
+        const result = (await response.json()) as {
+          stdout?: string;
+          stderr?: string;
+          exitCode?: number;
+          isolatedRuntime?: 'docker_container' | 'process_jail' | 'none';
+        };
         return {
           stdout: result.stdout || '',
           stderr: result.stderr || '',
           exitCode: result.exitCode ?? 0,
-          isolatedRuntime: 'docker_container',
+          isolatedRuntime: result.isolatedRuntime || 'docker_container',
           executionTimeMs: Date.now() - startTime,
           sandboxDir: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
         };

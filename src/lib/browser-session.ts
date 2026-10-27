@@ -228,6 +228,116 @@ export function getOrCreateBrowserSession(agentId: string): ObservableBrowserSes
   return initialSession;
 }
 
+export interface LivePlaywrightSession {
+  browser: any;
+  context: any;
+  page: any;
+  engine: string;
+}
+
+export const livePlaywrightSessions = new Map<string, LivePlaywrightSession>();
+
+/**
+ * Retrieves or initializes an active, stateful Playwright browser page for an agent.
+ */
+export async function getOrCreateLivePlaywrightPage(
+  agentId: string,
+  viewport = { width: 1280, height: 800 }
+): Promise<LivePlaywrightSession | null> {
+  const existing = livePlaywrightSessions.get(agentId);
+  if (existing && !existing.page.isClosed()) {
+    return existing;
+  }
+
+  try {
+    const dynamicImport = new Function('specifier', 'return import(specifier)');
+    const pw = (await dynamicImport('playwright')) as typeof import('playwright');
+    const { chromium } = pw;
+    let browser: any = null;
+    let engine = 'playwright_chromium';
+
+    const customExecPath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+      (process.platform === 'linux' && fsSync.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
+
+    const baseArgs = ['--disable-dev-shm-usage', '--disable-gpu'];
+    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || process.env.NOOK_IN_DOCKER === 'true' || process.platform === 'linux') {
+      baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+    }
+
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        executablePath: customExecPath,
+        args: baseArgs,
+      });
+      engine = 'playwright_chromium';
+    } catch {
+      const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chromium', 'chrome'];
+      for (const channel of channels) {
+        try {
+          browser = await chromium.launch({
+            channel,
+            headless: true,
+            args: baseArgs,
+          });
+          engine = `playwright_${channel}`;
+          break;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    if (!browser) return null;
+
+    const context = await browser.newContext({
+      viewport,
+      serviceWorkers: 'block', // Strictly prevent service worker bypass
+    });
+    const page = await context.newPage();
+
+    // Enforce Nook's SSRF policy on all navigations and subresources
+    await page.route('**/*', async (route: any) => {
+      const reqUrl = route.request().url();
+      if (reqUrl.startsWith('data:') || reqUrl.startsWith('blob:')) {
+        await route.continue();
+        return;
+      }
+      try {
+        const val = await validateOutboundUrl(reqUrl);
+        if (!val.allowed) {
+          logAuditEvent('BROWSER_SSRF_SUBRESOURCE_BLOCKED', `Route interception blocked outbound request to ${reqUrl}: ${val.reason}`, 'blocked');
+          await route.abort('blockedbyclient');
+          return;
+        }
+        await route.continue();
+      } catch {
+        await route.abort('failed');
+      }
+    });
+
+    const session: LivePlaywrightSession = { browser, context, page, engine };
+    livePlaywrightSessions.set(agentId, session);
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Closes active live Playwright browser context for an agent.
+ */
+export async function closeBrowserSession(agentId: string): Promise<void> {
+  const existing = livePlaywrightSessions.get(agentId);
+  if (existing) {
+    try {
+      await existing.context.close().catch(() => {});
+      await existing.browser.close().catch(() => {});
+    } catch {}
+    livePlaywrightSessions.delete(agentId);
+  }
+}
+
 /**
  * Attempts real headless browser rendering and screenshot capture using Playwright Chromium.
  * Falls back safely if Chromium is not provisioned in the execution runtime.
@@ -444,19 +554,69 @@ export async function navigateBrowser(
   let isRealBrowser = false;
   let realEngine = 'playwright_chromium';
 
-  // 1. Attempt authentic Playwright browser screenshot
-  const realCapture = await captureRealBrowserScreenshot(response.finalUrl).catch(() => null);
-  if (realCapture && realCapture.buffer && realCapture.buffer.length > 0) {
+  // 1. Attempt authentic live Playwright browser context & page
+  const live = await getOrCreateLivePlaywrightPage(agentId).catch(() => null);
+  if (live && !live.page.isClosed()) {
     try {
-      fsSync.writeFileSync(filePath, realCapture.buffer, { mode: 0o600 });
+      await live.page.goto(response.finalUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
+      // Extract authentic elements from live DOM
+      const liveElements = await live.page.evaluate(() => {
+        const results: Array<{ id: string; type: 'link' | 'button' | 'input'; text: string; selector: string; href?: string }> = [];
+        let count = 1;
+        document.querySelectorAll('input, button, a').forEach((el) => {
+          const tag = el.tagName.toLowerCase();
+          const idAttr = el.getAttribute('id');
+          const nameAttr = el.getAttribute('name');
+          let selector = tag;
+          if (idAttr) selector = `#${idAttr}`;
+          else if (nameAttr) selector = `${tag}[name="${nameAttr}"]`;
+
+          let text = (el as HTMLElement).innerText || '';
+          if (!text && el instanceof HTMLInputElement) {
+            text = el.placeholder || el.value || nameAttr || 'Input';
+          }
+          text = text.trim().slice(0, 80);
+
+          results.push({
+            id: `elem-${count++}`,
+            type: tag === 'a' ? 'link' : tag === 'button' ? 'button' : 'input',
+            text: text || `${tag} element`,
+            selector,
+            href: el.getAttribute('href') || undefined,
+          });
+        });
+        return results;
+      });
+
+      if (liveElements.length > 0) {
+        interactiveElements.splice(0, interactiveElements.length, ...liveElements);
+      }
+
+      session.title = await live.page.title() || title;
+      const shotBuffer = await live.page.screenshot({ type: 'png' });
+      fsSync.writeFileSync(filePath, Buffer.from(shotBuffer), { mode: 0o600 });
       isRealBrowser = true;
-      realEngine = realCapture.engine;
+      realEngine = live.engine;
     } catch {
-      // ignore disk write error
+      // fallback
     }
   }
 
-  // 2. If real browser rendering is not provisioned in current environment, render disclosed placeholder
+  // 2. Fallback to captureRealBrowserScreenshot
+  if (!isRealBrowser) {
+    const realCapture = await captureRealBrowserScreenshot(response.finalUrl).catch(() => null);
+    if (realCapture && realCapture.buffer && realCapture.buffer.length > 0) {
+      try {
+        fsSync.writeFileSync(filePath, realCapture.buffer, { mode: 0o600 });
+        isRealBrowser = true;
+        realEngine = realCapture.engine;
+      } catch {
+        // ignore disk write error
+      }
+    }
+  }
+
+  // 3. If real browser rendering is not provisioned in current environment, render disclosed placeholder
   if (!isRealBrowser) {
     try {
       const pngBuffer = renderBrowserScreenshotPng(title, response.finalUrl, response.status);
@@ -525,6 +685,21 @@ export async function clickInteractiveElement(
     };
   }
 
+  // Perform genuine Playwright click if active live session exists
+  const live = livePlaywrightSessions.get(agentId);
+  if (live && !live.page.isClosed()) {
+    try {
+      const locator = live.page.locator(element.selector).first();
+      await locator.click({ timeout: 5000 });
+      await live.page.waitForLoadState('domcontentloaded').catch(() => {});
+      session.title = await live.page.title() || session.title;
+      session.currentUrl = live.page.url() || session.currentUrl;
+      session.consoleLogs.push(`[Playwright Live Action] Real clicked ${element.selector} -> now on ${session.currentUrl}`);
+    } catch (err: unknown) {
+      session.consoleLogs.push(`[Playwright Click Notice] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   session.consoleLogs.push(`[Interactive Action] Clicked element "${element.text}" (${element.selector})`);
   session.lastAction = `click(${element.id})`;
 
@@ -559,6 +734,19 @@ export async function typeInteractiveElement(
       session,
       error: `Interactive browser error: Input element "${elementIdOrSelector}" not found in active session DOM.`,
     };
+  }
+
+  // Perform genuine Playwright interaction if active live session exists
+  const live = livePlaywrightSessions.get(agentId);
+  if (live && !live.page.isClosed()) {
+    try {
+      const locator = live.page.locator(element.selector).first();
+      await locator.fill(text);
+      const actualVal = await locator.inputValue().catch(() => text);
+      session.consoleLogs.push(`[Playwright Live Action] Real typed "${actualVal}" into ${element.selector}`);
+    } catch (err: unknown) {
+      session.consoleLogs.push(`[Playwright Type Notice] ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   session.consoleLogs.push(`[Interactive Action] Typed "${text}" into element "${element.text || element.id}" (${element.selector})`);

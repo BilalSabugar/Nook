@@ -46,7 +46,7 @@ if (rawSecret.length < 16) {
   process.exit(1);
 }
 const RUNNER_SECRET = rawSecret;
-const MAX_BODY_BYTES = 64 * 1024; // 64KB strict body limit
+const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2MB aligned body limit for code and virtual files
 
 const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
 
@@ -54,7 +54,7 @@ const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
 const consumedTickets = new Map();
 
 // Periodic cleanup of expired replay prevention tokens
-setInterval(() => {
+const cleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [id, expiresAt] of consumedTickets.entries()) {
     if (now > expiresAt) {
@@ -62,6 +62,7 @@ setInterval(() => {
     }
   }
 }, 60000);
+if (cleanupInterval.unref) cleanupInterval.unref();
 
 function computeCommandHash(cmd) {
   return crypto.createHash('sha256').update(cmd.trim()).digest('hex');
@@ -327,7 +328,7 @@ const server = http.createServer(async (req, res) => {
       if (bodyBytes > MAX_BODY_BYTES) {
         payloadExceeded = true;
         res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Payload Too Large: maximum allowed body size is 64KB' }));
+        res.end(JSON.stringify({ error: 'Payload Too Large: maximum allowed body size is 2MB' }));
         req.destroy();
         return;
       }
@@ -452,9 +453,10 @@ const server = http.createServer(async (req, res) => {
           ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command]
           : ['-c', command];
 
-        // 6. Execute with container isolation if Docker is available, or unprivileged task workspace jail
+        // 6. Execute with genuine per-task container isolation.
+        // Fallback to shared process execution inside the runner container is strictly denied in production.
         let result;
-        let runtimeUsed = 'process_jail';
+        let runtimeUsed = 'docker_container';
 
         if (process.env.NOOK_DISABLE_DOCKER !== 'true') {
           try {
@@ -484,13 +486,28 @@ const server = http.createServer(async (req, res) => {
           } catch {}
         }
 
+        // Strict isolation enforcement: if container runtime is unavailable,
+        // and unsafe host fallback is not explicitly permitted for local test harnesses, deny execution!
         if (!result) {
-          result = await spawnIsolatedBuffer(executable, args, {
-            cwd: taskWorkspaceDir,
-            env: sanitizedEnv,
-            timeout: clampedTimeout,
-            maxBuffer: clampedBuffer,
-          });
+          if (process.env.ALLOW_UNSAFE_PROCESS_JAIL === 'true' && process.env.NODE_ENV !== 'production') {
+            result = await spawnIsolatedBuffer(executable, args, {
+              cwd: taskWorkspaceDir,
+              env: sanitizedEnv,
+              timeout: clampedTimeout,
+              maxBuffer: clampedBuffer,
+            });
+            runtimeUsed = 'process_jail';
+          } else {
+            res.writeHead(422, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              error: 'Execution denied: Genuine per-task container isolation is required. Unsafe host/container fallback is disabled.',
+              exitCode: 126,
+              isolatedRuntime: 'none',
+              sandboxDir: taskWorkspaceDir,
+              agentId: safeAgentId,
+            }));
+            return;
+          }
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -99,6 +99,8 @@ export function planMission(input: MissionPlanInput): DbMission {
         testFile: codeSpec.testFile,
         testContent: codeSpec.testContent,
         command: codeSpec.command,
+        codeGenerationMode: input.codeGenerationMode || 'auto',
+        modelOptions: input.modelOptions,
       },
     });
   }
@@ -468,22 +470,45 @@ ${citationsList}
   // CIPHER ENGINEERING & SANDBOX EXECUTION
   // -------------------------------------------------------------
   if (task.assignedAgentId === 'agent-cipher') {
-    const safeAgentId = 'cipher';
-    const sandboxDir = path.resolve(process.cwd(), '.nook_sandboxes', safeAgentId);
-    await fs.mkdir(sandboxDir, { recursive: true });
+    const safeAgentId = 'agent-cipher';
+    const taskWorkspaceDir = path.resolve(process.cwd(), '.nook_sandboxes', safeAgentId, 'tasks', task.id);
+    await fs.mkdir(taskWorkspaceDir, { recursive: true });
 
-    // Step 0: Write synthesized solution and test files into sandbox
-    const solutionFile = String(task.inputs.solutionFile || 'solution.mjs');
-    const solutionContent = String(task.inputs.solutionContent || '');
-    const testFile = String(task.inputs.testFile || 'test_solution.mjs');
-    const testContent = String(task.inputs.testContent || '');
-    const rawCmd = String(task.inputs.command || `node --test ${testFile}`);
+    // Step 0: Determine if dynamic model synthesis is requested
+    let solutionFile = String(task.inputs.solutionFile || 'solution.mjs');
+    let solutionContent = String(task.inputs.solutionContent || '');
+    let testFile = String(task.inputs.testFile || 'test_solution.mjs');
+    let testContent = String(task.inputs.testContent || '');
+    let rawCmd = String(task.inputs.command || `node --test ${testFile}`);
 
+    if (task.inputs.codeGenerationMode === 'model') {
+      try {
+        const modelPlan = await synthesizeSolutionWithModel(task.goal || task.title, {
+          mode: 'model',
+          requireModel: true,
+          provider: (task.inputs.modelOptions as any)?.provider,
+          apiKey: (task.inputs.modelOptions as any)?.apiKey,
+          endpoint: (task.inputs.modelOptions as any)?.endpoint,
+        });
+        solutionContent = modelPlan.solution;
+        testContent = modelPlan.testCode;
+        rawCmd = modelPlan.command;
+        solutionFile = modelPlan.solutionFile || solutionFile;
+        testFile = modelPlan.testFile || testFile;
+      } catch (err: unknown) {
+        return updateAgentTask(task.id, {
+          status: 'failed',
+          error: `Model-driven solution synthesis failed: ${err instanceof Error ? err.message : String(err)}`,
+        })!;
+      }
+    }
+
+    // Write synthesized solution and test files directly into task workspace
     if (solutionContent) {
-      await fs.writeFile(path.join(sandboxDir, solutionFile), solutionContent, 'utf8');
+      await fs.writeFile(path.join(taskWorkspaceDir, solutionFile), solutionContent, 'utf8');
     }
     if (testContent) {
-      await fs.writeFile(path.join(sandboxDir, testFile), testContent, 'utf8');
+      await fs.writeFile(path.join(taskWorkspaceDir, testFile), testContent, 'utf8');
     }
 
     // Step 1: Human-in-the-Loop Server Approval Check
@@ -576,12 +601,19 @@ ${citationsList}
 
     updateAgentTask(task.id, { status: 'in_progress' });
 
-    // Step 2: Isolated Execution through Resource-Limited Sandbox Runtime
+    // Step 2: Isolated Execution through Resource-Limited Sandbox Runtime with Action-Bound Ticket
     const sandboxResult = await executeSandboxedCommand({
-      agentId: 'cipher',
+      agentId: 'agent-cipher',
       command: rawCmd,
-      timeoutMs: 10000,
-      maxBufferBytes: 1024 * 256,
+      taskId: task.id,
+      approvalId,
+      authorizationType: 'human_approval',
+      timeoutMs: 15000,
+      maxBufferBytes: 1024 * 512,
+      virtualFiles: [
+        { name: solutionFile, content: solutionContent },
+        { name: testFile, content: testContent },
+      ],
     });
 
     const stdout = (sandboxResult.stdout || '').trim();

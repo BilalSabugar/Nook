@@ -1,4 +1,4 @@
-import test from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Import core security and infrastructure libraries
@@ -33,6 +33,8 @@ import {
   renewWorkerLeaseHeartbeat,
   commitMissionStateWithFencing,
   redactApproval,
+  listTasksForMission,
+  getAgentTaskById,
   getDatabase,
 } from '../lib/db.ts';
 import {
@@ -62,7 +64,7 @@ import {
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 
 // Start dedicated sandbox runner daemon for authentic runner service tests
 // Dynamically generate high-entropy test secret to avoid scanner false positives
@@ -77,6 +79,7 @@ try {
       ...process.env,
       PORT: '4010',
       SANDBOX_RUNNER_SECRET: TEST_RUNNER_SECRET,
+      ALLOW_UNSAFE_PROCESS_JAIL: 'true',
     },
     stdio: 'ignore',
   });
@@ -85,10 +88,19 @@ try {
   }
 } catch {}
 
+function killProcessSafely(proc) {
+  if (!proc || !proc.pid) return;
+  try {
+    if (process.platform === 'win32') {
+      execSync(`taskkill /pid ${proc.pid} /f /t`, { stdio: 'ignore' });
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch {}
+}
+
 process.on('exit', () => {
-  if (runnerProc) {
-    try { runnerProc.kill(); } catch {}
-  }
+  killProcessSafely(runnerProc);
 });
 
 // Await runner health before executing test suite
@@ -1310,9 +1322,190 @@ test('Runner Smoke Test: Dedicated runner enforces secret configuration and reje
   assert.equal(healthData.authRequired, true);
 });
 
-test.after(() => {
-  if (runnerProc) {
-    try { runnerProc.kill(); } catch {}
+// =========================================================================
+// 37. CIPHER MISSION: END-TO-END APPROVAL, WORKSPACE ALIGNMENT & EXECUTION
+// =========================================================================
+test('Cipher Mission: Full end-to-end execution path with human approval, task workspace alignment, and verified sandbox execution', async () => {
+  // 1. Create a mission requiring code execution
+  const mission = planMission({
+    title: 'End-to-End Cipher Mission Test',
+    objective: 'Implement an in-memory priority queue and verify with tests',
+    requiresCodeExecution: true,
+  });
+
+  const tasks = listTasksForMission(mission.id);
+  assert.equal(tasks.length, 3, 'Must create 3 dependent tasks (Scout, Quill, Cipher)');
+  const cipherTask = tasks.find((t) => t.assignedAgentId === 'agent-cipher');
+  assert.ok(cipherTask, 'Cipher task must exist');
+
+  // Advance task 1 (Scout) and task 2 (Quill) to completed
+  const scoutTask = tasks.find((t) => t.assignedAgentId === 'agent-scout');
+  const quillTask = tasks.find((t) => t.assignedAgentId === 'agent-quill');
+  assert.ok(scoutTask && quillTask);
+
+  // Advance mission tick 1: Scout completes
+  await tickMission(mission.id, 'worker-test-cipher', 10000);
+  // Advance mission tick 2: Quill completes
+  await tickMission(mission.id, 'worker-test-cipher', 10000);
+
+  // Advance mission tick 3: Cipher encounters code execution, writes files to workspace and creates approval
+  await tickMission(mission.id, 'worker-test-cipher', 10000);
+
+  const blockedCipher = getAgentTaskById(cipherTask.id);
+  assert.ok(blockedCipher);
+  assert.equal(blockedCipher.status, 'blocked', 'Cipher task must block awaiting human review');
+  assert.ok(blockedCipher.approvalId, 'Cipher task must have approvalId attached');
+
+  // Verify approval record
+  const approval = getApprovalById(blockedCipher.approvalId);
+  assert.ok(approval, 'Approval record must exist in database');
+  assert.equal(approval.agentId, 'agent-cipher', 'Approval must be bound to agent-cipher');
+  assert.equal(approval.status, 'pending', 'Approval must be pending review');
+
+  // Verify files were placed in the exact task workspace directory
+  const expectedTaskWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', 'agent-cipher', 'tasks', cipherTask.id);
+  assert.ok(fs.existsSync(expectedTaskWorkspace), 'Task workspace directory must be created');
+  assert.ok(fs.existsSync(path.join(expectedTaskWorkspace, 'solution.mjs')), 'solution.mjs must exist in task workspace');
+  assert.ok(fs.existsSync(path.join(expectedTaskWorkspace, 'test_solution.mjs')), 'test_solution.mjs must exist in task workspace');
+
+  // 2. Human reviewer approves the execution
+  const decisionRes = decideApproval(blockedCipher.approvalId, 'approve', 'Authorized by QA test lead');
+  assert.equal(decisionRes.success, true);
+
+  // 3. Advance mission tick 4: Cipher consumes approval, executes in sandbox, parses structured test results
+  await tickMission(mission.id, 'worker-test-cipher', 10000);
+
+  const completedCipher = getAgentTaskById(cipherTask.id);
+  assert.ok(completedCipher);
+  assert.equal(completedCipher.status, 'completed', 'Cipher task must complete after approval');
+  assert.ok(completedCipher.verification?.verified, 'Test output must be verified');
+
+  // Approval must now be consumed
+  const consumedApproval = getApprovalById(blockedCipher.approvalId);
+  assert.equal(consumedApproval.status, 'consumed', 'Approval token must be single-use and consumed');
+});
+
+// =========================================================================
+// 38. RUNNER STRICT ISOLATION: DENIES FALLBACK WHEN DOCKER IS UNAVAILABLE
+// =========================================================================
+test('Runner Isolation: Denies execution when genuine container isolation is unavailable and unsafe process jail is disabled', async () => {
+  // Start a test runner without ALLOW_UNSAFE_PROCESS_JAIL on port 4011
+  const strictSecret = crypto.randomBytes(32).toString('hex');
+  const strictRunner = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
+    env: {
+      ...process.env,
+      PORT: '4011',
+      SANDBOX_RUNNER_SECRET: strictSecret,
+      NOOK_DISABLE_DOCKER: 'true',
+      ALLOW_UNSAFE_PROCESS_JAIL: 'false',
+    },
+    stdio: 'ignore',
+  });
+  if (strictRunner.unref) strictRunner.unref();
+
+  try {
+    for (let i = 0; i < 20; i++) {
+      try {
+        const h = await fetch('http://127.0.0.1:4011/health');
+        if (h.ok) break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+
+    // Create a valid execution ticket for test
+    const dummyJob = enqueueJob({
+      agentId: 'agent-cipher-strict',
+      taskType: 'code_test',
+      title: 'Strict container isolation test',
+      prompt: 'node -v',
+    });
+
+    const ticket = createSandboxExecutionTicket({
+      command: 'node -v',
+      agentId: 'agent-cipher-strict',
+      taskId: dummyJob.id,
+      authorizationType: 'system_verified_test',
+      secret: strictSecret,
+    });
+    const ticketBase64 = Buffer.from(JSON.stringify(ticket)).toString('base64');
+
+    // Attempt execution against strict runner where Docker is unavailable
+    const execRes = await fetch('http://127.0.0.1:4011/exec', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ticketBase64}`,
+      },
+      body: JSON.stringify({
+        agentId: 'agent-cipher-strict',
+        command: 'node -v',
+        taskId: dummyJob.id,
+      }),
+    });
+
+    assert.equal(execRes.status, 422, 'Strict runner must return 422 when container isolation is unavailable');
+    const data = await execRes.json();
+    assert.equal(data.exitCode, 126, 'Must fail closed with exitCode 126');
+    assert.ok(data.error.includes('Genuine per-task container isolation is required'), 'Must report container isolation requirement');
+  } finally {
+    killProcessSafely(strictRunner);
   }
 });
+
+// =========================================================================
+// 39. AUTHORIZATION MATRIX: REJECTS AGENT AND COMMAND MISMATCHES
+// =========================================================================
+test('Authorization Matrix: Strictly denies mismatched agent, tampered command, or unapproved ticket creation', () => {
+  const secret = crypto.randomBytes(32).toString('hex');
+
+  // 1. Create a task for agent-scout
+  const scoutJob = enqueueJob({
+    agentId: 'agent-scout',
+    taskType: 'research',
+    title: 'Scout research task',
+    prompt: 'quantum cryptography',
+  });
+
+  // Attempt to issue ticket for agent-cipher using scout's task -> must throw!
+  assert.throws(
+    () => createSandboxExecutionTicket({
+      command: 'echo "hacked"',
+      agentId: 'agent-cipher',
+      taskId: scoutJob.id,
+      authorizationType: 'system_verified_test',
+      secret,
+    }),
+    /Server authorization denied: Job agent mismatch/
+  );
+
+  // 2. Create approval for a specific command
+  const appr = createApproval({
+    agentId: 'agent-cipher',
+    agentName: 'Cipher',
+    type: 'run_command',
+    title: 'Authorized Command',
+    payload: { command: 'npm test' },
+  });
+  const apprDecision = decideApproval(appr.id, 'approve');
+  assert.equal(apprDecision.success, true);
+
+  // Attempt to issue ticket for a different command using that approval -> must throw!
+  assert.throws(
+    () => createSandboxExecutionTicket({
+      command: 'rm -rf /',
+      agentId: 'agent-cipher',
+      approvalId: appr.id,
+      authorizationType: 'human_approval',
+      secret,
+    }),
+    /Server authorization denied: Approval command mismatch/
+  );
+});
+
+after(() => {
+  killProcessSafely(runnerProc);
+  setTimeout(() => process.exit(0), 100);
+});
+
 

@@ -85,6 +85,8 @@ function verifyServerAuthorization(options: {
   approvalId?: string;
   authorizationType: 'human_approval' | 'system_verified_test';
 }): void {
+  const normOptAgent = options.agentId.replace(/^agent-/, '');
+
   if (options.authorizationType === 'human_approval') {
     if (!options.approvalId) {
       throw new Error('Server authorization denied: Human approval ticket requires a bound approvalId.');
@@ -93,7 +95,8 @@ function verifyServerAuthorization(options: {
     if (!appr) {
       throw new Error(`Server authorization denied: Approval record "${options.approvalId}" does not exist.`);
     }
-    if (appr.agentId !== options.agentId) {
+    const normApprAgent = appr.agentId.replace(/^agent-/, '');
+    if (normApprAgent !== normOptAgent) {
       throw new Error(`Server authorization denied: Approval agent mismatch (expected "${options.agentId}", found "${appr.agentId}").`);
     }
     if (appr.status !== 'approved' && appr.status !== 'consumed') {
@@ -112,9 +115,29 @@ function verifyServerAuthorization(options: {
       if (job.status !== 'running' && job.status !== 'queued') {
         throw new Error(`Server authorization denied: Background job "${options.taskId}" is in "${job.status}" state (must be active).`);
       }
+      const normJobAgent = job.agentId.replace(/^agent-/, '');
+      if (normJobAgent !== normOptAgent) {
+        throw new Error(`Server authorization denied: Job agent mismatch (expected "${options.agentId}", found "${job.agentId}").`);
+      }
+      if (job.prompt) {
+        const p = job.prompt.trim();
+        if ((p.startsWith('node ') || p.startsWith('npm ') || p.startsWith('echo ') || p.startsWith('Write-Output')) && p !== options.command.trim()) {
+          throw new Error('Server authorization denied: Job command mismatch.');
+        }
+      }
     } else if (agentTask) {
       if (agentTask.status !== 'in_progress' && agentTask.status !== 'pending' && agentTask.status !== 'blocked') {
         throw new Error(`Server authorization denied: Mission task "${options.taskId}" is in "${agentTask.status}" state.`);
+      }
+      const normTaskAgent = agentTask.assignedAgentId.replace(/^agent-/, '');
+      if (normTaskAgent !== normOptAgent) {
+        throw new Error(`Server authorization denied: Task agent mismatch (expected "${options.agentId}", found "${agentTask.assignedAgentId}").`);
+      }
+      if (agentTask.inputs?.command) {
+        const taskCmd = String(agentTask.inputs.command).trim();
+        if (taskCmd !== options.command.trim()) {
+          throw new Error('Server authorization denied: Mission task command mismatch.');
+        }
       }
     } else {
       throw new Error(`Server authorization denied: No verified background job or mission task found for taskId "${options.taskId}".`);
@@ -163,8 +186,10 @@ export function createSandboxExecutionTicket(
     signingSecret = secret || getSandboxRunnerSecret();
   }
 
-  // Enforce server authorization verification unless explicitly skipped (in mock crypto unit tests)
-  if (!skipServerVerification) {
+  // Strictly enforce server authorization verification.
+  // In production environments, skipServerVerification is strictly prohibited.
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction || !skipServerVerification) {
     verifyServerAuthorization({
       command,
       agentId: safeAgentId,

@@ -6,6 +6,8 @@ import {
   updateMissionStatus,
   listTasksForMission,
   listEvidence,
+  acquireWorkerLease,
+  releaseWorkerLease,
 } from '@/lib/db';
 import { planMission, tickMission } from '@/lib/orchestrator';
 
@@ -108,29 +110,66 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Pause mission
+    // 3. Pause mission (coordinates with active worker lease)
     if (action === 'pause' && missionId) {
-      updateMissionStatus(missionId, 'paused');
+      const actorId = `api-ctrl-${Date.now()}`;
+      const lease = acquireWorkerLease(`mission:${missionId}`, actorId, 5000);
+      if (!lease.acquired) {
+        return NextResponse.json({
+          error: `Mission is actively executing under worker lease (${lease.ownerId}). Wait or retry shortly.`,
+          leaseBusy: true,
+        }, { status: 409 });
+      }
+      try {
+        updateMissionStatus(missionId, 'paused');
+      } finally {
+        releaseWorkerLease(`mission:${missionId}`, actorId);
+      }
       const updated = getMissionById(missionId);
       return NextResponse.json({ success: true, mission: updated });
     }
 
-    // 4. Resume mission
+    // 4. Resume mission (coordinates with active worker lease)
     if (action === 'resume' && missionId) {
-      updateMissionStatus(missionId, 'active');
+      const actorId = `api-ctrl-${Date.now()}`;
+      const lease = acquireWorkerLease(`mission:${missionId}`, actorId, 5000);
+      if (!lease.acquired) {
+        return NextResponse.json({
+          error: `Mission lease is currently busy (${lease.ownerId}). Wait or retry shortly.`,
+          leaseBusy: true,
+        }, { status: 409 });
+      }
+      try {
+        updateMissionStatus(missionId, 'active');
+      } finally {
+        releaseWorkerLease(`mission:${missionId}`, actorId);
+      }
       const updated = getMissionById(missionId);
       return NextResponse.json({ success: true, mission: updated });
     }
 
-    // 5. Cancel mission
+    // 5. Cancel mission (coordinates with active worker lease)
     if (action === 'cancel' && missionId) {
-      updateMissionStatus(missionId, 'cancelled');
+      const actorId = `api-ctrl-${Date.now()}`;
+      const lease = acquireWorkerLease(`mission:${missionId}`, actorId, 5000);
+      if (!lease.acquired) {
+        return NextResponse.json({
+          error: `Mission is actively executing under worker lease (${lease.ownerId}). Wait or retry shortly.`,
+          leaseBusy: true,
+        }, { status: 409 });
+      }
+      try {
+        updateMissionStatus(missionId, 'cancelled');
+      } finally {
+        releaseWorkerLease(`mission:${missionId}`, actorId);
+      }
       const updated = getMissionById(missionId);
       return NextResponse.json({ success: true, mission: updated });
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Mission error' }, { status: 500 });
+  } catch (err: unknown) {
+    const error = err as Error;
+    return NextResponse.json({ error: error.message || 'Mission error' }, { status: 500 });
   }
 }

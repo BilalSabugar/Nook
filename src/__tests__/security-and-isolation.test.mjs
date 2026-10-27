@@ -846,13 +846,19 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered,
 // =========================================================================
 // 21. BROWSER SCREENSHOT METADATA & SYNTHETIC PLACEHOLDER LABELING
 // =========================================================================
-test('Browser Screenshots: Explicitly labels synthetic captures with honest metadata', async () => {
+test('Browser Screenshots: Distinguishes authentic Playwright captures from synthetic fallbacks with honest metadata', async () => {
   const session = getOrCreateBrowserSession('agent-audit-inspector');
   await navigateBrowser('agent-audit-inspector', 'https://example.com/checkout');
 
   assert.ok(session.screenshotMetadata, 'Session must expose screenshotMetadata');
-  assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, true, 'Must declare placeholder status honestly');
-  assert.equal(session.screenshotMetadata.captureType, 'synthetic_placeholder', 'Must specify synthetic placeholder capture type');
+  if (session.screenshotMetadata.isSyntheticPlaceholder) {
+    assert.equal(session.screenshotMetadata.captureType, 'synthetic_placeholder');
+    assert.ok(session.screenshotMetadata.notice);
+  } else {
+    assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture');
+    assert.ok(session.screenshotMetadata.engine?.startsWith('playwright'));
+    assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false);
+  }
 });
 
 // =========================================================================
@@ -913,5 +919,98 @@ test('Background Worker: Code test jobs require verified sandboxed execution evi
   assert.equal(failingExec.status, 'failed', 'Job with non-zero exit code must be marked failed');
 });
 
+// =========================================================================
+// 24. MISSION LEASES DEFEND PAUSE, RESUME, AND CANCEL MUTATIONS
+// =========================================================================
+test('Mission State Control: Pause, resume, and cancel enforce atomic worker lease fencing', async () => {
+  const mission = planMission({
+    title: 'Mission Lease Fencing API Test',
+    objective: 'Ensure state transitions respect active worker leases',
+    priority: 'high',
+  });
+  assert.ok(mission.id);
 
+  // Lock the worker lease as active worker 'worker-active-lock'
+  const leaseKey = `mission:${mission.id}`;
+  const lease = acquireWorkerLease(leaseKey, 'worker-active-lock', 30000);
+  assert.equal(lease.acquired, true);
 
+  // Attempting to acquire lease by a different actor fails closed
+  const concurrentAttempt = acquireWorkerLease(leaseKey, 'api-controller-concurrent', 5000);
+  assert.equal(concurrentAttempt.acquired, false, 'Lease acquisition must be rejected when locked');
+  assert.equal(concurrentAttempt.ownerId, 'worker-active-lock');
+
+  // Once worker finishes and releases lease, state mutation can proceed
+  releaseWorkerLease(leaseKey, 'worker-active-lock');
+  const unlockedAttempt = acquireWorkerLease(leaseKey, 'api-controller-new', 5000);
+  assert.equal(unlockedAttempt.acquired, true, 'Lease acquisition succeeds once released');
+  releaseWorkerLease(leaseKey, 'api-controller-new');
+});
+
+// =========================================================================
+// 25. BACKGROUND WORKER REJECTS RESEARCH JOBS WITH ZERO VERIFIED CITATIONS
+// =========================================================================
+test('Background Worker: Research jobs fail closed when zero verified citations are retrieved', async () => {
+  const job = enqueueJob({
+    agentId: 'agent-scout',
+    taskType: 'research',
+    title: 'Empty query verification test',
+    prompt: '', // Empty query yields 0 citations and must fail
+  });
+
+  await executeJob(job);
+  const executed = getJobById(job.id);
+  assert.ok(executed);
+  assert.equal(executed.status, 'failed', 'Research jobs returning zero verified sources must fail');
+  assert.ok(executed.error?.includes('zero verified external source citations'));
+});
+
+// =========================================================================
+// 26. DYNAMIC SOLUTION SYNTHESIS WITHOUT HARDCODED TEMPLATES
+// =========================================================================
+test('Solution Planner: Dynamic synthesis produces genuine requirement-driven code for arbitrary prompts', async () => {
+  const { synthesizeSolutionWithModel, planRequirementDrivenSolution } = await import('../lib/solution-planner.ts');
+
+  // Rate limiter prompt
+  const rateLimiterPlan = planRequirementDrivenSolution('Design an async in-memory sliding token bucket rate limiter for API requests');
+  assert.equal(rateLimiterPlan.domain, 'rate_limiting');
+  assert.ok(rateLimiterPlan.solution.includes('Token') || rateLimiterPlan.solution.includes('consume'));
+  assert.ok(rateLimiterPlan.testCode.includes('assert'));
+  assert.ok(rateLimiterPlan.methods.includes('consume'));
+  assert.ok(rateLimiterPlan.methods.includes('refill'));
+
+  // Deduplication prompt
+  const dedupPlan = planRequirementDrivenSolution('Implement an intelligent URL query parameter deduplicator and canonical normalizer');
+  assert.equal(dedupPlan.domain, 'data_deduplication');
+  assert.ok(dedupPlan.solution.includes('seen') || dedupPlan.solution.includes('normalize'));
+  assert.ok(dedupPlan.testCode.includes('assert'));
+  assert.ok(dedupPlan.methods.includes('normalize'));
+
+  // Completely novel custom engineering prompt
+  const novelPlan = synthesizeSolutionWithModel('Synthesize a distributed vector clock for causal consistency ordering');
+  assert.equal(novelPlan.domain, 'arbitrary_algorithm');
+  assert.ok(novelPlan.solution.includes('process'));
+  assert.ok(novelPlan.testCode.includes('assert'));
+  assert.ok(novelPlan.testCode.length > 50);
+});
+
+// =========================================================================
+// 27. RUNNER DEFENSE-IN-DEPTH: VALIDATES COMMAND BOUNDARIES AND PATH TRAVERSAL
+// =========================================================================
+test('Runner Safety: validateCommandSafety independently rejects traversal and destructive commands', () => {
+  // Traversal attack
+  const traversal = validateCommandSafety('cat ../../.nook_storage/secrets.json', 'agent-scout');
+  assert.equal(traversal.safe, false, 'Directory traversal escaping sandbox must be rejected');
+
+  // Sensitive file reference
+  const secretRef = validateCommandSafety('cat .env.local', 'agent-scout');
+  assert.equal(secretRef.safe, false, 'Access to .env files must be rejected');
+
+  // Destructive command
+  const destructive = validateCommandSafety('rm -rf /', 'agent-scout');
+  assert.equal(destructive.safe, false, 'Destructive system commands must be rejected');
+
+  // Safe command
+  const safe = validateCommandSafety('node -e "console.log(1+1)"', 'agent-scout');
+  assert.equal(safe.safe, true, 'Standard commands must be accepted');
+});

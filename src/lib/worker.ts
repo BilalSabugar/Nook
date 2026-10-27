@@ -120,7 +120,11 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
       current = getJobById(job.id);
       if (!current || current.status === 'cancelled') return;
 
-      const query = job.prompt.replace(/research|search|about/gi, '').trim() || 'distributed computing';
+      const query = job.prompt.replace(/research|search|about/gi, '').trim();
+      if (!query) {
+        failJob(job.id, 'Research job failed: zero verified external source citations found. Real execution evidence required.');
+        return;
+      }
       updateJobProgress(job.id, 40, {
         step: `Dispatching live encyclopedic search for "${query}"`,
         tool: 'web_search',
@@ -145,13 +149,18 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
       current = getJobById(job.id);
       if (!current || current.status === 'cancelled') return;
 
+      if (links.length === 0 || titles.length === 0) {
+        failJob(job.id, `Research job failed: zero verified external source citations found for query "${query}". Real execution evidence required.`);
+        return;
+      }
+
       updateJobProgress(job.id, 75, {
         step: `Extracted ${titles.length} verified technical citations`,
         tool: 'source_verification',
-        output: titles.join(', ') || 'No live sources returned',
+        output: titles.join(', '),
       });
 
-      const summary = `Completed research on "${query}". Identified key technical domains: ${titles.slice(0, 3).join(', ') || 'General documentation'}.`;
+      const summary = `Completed research on "${query}". Identified key technical domains: ${titles.slice(0, 3).join(', ')}.`;
       completeJob(job.id, {
         summary,
         citations: links,

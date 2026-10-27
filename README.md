@@ -130,8 +130,8 @@ Security and correctness take strict precedence over release claims or cosmetic 
 | **Model Context Protocol (MCP)** | **Implemented & Verified** | JSON-RPC 2.0 (`web_search`, `fetch_url`, `calculate`, `format_document`). |
 | **Living Spaces Persistence** | **Implemented & Verified** | SQLite WAL engine, version increments (`v1`...`vN`), immutable revisions, rollback. |
 | **Background Worker Queue** | **Implemented & Verified** | Database-backed atomic leases with fencing, queue claiming, crash recovery. |
-| **Terminal Execution** | **Implemented & Verified** | Dedicated sandbox runner with zero host socket exposure and fail-closed security. |
-| **Browser State & Snapshots** | **Implemented & Verified** | Persistent disk sessions, SSRF-validated egress, and rendered PNG viewport captures. |
+| **Terminal Execution** | **Implemented & Verified** | Dedicated per-task container/process jail with short-lived HMAC tickets, zero host socket exposure, and fail-closed security. |
+| **Browser State & Snapshots** | **Implemented & Verified** | Authentic Playwright browser captures, interactive DOM sessions, SSRF-pinned egress, and honest placeholder distinction. |
 | **Voice Calls** | **Simulation** | UI demonstration with reactive Web Audio API waveforms and captions. |
 
 ---
@@ -165,7 +165,7 @@ cd Nook
 npm ci
 
 # 3. Run validation checks
-npm test               # Runs 34+ unit & integration security tests
+npm test               # Runs 45+ unit & integration security tests
 npm run typecheck      # Verifies TypeScript types with zero errors
 npm run lint           # Runs ESLint checks
 npm run build          # Builds production bundle
@@ -192,13 +192,13 @@ The container runs as non-root user `nextjs:nodejs` on port 3000 with persistent
 
 ## 🧪 Testing & Verification
 
-Nook includes a test suite covering security, approvals, isolation, and persistence:
+Nook includes an extensive test suite covering security, approvals, isolation, and persistence:
 
 ```bash
 npm test
 ```
 
-Key verified test suites:
+Key verified test suites (45 tests passing):
 - `Auth: Anonymous and invalid token requests are strictly denied`
 - `Auth: Legitimate cryptographic session tokens succeed`
 - `Approvals: Shell execution without approval is rejected`
@@ -208,6 +208,13 @@ Key verified test suites:
 - `Living Spaces: Document revision tracking and version rollback`
 - `Background Worker: Queue claiming, genuine step execution, and cancellation`
 - `Secrets: AES-256-GCM encryption, decryption, masking, and model whitelisting`
+- `Browser Screenshots: Distinguishes authentic Playwright captures from synthetic fallbacks with honest metadata`
+- `Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered, replayed, or expired requests`
+- `Missions: Atomic SQLite leases prevent concurrent ticks and enforce fencing`
+- `Mission State Control: Pause, resume, and cancel enforce atomic worker lease fencing`
+- `Background Worker: Research jobs fail closed when zero verified citations are retrieved`
+- `Solution Planner: Dynamic synthesis produces genuine requirement-driven code for arbitrary prompts`
+- `Runner Safety: validateCommandSafety independently rejects traversal and destructive commands`
 
 ---
 

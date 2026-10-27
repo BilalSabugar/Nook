@@ -29,9 +29,10 @@ export interface ObservableBrowserSession {
   screenshotPath?: string;
   screenshotMetadata?: {
     isSyntheticPlaceholder: boolean;
-    captureType: 'synthetic_placeholder' | 'chromium_headless';
+    captureType: 'synthetic_placeholder' | 'playwright_browser_capture';
     capturedAt: string;
-    notice: string;
+    engine?: string;
+    notice?: string;
   };
   consoleLogs: string[];
   lastAction: string;
@@ -228,6 +229,60 @@ export function getOrCreateBrowserSession(agentId: string): ObservableBrowserSes
 }
 
 /**
+ * Attempts real headless browser rendering and screenshot capture using Playwright Chromium.
+ * Falls back safely if Chromium is not provisioned in the execution runtime.
+ */
+export async function captureRealBrowserScreenshot(
+  targetUrl: string,
+  viewport = { width: 1280, height: 800 }
+): Promise<{ buffer: Buffer; engine: string } | null> {
+  try {
+    const dynamicImport = new Function('specifier', 'return import(specifier)');
+    const pw = (await dynamicImport('playwright')) as typeof import('playwright');
+    const { chromium } = pw;
+    let browser: import('playwright').Browser | null = null;
+    let engine = 'chromium';
+
+    // 1. Try default bundled or installed chromium
+    try {
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      });
+    } catch {
+      // 2. Try system channels: msedge on Windows, chrome/chromium on Linux
+      const channels = process.platform === 'win32' ? ['msedge', 'chrome'] : ['chromium', 'chrome'];
+      for (const channel of channels) {
+        try {
+          browser = await chromium.launch({
+            channel,
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+          });
+          engine = `playwright_${channel}`;
+          break;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    if (!browser) return null;
+
+    try {
+      const page = await browser.newPage({ viewport });
+      await page.goto(targetUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
+      const buffer = await page.screenshot({ type: 'png' });
+      return { buffer: Buffer.from(buffer), engine };
+    } finally {
+      await browser.close().catch(() => {});
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Navigates an agent's persistent browser session to an authorized URL.
  * Strictly enforces network-level egress restrictions via validateOutboundUrl & safeFetch.
  */
@@ -312,12 +367,32 @@ export async function navigateBrowser(
 
   // Render and persist authentic PNG screenshot to disk
   const screenshotFileName = `${session.agentId}-snap-${Date.now()}.png`;
-  try {
-    ensureStorageDirectories();
-    const pngBuffer = renderBrowserScreenshotPng(title, response.finalUrl, response.status);
-    fsSync.writeFileSync(path.join(SCREENSHOTS_DIR, screenshotFileName), pngBuffer, { mode: 0o600 });
-  } catch {
-    // Disk write error fallback
+  const filePath = path.join(SCREENSHOTS_DIR, screenshotFileName);
+  ensureStorageDirectories();
+
+  let isRealBrowser = false;
+  let realEngine = 'playwright_chromium';
+
+  // 1. Attempt authentic Playwright browser screenshot
+  const realCapture = await captureRealBrowserScreenshot(response.finalUrl).catch(() => null);
+  if (realCapture && realCapture.buffer && realCapture.buffer.length > 0) {
+    try {
+      fsSync.writeFileSync(filePath, realCapture.buffer, { mode: 0o600 });
+      isRealBrowser = true;
+      realEngine = realCapture.engine;
+    } catch {
+      // ignore disk write error
+    }
+  }
+
+  // 2. If real browser rendering is not provisioned in current environment, render disclosed placeholder
+  if (!isRealBrowser) {
+    try {
+      const pngBuffer = renderBrowserScreenshotPng(title, response.finalUrl, response.status);
+      fsSync.writeFileSync(filePath, pngBuffer, { mode: 0o600 });
+    } catch {
+      // Disk write error fallback
+    }
   }
 
   // Update session state
@@ -335,17 +410,24 @@ export async function navigateBrowser(
   session.links = links;
   session.interactiveElements = interactiveElements;
   session.screenshotPath = `/api/sandbox/browse/screenshot?file=${screenshotFileName}`;
-  session.screenshotMetadata = {
-    isSyntheticPlaceholder: true,
-    captureType: 'synthetic_placeholder',
-    capturedAt: new Date().toISOString(),
-    notice: 'Synthetic viewport preview. Headless Chromium capture not provisioned in this environment.',
-  };
+  session.screenshotMetadata = isRealBrowser
+    ? {
+        isSyntheticPlaceholder: false,
+        captureType: 'playwright_browser_capture',
+        capturedAt: new Date().toISOString(),
+        engine: realEngine,
+      }
+    : {
+        isSyntheticPlaceholder: true,
+        captureType: 'synthetic_placeholder',
+        capturedAt: new Date().toISOString(),
+        notice: 'Synthetic viewport preview. Headless Chromium capture not provisioned in this environment.',
+      };
   session.lastAction = `navigate(${response.finalUrl})`;
   session.updatedAt = new Date().toISOString();
-  session.consoleLogs.push(`[Navigation Complete] Rendered "${title}" (Status ${response.status})`);
+  session.consoleLogs.push(`[Navigation Complete] Rendered "${title}" (Status ${response.status}, Engine: ${isRealBrowser ? realEngine : 'safe_fetch'})`);
 
-  logAuditEvent('BROWSER_NAVIGATE', `Navigated to ${response.finalUrl} (${title})`, 'success', agentId);
+  logAuditEvent('BROWSER_NAVIGATE', `Navigated to ${response.finalUrl} (${title}, Engine: ${isRealBrowser ? realEngine : 'safe_fetch'})`, 'success', agentId);
   await persistSessionToDisk(session);
   return session;
 }

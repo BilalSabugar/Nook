@@ -46,6 +46,57 @@ function computeCommandHash(cmd) {
   return crypto.createHash('sha256').update(cmd.trim()).digest('hex');
 }
 
+const PROTECTED_SYSTEM_PATTERNS = [
+  /\/\.nook_storage/i,
+  /\/\.env/i,
+  /\/etc\/shadow/i,
+  /\/etc\/master\.passwd/i,
+  /\/proc\/kcore/i,
+  /\/dev\/mem/i,
+  /encryption\.salt/i,
+  /nook\.db/i,
+];
+
+/**
+ * Validates command against directory traversal, destructive commands, and secret inspection.
+ */
+function validateRunnerCommandSafety(cleanCmd) {
+  // Reject directory traversal escaping workspace jail
+  if (/\.\.[\/\\]/.test(cleanCmd)) {
+    if (/(?:cat|type|ls|dir|cp|copy|mv|move|find|head|tail|grep|more|less|rm|del)\s+.*?\.\.[\/\\]/i.test(cleanCmd) ||
+        /\.\.[\/\\]\.\.[\/\\]/.test(cleanCmd) ||
+        /cd\s+\.\./i.test(cleanCmd)) {
+      return {
+        safe: false,
+        reason: 'Security violation: Directory traversal (..) escaping task sandbox boundary is strictly blocked.',
+      };
+    }
+  }
+
+  // Reject access to host secrets or database files
+  for (const pattern of PROTECTED_SYSTEM_PATTERNS) {
+    if (pattern.test(cleanCmd)) {
+      return {
+        safe: false,
+        reason: `Security violation: Command references protected secrets or configuration path: ${pattern}`,
+      };
+    }
+  }
+
+  // Reject destructive commands
+  const destructive = ['rm -rf /', 'rm -rf /*', 'rm -rf ~', ':(){ :|:& };:', 'mkfs', 'dd if=', 'shutdown', 'reboot'];
+  for (const d of destructive) {
+    if (cleanCmd.includes(d)) {
+      return {
+        safe: false,
+        reason: `Security violation: Destructive system manipulation command blocked: "${d}"`,
+      };
+    }
+  }
+
+  return { safe: true };
+}
+
 /**
  * Validates the HMAC-SHA256 execution ticket.
  */
@@ -275,6 +326,14 @@ const server = http.createServer(async (req, res) => {
         if (!authCheck.valid) {
           res.writeHead(authCheck.status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: authCheck.error }));
+          return;
+        }
+
+        // 2b. Mandatory Command Safety & Traversal Verification
+        const safetyCheck = validateRunnerCommandSafety(command);
+        if (!safetyCheck.safe) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: safetyCheck.reason }));
           return;
         }
 

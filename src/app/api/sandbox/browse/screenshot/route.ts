@@ -47,15 +47,18 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Security violation: Path traversal blocked' }, { status: 403 });
   }
 
-  // If screenshot does not exist yet on disk, render a genuine PNG screenshot
+  const sessionAgent = agentId || targetFileName.split('-')[0] || 'agent-scout';
+  const session = getOrCreateBrowserSession(sessionAgent);
+
+  // If screenshot does not exist yet on disk, render disclosed PNG screenshot
   if (!fs.existsSync(filePath)) {
-    const sessionAgent = agentId || targetFileName.split('-')[0] || 'agent-scout';
-    const session = getOrCreateBrowserSession(sessionAgent);
     const pngBuffer = renderBrowserScreenshotPng(session.title, session.currentUrl, session.status);
     fs.writeFileSync(filePath, pngBuffer, { mode: 0o600 });
   }
 
   const fileBytes = fs.readFileSync(filePath);
+  const isPlaceholder = session.screenshotMetadata?.isSyntheticPlaceholder ?? true;
+  const captureType = session.screenshotMetadata?.captureType || (isPlaceholder ? 'synthetic_placeholder' : 'playwright_browser_capture');
 
   return new NextResponse(fileBytes, {
     status: 200,
@@ -64,9 +67,11 @@ export async function GET(req: NextRequest) {
       'Content-Length': fileBytes.length.toString(),
       'Cache-Control': 'public, max-age=120, immutable',
       'X-Content-Type-Options': 'nosniff',
-      'X-Nook-Capture-Type': 'synthetic_placeholder',
-      'X-Nook-Verified-Browser': 'false',
-      'X-Nook-Placeholder-Notice': 'Synthetic viewport placeholder; Chromium headless capture not provisioned',
+      'X-Nook-Capture-Type': captureType,
+      'X-Nook-Verified-Browser': isPlaceholder ? 'false' : 'true',
+      ...(isPlaceholder
+        ? { 'X-Nook-Placeholder-Notice': 'Synthetic viewport placeholder; Chromium headless capture not provisioned' }
+        : { 'X-Nook-Browser-Engine': session.screenshotMetadata?.engine || 'playwright_chromium' }),
     },
   });
 }

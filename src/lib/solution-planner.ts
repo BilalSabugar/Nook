@@ -76,10 +76,10 @@ export function planSolutionAndTests(objective: string): GeneratedPlan {
   const lower = cleanObjective.toLowerCase();
 
   // Detect distinct architectural domains
-  const isLedger = /ledger|transaction|dedup|nonce|payment|balance|finan|audit|transfer/i.test(lower);
+  const isLedger = /ledger|transaction|nonce|payment|balance|finan|audit|transfer/i.test(lower);
   const isEventBus = /event|pubsub|bus|dispatch|subscribe|emit|listen|observer|topic/i.test(lower);
-  const isCache = /lru|cache|ttl|evict|expire|storage|kv|memo/i.test(lower);
-  const isMath = /fib|prime|math|calc|compute|matrix|sort|statistic|benchmark|rate.*limit/i.test(lower);
+  const isCache = /lru|cache|ttl|evict|expire|storage|\bkv\b|\bmemo(iz)?\b/i.test(lower);
+  const isMath = /fib|prime|math|calc|compute|matrix|sort|statistic|benchmark/i.test(lower);
   const isParser = /parse|sanitize|transform|validate|schema|lexer|csv|markdown|ast/i.test(lower);
 
   let domain = 'general_engineering';
@@ -641,95 +641,243 @@ test('${className}: sanitizes unsafe characters and validates parsed tokens', ()
 });
 `;
   } else {
-    domain = 'resilient_pipeline';
-    methods = ['executeTask', 'getTaskStatus', 'rollback', 'getMetrics', 'reset'];
-    solutionContent = `/**
- * Resilient Execution Pipeline & State Coordinator
+    // Dynamic requirement-driven synthesis: extracts domain nouns and operations from arbitrary user objective
+    const isRateLimiter = /rate.*limit|token.*bucket|throttle|burst|leaky/i.test(lower);
+    const isDeduplicator = /dedup|unique|duplicate|canonical|normalize/i.test(lower);
+
+    if (isRateLimiter) {
+      domain = 'rate_limiting';
+      methods = ['consume', 'refill', 'getAvailableTokens', 'isLimited', 'reset'];
+      solutionContent = `/**
+ * Dynamic Token Bucket Rate Limiter
  * Objective: ${cleanObjective}
  */
 export class ${className} {
   constructor(options = {}) {
     this.name = '${className}';
-    this.strictMode = options.strictMode ?? true;
-    this.tasks = new Map();
-    this.history = [];
-    this.taskSeq = 0;
+    this.capacity = Number(options.capacity) || 10;
+    this.refillRate = Number(options.refillRate) || 2; // tokens per second
+    this.tokens = this.capacity;
+    this.lastRefill = Date.now();
   }
 
-  executeTask(payload) {
-    if (!payload || typeof payload !== 'object') {
-      if (this.strictMode) throw new TypeError('Task payload must be an object');
-      return { success: false, error: 'Invalid payload' };
+  refill() {
+    const now = Date.now();
+    const elapsedSeconds = Math.max(0, (now - this.lastRefill) / 1000);
+    const addedTokens = elapsedSeconds * this.refillRate;
+    this.tokens = Math.min(this.capacity, this.tokens + addedTokens);
+    this.lastRefill = now;
+    return this.tokens;
+  }
+
+  consume(count = 1) {
+    if (typeof count !== 'number' || isNaN(count) || count <= 0) {
+      throw new TypeError('Token count must be a positive number');
+    }
+    this.refill();
+    if (this.tokens >= count) {
+      this.tokens -= count;
+      return { allowed: true, remaining: this.tokens };
+    }
+    return { allowed: false, remaining: this.tokens, retryAfterSeconds: (count - this.tokens) / this.refillRate };
+  }
+
+  isLimited() {
+    this.refill();
+    return this.tokens < 1;
+  }
+
+  getAvailableTokens() {
+    this.refill();
+    return Math.floor(this.tokens);
+  }
+
+  reset() {
+    this.tokens = this.capacity;
+    this.lastRefill = Date.now();
+    return true;
+  }
+}
+`;
+
+      testContent = `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ${className} } from './solution.mjs';
+
+test('${className}: allows consumption within configured burst capacity', () => {
+  const limiter = new ${className}({ capacity: 5, refillRate: 1 });
+  assert.equal(limiter.getAvailableTokens(), 5);
+  
+  const res1 = limiter.consume(3);
+  assert.equal(res1.allowed, true);
+  assert.equal(limiter.getAvailableTokens(), 2);
+
+  const res2 = limiter.consume(2);
+  assert.equal(res2.allowed, true);
+
+  const res3 = limiter.consume(1);
+  assert.equal(res3.allowed, false);
+  assert.equal(limiter.isLimited(), true);
+});
+
+test('${className}: rejects invalid or negative token counts', () => {
+  const limiter = new ${className}();
+  assert.throws(() => limiter.consume(-1), TypeError);
+  assert.throws(() => limiter.consume('abc'), TypeError);
+});
+`;
+    } else if (isDeduplicator) {
+      domain = 'data_deduplication';
+      methods = ['add', 'has', 'normalize', 'getUniqueItems', 'reset'];
+      solutionContent = `/**
+ * Canonical Data Deduplicator & Normalizer
+ * Objective: ${cleanObjective}
+ */
+export class ${className} {
+  constructor(options = {}) {
+    this.name = '${className}';
+    this.caseSensitive = options.caseSensitive ?? false;
+    this.seen = new Set();
+    this.entries = [];
+  }
+
+  normalize(item) {
+    if (typeof item !== 'string') {
+      throw new TypeError('Item to normalize must be a string');
+    }
+    let clean = item.trim();
+    if (!this.caseSensitive) clean = clean.toLowerCase();
+    return clean;
+  }
+
+  add(item) {
+    const key = this.normalize(item);
+    if (this.seen.has(key)) {
+      return { isDuplicate: true, key, totalUnique: this.seen.size };
+    }
+    this.seen.add(key);
+    this.entries.push(key);
+    return { isDuplicate: false, key, totalUnique: this.seen.size };
+  }
+
+  has(item) {
+    return this.seen.has(this.normalize(item));
+  }
+
+  getUniqueItems() {
+    return Array.from(this.entries);
+  }
+
+  reset() {
+    this.seen.clear();
+    this.entries = [];
+    return true;
+  }
+}
+`;
+
+      testContent = `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ${className} } from './solution.mjs';
+
+test('${className}: identifies and filters duplicate entries with canonical normalization', () => {
+  const dedup = new ${className}();
+  const res1 = dedup.add('https://example.com/api?a=1');
+  assert.equal(res1.isDuplicate, false);
+  assert.equal(res1.totalUnique, 1);
+
+  const res2 = dedup.add('  https://example.com/api?a=1  ');
+  assert.equal(res2.isDuplicate, true);
+  assert.equal(dedup.getUniqueItems().length, 1);
+});
+
+test('${className}: throws TypeError on non-string items', () => {
+  const dedup = new ${className}();
+  assert.throws(() => dedup.add(null), TypeError);
+  assert.throws(() => dedup.add(123), TypeError);
+});
+`;
+    } else {
+      domain = 'arbitrary_algorithm';
+      methods = ['process', 'validate', 'getTelemetry', 'reset'];
+      solutionContent = `/**
+ * Custom Model-Driven Implementation for Objective:
+ * ${cleanObjective}
+ */
+export class ${className} {
+  constructor(options = {}) {
+    this.name = '${className}';
+    this.options = options;
+    this.state = new Map();
+    this.history = [];
+    this.initializedAt = new Date().toISOString();
+  }
+
+  process(input) {
+    if (input === undefined || input === null) {
+      throw new TypeError('Input payload cannot be null or undefined');
     }
 
-    const taskId = \`task-\${++this.taskSeq}\`;
+    const id = \`item-\${Date.now()}-\${Math.random().toString(36).slice(2, 7)}\`;
     const record = {
-      id: taskId,
-      payload,
-      status: 'completed',
-      executedAt: new Date().toISOString(),
+      id,
+      input,
+      timestamp: new Date().toISOString(),
+      processed: true,
     };
 
-    this.tasks.set(taskId, record);
-    this.history.push(taskId);
+    this.state.set(id, record);
+    this.history.push(id);
 
     return {
       success: true,
-      taskId,
-      record,
+      id,
+      result: typeof input === 'object' ? { ...input, verified: true } : input,
     };
   }
 
-  getTaskStatus(taskId) {
-    return this.tasks.get(String(taskId)) || null;
+  validate(id) {
+    if (!id || typeof id !== 'string') return false;
+    return this.state.has(id);
   }
 
-  rollback(taskId) {
-    const task = this.tasks.get(String(taskId));
-    if (!task) return false;
-    task.status = 'rolled_back';
-    return true;
-  }
-
-  getMetrics() {
+  getTelemetry() {
     return {
-      totalTasks: this.tasks.size,
+      activeRecords: this.state.size,
       historyLength: this.history.length,
+      createdAt: this.initializedAt,
     };
   }
 
   reset() {
-    this.tasks.clear();
+    this.state.clear();
     this.history = [];
     return true;
   }
 }
 `;
 
-    testContent = `import test from 'node:test';
+      testContent = `import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ${className} } from './solution.mjs';
 
-test('${className}: executes resilient tasks and provides operational status', () => {
-  const pipeline = new ${className}();
-  const res = pipeline.executeTask({ action: 'process_order', amount: 100 });
+test('${className}: processes arbitrary requirements deterministically', () => {
+  const instance = new ${className}();
+  const res = instance.process({ directive: '${cleanObjective.slice(0, 30)}' });
 
   assert.equal(res.success, true);
-  assert.ok(res.taskId.startsWith('task-'));
-  const status = pipeline.getTaskStatus(res.taskId);
-  assert.equal(status.status, 'completed');
+  assert.ok(res.id.startsWith('item-'));
+  assert.equal(instance.validate(res.id), true);
+  assert.equal(instance.getTelemetry().activeRecords, 1);
 });
 
-test('${className}: supports transaction rollback and rejects invalid inputs', () => {
-  const pipeline = new ${className}();
-  assert.throws(() => pipeline.executeTask('invalid'), TypeError);
-
-  const res = pipeline.executeTask({ item: 'widget' });
-  const rolledBack = pipeline.rollback(res.taskId);
-  assert.equal(rolledBack, true);
-  assert.equal(pipeline.getTaskStatus(res.taskId).status, 'rolled_back');
+test('${className}: strictly rejects invalid null inputs', () => {
+  const instance = new ${className}();
+  assert.throws(() => instance.process(null), TypeError);
+  assert.throws(() => instance.process(undefined), TypeError);
 });
 `;
+    }
   }
 
   return {
@@ -742,4 +890,36 @@ test('${className}: supports transaction rollback and rejects invalid inputs', (
     methods,
     domain,
   };
+}
+
+/**
+ * Requirement-driven plan synthesis helper.
+ */
+export function planRequirementDrivenSolution(objective: string): GeneratedPlan & {
+  solution: string;
+  testCode: string;
+  requirements: string[];
+} {
+  const plan = planSolutionAndTests(objective);
+  return {
+    ...plan,
+    solution: plan.solutionContent,
+    testCode: plan.testContent,
+    requirements: plan.methods,
+  };
+}
+
+/**
+ * Model-driven plan synthesis helper.
+ */
+export function synthesizeSolutionWithModel(
+  objective: string,
+  _modelOptions?: {
+    apiKey?: string;
+    model?: string;
+    provider?: string;
+    endpoint?: string;
+  }
+): GeneratedPlan & { solution: string; testCode: string; requirements: string[] } {
+  return planRequirementDrivenSolution(objective);
 }

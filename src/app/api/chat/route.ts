@@ -3,6 +3,56 @@ import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 import { loadEncryptedSecrets, SUPPORTED_MODELS } from '@/lib/secrets';
 import { logAuditEvent } from '@/lib/db';
 
+const NOOK_FUNCTION_TOOLS = [
+  {
+    name: 'web_search',
+    description: 'Searches live technical documentation, encyclopedic articles, and real-time releases.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING', description: 'The search query or technical keywords' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'fetch_url',
+    description: 'Navigates to an authorized web URL on the agent computer, extracting verified readable text and DOM headings.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        url: { type: 'STRING', description: 'Full HTTPS target URL to browse' },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'request_command_execution',
+    description: 'Prepares a shell command for isolated execution in the sandbox, registering a human approval card on the server.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        command: { type: 'STRING', description: 'Terminal command string to run inside the isolated sandbox' },
+        title: { type: 'STRING', description: 'Descriptive title for human reviewer' },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'create_document_draft',
+    description: 'Drafts a publication-grade markdown document for living spaces and registers an approval request on the server.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        title: { type: 'STRING', description: 'Document title' },
+        content: { type: 'STRING', description: 'Markdown body of the document' },
+        targetSpaceId: { type: 'STRING', description: 'Target living space ID' },
+      },
+      required: ['title', 'content'],
+    },
+  },
+];
+
 export async function POST(req: NextRequest) {
   const auth = validateApiRequest(req);
   if (!auth.authorized) {
@@ -17,10 +67,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'userMessage is required' }, { status: 400 });
     }
 
-    // Load server-side encrypted vault keys
     const serverSecrets = await loadEncryptedSecrets();
-
-    // Server-side authoritative keys: client bodies CANNOT override configured server credentials
     const geminiKey = serverSecrets.geminiApiKey || process.env.GEMINI_API_KEY || settings?.geminiApiKey;
     const openaiKey = serverSecrets.openaiApiKey || process.env.OPENAI_API_KEY || settings?.openaiApiKey;
     const anthropicKey = serverSecrets.anthropicApiKey || process.env.ANTHROPIC_API_KEY || settings?.anthropicApiKey;
@@ -29,7 +76,7 @@ export async function POST(req: NextRequest) {
     const provider = settings?.provider || 'simulation';
 
     // ----------------------------------------------------
-    // 1. Google Gemini Provider
+    // 1. Google Gemini Provider with Tool Support
     // ----------------------------------------------------
     if (provider === 'gemini') {
       if (!geminiKey) {
@@ -55,6 +102,9 @@ export async function POST(req: NextRequest) {
               systemInstruction: {
                 parts: [{ text: `${agent?.systemPrompt || 'You are an AI coworker'}\nYou have access to an agent computer (browser, terminal, files). Propose review cards for mutating actions.` }]
               },
+              tools: [{
+                functionDeclarations: NOOK_FUNCTION_TOOLS,
+              }],
               contents: [
                 ...(history || []).slice(-6).map((m: any) => ({
                   role: m.sender === 'user' ? 'user' : 'model',
@@ -75,12 +125,26 @@ export async function POST(req: NextRequest) {
         }
 
         const data = await geminiRes.json();
-        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response from model.';
+        const candidate = data.candidates?.[0]?.content?.parts?.[0];
+        let toolCall: { name: string; arguments: Record<string, unknown> } | undefined;
+        let reply = '';
+
+        if (candidate?.functionCall) {
+          toolCall = {
+            name: candidate.functionCall.name,
+            arguments: candidate.functionCall.args || {},
+          };
+          reply = `Invoking tool \`${candidate.functionCall.name}\` for objective: "${userMessage}"`;
+        } else {
+          reply = candidate?.text || 'No response from model.';
+        }
+
         return NextResponse.json({
           reply,
+          toolCall,
           provider: 'gemini',
           model,
-          thoughtProcess: [`Dispatched to Gemini (${model}) via secure server API`, 'Evaluated system instructions and returned output'],
+          thoughtProcess: [`Dispatched to Gemini (${model}) via secure server API`, toolCall ? `Model issued tool call: ${toolCall.name}` : 'Generated text response'],
         });
       } catch (err: any) {
         logAuditEvent('LLM_NETWORK_FAIL', `Gemini network error: ${err.message}`, 'error', agent?.id);
@@ -91,7 +155,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ----------------------------------------------------
-    // 2. OpenAI Provider
+    // 2. OpenAI Provider with Tool Support
     // ----------------------------------------------------
     if (provider === 'openai') {
       if (!openaiKey) {
@@ -107,6 +171,24 @@ export async function POST(req: NextRequest) {
         }, { status: 400 });
       }
 
+      const openAiTools = NOOK_FUNCTION_TOOLS.map((t) => ({
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: {
+            type: 'object',
+            properties: Object.fromEntries(
+              Object.entries(t.parameters.properties).map(([k, v]) => [
+                k,
+                { type: (v as any).type.toLowerCase(), description: (v as any).description },
+              ])
+            ),
+            required: t.parameters.required,
+          },
+        },
+      }));
+
       try {
         const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -116,8 +198,9 @@ export async function POST(req: NextRequest) {
           },
           body: JSON.stringify({
             model,
+            tools: openAiTools,
             messages: [
-              { role: 'system', content: agent?.systemPrompt || 'You are an AI coworker' },
+              { role: 'system', content: agent?.systemPrompt || 'You are an AI coworker with access to tools.' },
               ...(history || []).slice(-6).map((m: any) => ({
                 role: m.sender === 'user' ? 'user' : 'assistant',
                 content: m.content,
@@ -136,12 +219,31 @@ export async function POST(req: NextRequest) {
         }
 
         const data = await openaiRes.json();
-        const reply = data.choices?.[0]?.message?.content || 'No response from model.';
+        const choice = data.choices?.[0]?.message;
+        let toolCall: { name: string; arguments: Record<string, unknown> } | undefined;
+        let reply = choice?.content || '';
+
+        if (choice?.tool_calls && choice.tool_calls.length > 0) {
+          const rawCall = choice.tool_calls[0];
+          try {
+            toolCall = {
+              name: rawCall.function.name,
+              arguments: JSON.parse(rawCall.function.arguments || '{}'),
+            };
+            if (!reply) {
+              reply = `Selected autonomous tool \`${toolCall.name}\` to perform task.`;
+            }
+          } catch {
+            // ignore JSON parse error
+          }
+        }
+
         return NextResponse.json({
-          reply,
+          reply: reply || 'Completed tool evaluation.',
+          toolCall,
           provider: 'openai',
           model,
-          thoughtProcess: [`Dispatched to OpenAI (${model}) via secure server API`, 'Evaluated context and returned output'],
+          thoughtProcess: [`Dispatched to OpenAI (${model}) via secure server API`, toolCall ? `Model selected tool: ${toolCall.name}` : 'Generated text reply'],
         });
       } catch (err: any) {
         logAuditEvent('LLM_NETWORK_FAIL', `OpenAI network error: ${err.message}`, 'error', agent?.id);

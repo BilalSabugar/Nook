@@ -5,6 +5,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 import { verifyAndConsumeApproval, recordApprovalExecutionResult, logAuditEvent } from '@/lib/db';
+import { executeSandboxedCommand } from '@/lib/sandbox';
 
 const execPromise = util.promisify(exec);
 
@@ -159,38 +160,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 6. Isolated Shell Execution with Clean Low-Privilege Environment
-    // Critical: Do NOT leak host secrets or API keys into the execution environment.
-    const isWin = process.platform === 'win32';
-    const cleanEnv: Record<string, string | undefined> = { ...process.env };
-    for (const key of Object.keys(cleanEnv)) {
-      const lower = key.toLowerCase();
-      if (lower.includes('secret') || lower.includes('api_key') || lower.includes('token') || lower.startsWith('nook_')) {
-        delete cleanEnv[key];
-      }
-    }
-    cleanEnv.HOME = sandboxDir;
-    cleanEnv.USER = `nook-${safeAgentId}`;
-    cleanEnv.NODE_ENV = 'test';
+    // 6. Isolated Shell Execution through Resource-Limited Sandbox Runtime
+    const sandboxResult = await executeSandboxedCommand({
+      agentId: safeAgentId,
+      command: cleanCmd,
+      timeoutMs: 10000,
+      maxBufferBytes: 1024 * 512,
+    });
 
-    let stdout = '';
-    let exitCode = 0;
-
-    try {
-      const execResult = await execPromise(cleanCmd, {
-        cwd: sandboxDir,
-        timeout: 10000, // 10 second timeout limit
-        maxBuffer: 1024 * 512, // 512KB buffer limit
-        shell: isWin ? 'powershell.exe' : '/bin/sh',
-        env: cleanEnv as NodeJS.ProcessEnv,
-      });
-
-      stdout = execResult.stdout || execResult.stderr || '[Command finished with no output]';
-      exitCode = 0;
-    } catch (execErr: any) {
-      stdout = execErr.stdout || execErr.stderr || execErr.message || 'Execution error';
-      exitCode = execErr.code || 1;
-    }
+    const stdout = (sandboxResult.stdout || sandboxResult.stderr || '[Command finished with no output]').trim();
+    const exitCode = sandboxResult.exitCode;
 
     // 7. Record execution outcome on approval record and audit log
     recordApprovalExecutionResult(approvalId, {

@@ -1,5 +1,7 @@
 import dns from 'dns';
 import net from 'net';
+import http from 'http';
+import https from 'https';
 
 export interface SsrfValidationResult {
   allowed: boolean;
@@ -178,6 +180,7 @@ export interface SafeFetchResponse {
   text: string;
   bodyText: string;
   finalUrl: string;
+  pinnedIp?: string;
 }
 
 export async function safeFetch(
@@ -199,85 +202,120 @@ export async function safeFetch(
   while (redirectsCount <= maxRedirects) {
     // 1. Validate destination URL before connecting
     const validation = await validateOutboundUrl(currentUrl);
-    if (!validation.allowed) {
-      throw new Error(`SSRF Protection: Outbound request to '${currentUrl}' blocked. ${validation.reason}`);
+    if (!validation.allowed || !validation.resolvedIps || validation.resolvedIps.length === 0) {
+      throw new Error(`SSRF Protection: Outbound request to '${currentUrl}' blocked. ${validation.reason || 'No valid address records'}`);
     }
 
-    // 2. Execute fetch with manual redirect handling and timeout
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // DNS Pinning: bind socket connection directly to validated IP address to eliminate TOCTOU rebinding
+    const pinnedIp = validation.resolvedIps[0];
+    const pinnedFamily = net.isIPv6(pinnedIp) ? 6 : 4;
+    const parsedUrl = new URL(currentUrl);
+    const isHttps = parsedUrl.protocol === 'https:';
+    const client = isHttps ? https : http;
+    const port = parsedUrl.port ? parseInt(parsedUrl.port, 10) : (isHttps ? 443 : 80);
 
-    let res: Response;
-    try {
-      res = await fetch(currentUrl, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Nook-Coworker-Bot/1.0 (Autonomous Research Agent)',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
-          ...(options.headers || {}),
+    const res = await new Promise<{
+      statusCode: number;
+      statusMessage: string;
+      headers: Record<string, string | string[] | undefined>;
+      body: string;
+    }>((resolve, reject) => {
+      const req = client.request(
+        {
+          protocol: parsedUrl.protocol,
+          hostname: parsedUrl.hostname,
+          port,
+          path: (parsedUrl.pathname || '/') + parsedUrl.search,
+          method: 'GET',
+          headers: {
+            'Host': parsedUrl.host,
+            'User-Agent': 'Nook-Coworker-Bot/1.0 (Autonomous Research Agent)',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
+            ...(options.headers || {}),
+          },
+          servername: parsedUrl.hostname,
+          lookup: (_hostname: string, optionsOrCallback: any, maybeCallback?: any) => {
+            const cb = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+            const isAll = optionsOrCallback && typeof optionsOrCallback === 'object' && optionsOrCallback.all;
+            if (typeof cb === 'function') {
+              if (isAll) {
+                cb(null, [{ address: pinnedIp, family: pinnedFamily }]);
+              } else {
+                cb(null, pinnedIp, pinnedFamily);
+              }
+            }
+          },
+          timeout: timeoutMs,
         },
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+        (nodeRes) => {
+          const chunks: Buffer[] = [];
+          let received = 0;
 
-    // 3. Handle redirects manually
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const location = res.headers.get('location');
+          nodeRes.on('data', (chunk: Buffer) => {
+            received += chunk.length;
+            if (received > maxBytes) {
+              req.destroy(new Error(`Response payload exceeded safe limit of ${maxBytes} bytes.`));
+              return;
+            }
+            chunks.push(chunk);
+          });
+
+          nodeRes.on('end', () => {
+            resolve({
+              statusCode: nodeRes.statusCode || 200,
+              statusMessage: nodeRes.statusMessage || 'OK',
+              headers: nodeRes.headers,
+              body: Buffer.concat(chunks).toString('utf8'),
+            });
+          });
+        }
+      );
+
+      req.on('timeout', () => {
+        req.destroy(new Error(`Network request to '${currentUrl}' timed out after ${timeoutMs}ms.`));
+      });
+
+      req.on('error', (err) => {
+        reject(err);
+      });
+
+      req.end();
+    });
+
+    // 2. Handle redirects manually, validating each redirect hop against SSRF policy
+    if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+      const locHeader = res.headers['location'];
+      const location = Array.isArray(locHeader) ? locHeader[0] : locHeader;
       if (!location) {
         throw new Error(`Redirect response from ${currentUrl} contained no Location header.`);
       }
 
-      const nextUrl = new URL(location, currentUrl).toString();
-      currentUrl = nextUrl;
+      currentUrl = new URL(location, currentUrl).toString();
       redirectsCount++;
       continue;
     }
 
-    // 4. Stream response body up to maxBytes limit
-    if (!res.body) {
-      const text = await res.text();
-      return {
-        status: res.status,
-        statusText: res.statusText,
-        ok: res.status >= 200 && res.status < 300,
-        headers: res.headers,
-        text,
-        bodyText: text,
-        finalUrl: currentUrl,
-      };
-    }
-
-    const reader = res.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let receivedBytes = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        receivedBytes += value.length;
-        if (receivedBytes > maxBytes) {
-          reader.cancel();
-          throw new Error(`Response payload exceeded safe limit of ${maxBytes} bytes.`);
+    // Convert headers to standard web Headers
+    const webHeaders = new Headers();
+    for (const [k, v] of Object.entries(res.headers)) {
+      if (v !== undefined) {
+        if (Array.isArray(v)) {
+          v.forEach((val) => webHeaders.append(k, val));
+        } else {
+          webHeaders.set(k, v);
         }
-        chunks.push(value);
       }
     }
 
-    const totalBuffer = Buffer.concat(chunks);
-    const text = totalBuffer.toString('utf8');
-
     return {
-      status: res.status,
-      statusText: res.statusText,
-      ok: res.status >= 200 && res.status < 300,
-      headers: res.headers,
-      text,
-      bodyText: text,
+      status: res.statusCode,
+      statusText: res.statusMessage,
+      ok: res.statusCode >= 200 && res.statusCode < 300,
+      headers: webHeaders,
+      text: res.body,
+      bodyText: res.body,
       finalUrl: currentUrl,
+      pinnedIp,
     };
   }
 

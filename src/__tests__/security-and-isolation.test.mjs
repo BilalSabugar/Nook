@@ -36,7 +36,10 @@ import {
   maskSecret,
   SUPPORTED_MODELS,
 } from '../lib/secrets.ts';
-import { executeJob } from '../lib/worker.ts';
+import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions } from '../lib/worker.ts';
+import { executeSandboxedCommand, validateCommandSafety } from '../lib/sandbox.ts';
+import { planMission, tickMission, planSolutionAndTests } from '../lib/orchestrator.ts';
+import { getOrCreateBrowserSession, navigateBrowser } from '../lib/browser-session.ts';
 
 // =========================================================================
 // 1. AUTHENTICATION & SESSION SECURITY TESTS
@@ -65,24 +68,48 @@ test('Auth: Anonymous and invalid token requests are strictly denied', () => {
   assert.equal(resSpoofedHost.authorized, false, 'Localhost host header must NOT bypass auth');
 });
 
+test('Auth: createSessionToken fails closed when setup is unconfigured', () => {
+  const origKey = process.env.NOOK_API_KEY;
+  const origPwd = process.env.NOOK_PASSWORD;
+  const origSec = process.env.NOOK_SECRET_TOKEN;
+
+  try {
+    delete process.env.NOOK_API_KEY;
+    delete process.env.NOOK_PASSWORD;
+    delete process.env.NOOK_SECRET_TOKEN;
+    assert.throws(() => createSessionToken(), /Server authentication setup is incomplete/);
+  } finally {
+    process.env.NOOK_API_KEY = origKey;
+    process.env.NOOK_PASSWORD = origPwd;
+    process.env.NOOK_SECRET_TOKEN = origSec;
+  }
+});
+
 test('Auth: Legitimate cryptographic session tokens succeed', () => {
-  const token = createSessionToken();
-  assert.ok(token, 'Session token should be generated');
+  const origPwd = process.env.NOOK_PASSWORD;
+  process.env.NOOK_PASSWORD = 'test-configured-secret-123';
 
-  const verified = verifySessionToken(token);
-  assert.equal(verified.valid, true, 'Cryptographically signed session token must verify');
+  try {
+    const token = createSessionToken();
+    assert.ok(token, 'Session token should be generated');
 
-  const verifiedFake = verifySessionToken(`${token}-tampered`);
-  assert.equal(verifiedFake.valid, false, 'Tampered session token must fail verification');
+    const verified = verifySessionToken(token);
+    assert.equal(verified.valid, true, 'Cryptographically signed session token must verify');
 
-  // Session cookie validation
-  const reqCookie = new Request('http://localhost:3000/api/workspace/state', {
-    headers: {
-      Cookie: `nook_session=${token}`,
-    },
-  });
-  const authRes = validateApiRequest(reqCookie);
-  assert.equal(authRes.authorized, true, 'Valid session cookie must authenticate request');
+    const verifiedFake = verifySessionToken(`${token}-tampered`);
+    assert.equal(verifiedFake.valid, false, 'Tampered session token must fail verification');
+
+    // Session cookie validation
+    const reqCookie = new Request('http://localhost:3000/api/workspace/state', {
+      headers: {
+        Cookie: `nook_session=${token}`,
+      },
+    });
+    const authRes = validateApiRequest(reqCookie);
+    assert.equal(authRes.authorized, true, 'Valid session cookie must authenticate request');
+  } finally {
+    process.env.NOOK_PASSWORD = origPwd;
+  }
 });
 
 test('Auth: Fail-closed on missing credentials and verifyOwnerCredentials validation', () => {
@@ -383,3 +410,149 @@ test('Secrets: AES-256-GCM encryption, decryption, masking, and model whitelisti
   assert.ok(SUPPORTED_MODELS.anthropic.includes('claude-3-5-sonnet-20241022'));
   assert.equal(SUPPORTED_MODELS.gemini.includes('unsupported-model-xyz'), false);
 });
+
+// =========================================================================
+// 7. SANDBOX ISOLATION & RESOURCE LIMITS
+// =========================================================================
+test('Sandbox: Command execution enforces resource limits, scrubs secrets, and blocks directory traversal', async () => {
+  // 1. Directory traversal attempt must be blocked by safety check
+  const checkEscape = validateCommandSafety('cat ../../.env', 'test-agent');
+  assert.equal(checkEscape.safe, false, 'Must block traversal escaping agent root');
+  assert.ok(checkEscape.reason?.includes('traversal') || checkEscape.reason?.includes('blocked'));
+
+  // 2. Sensitive host secret reference must be blocked
+  const checkSecrets = validateCommandSafety('type .nook_storage/auth_secret', 'test-agent');
+  assert.equal(checkSecrets.safe, false, 'Must block reference to .nook_storage');
+
+  // 3. Destructive command must be blocked
+  const checkDestructive = validateCommandSafety('rm -rf /', 'test-agent');
+  assert.equal(checkDestructive.safe, false, 'Must block rm -rf /');
+
+  // 4. Safe command execution must NOT leak host environment secrets
+  const origKey = process.env.NOOK_API_KEY;
+  process.env.NOOK_API_KEY = 'super-secret-host-key-must-not-leak';
+
+  try {
+    const isWin = process.platform === 'win32';
+    const echoCmd = isWin ? 'Write-Output "SANDBOX_OK"' : 'echo "SANDBOX_OK"';
+    const res = await executeSandboxedCommand({
+      agentId: 'cipher-test',
+      command: echoCmd,
+      timeoutMs: 8000,
+    });
+
+    assert.equal(res.exitCode, 0, 'Safe command must succeed in sandbox');
+    assert.ok(res.stdout.includes('SANDBOX_OK'), 'Output should contain command result');
+    assert.ok(res.isolatedRuntime === 'docker_container' || res.isolatedRuntime === 'process_jail');
+  } finally {
+    process.env.NOOK_API_KEY = origKey;
+  }
+});
+
+// =========================================================================
+// 8. MISSION APPROVAL BOUNDARY TESTS
+// =========================================================================
+test('Approvals: Missions cannot approve their own privileged commands', async () => {
+  // Plan mission requiring code execution
+  const mission = planMission({
+    title: 'Autonomous Code Execution Test',
+    objective: 'Implement robotics state machine and test',
+    requiresCodeExecution: true,
+  });
+
+  assert.ok(mission.id);
+  assert.equal(mission.status, 'draft');
+
+  // Advance to first task (Scout)
+  await tickMission(mission.id);
+
+  // Advance to second task (Quill)
+  await tickMission(mission.id);
+
+  // Advance to third task (Cipher - requires privileged sandbox command)
+  const ticked = await tickMission(mission.id);
+  assert.ok(ticked.status === 'paused' || ticked.status === 'active');
+
+  const cipherTask = ticked.tasks?.find((t) => t.assignedAgentId === 'agent-cipher');
+  assert.ok(cipherTask, 'Cipher task should exist');
+
+  // Cipher task MUST be blocked on human approval, NOT auto-approved!
+  assert.equal(cipherTask.status, 'blocked', 'Cipher task must pause and wait for human approval');
+  assert.ok(cipherTask.approvalId, 'Approval ID must be assigned for human decision');
+
+  const approval = getApprovalById(cipherTask.approvalId);
+  assert.ok(approval, 'Approval record must exist on server');
+  assert.equal(approval.status, 'pending', 'Approval status must remain pending until human decision');
+});
+
+// =========================================================================
+// 9. RESEARCH EVIDENCE INTEGRITY TESTS
+// =========================================================================
+test('Evidence: Empty or failed search produces zero verified citations', async () => {
+  const mission = planMission({
+    title: 'Obscure Unknown Query',
+    objective: 'zxqv12349876nonexistenttechnology999',
+    requiresCodeExecution: false,
+  });
+
+  const updatedMission = await tickMission(mission.id);
+  const scoutTask = updatedMission.tasks?.find((t) => t.assignedAgentId === 'agent-scout');
+  assert.ok(scoutTask, 'Scout task should exist');
+
+  // Acceptance test: An empty or failed search produces no verified citations
+  assert.deepEqual(scoutTask.outputs?.citations, [], 'Must produce zero citations for failed search');
+  assert.equal(scoutTask.verification?.verified, false, 'Task verification must be false when search fails');
+});
+
+// =========================================================================
+// 10. PERSISTENT WORKER & CRASH RECOVERY TESTS
+// =========================================================================
+test('Supervisor: Background worker advances active missions and recovers from crashes', async () => {
+  // 1. Initial recovery check
+  const recovery = recoverStaleJobsAndMissions();
+  assert.equal(typeof recovery.recoveredJobs, 'number');
+  assert.equal(typeof recovery.recoveredMissions, 'number');
+
+  // 2. Active mission advancement via worker tick
+  const mission = planMission({
+    title: 'Background Supervision Test',
+    objective: 'distributed systems state machine',
+    requiresCodeExecution: false,
+  });
+
+  const progressed = await tickActiveMissions();
+  assert.equal(progressed, true, 'Worker should autonomously tick active mission');
+});
+
+// =========================================================================
+// 11. SSRF DNS PINNING TESTS
+// =========================================================================
+test('SSRF: safeFetch uses DNS pinning to prevent TOCTOU rebinding', async () => {
+  // Safe fetch to Wikipedia API
+  const res = await safeFetch('https://en.wikipedia.org/w/api.php?action=opensearch&search=test&limit=1&format=json', {
+    timeoutMs: 8000,
+  });
+
+  assert.equal(res.ok, true);
+  assert.ok(res.pinnedIp, 'Response must include pinned IP from DNS validation');
+  // Verify pinned IP is an external public IP
+  assert.ok(!res.pinnedIp.startsWith('127.'), 'Pinned IP must not be loopback');
+  assert.ok(!res.pinnedIp.startsWith('192.168.'), 'Pinned IP must not be private');
+});
+
+// =========================================================================
+// 12. BROWSER OBSERVABLE SESSION TESTS
+// =========================================================================
+test('Browser: Observable browser session enforces network-level egress restrictions', async () => {
+  const session = getOrCreateBrowserSession('agent-scout');
+  assert.ok(session);
+  assert.equal(session.agentId, 'agent-scout');
+  assert.ok(session.history.length >= 1);
+
+  // Attempt navigation to forbidden internal host must be blocked
+  await assert.rejects(
+    () => navigateBrowser('agent-scout', 'http://169.254.169.254/latest/meta-data'),
+    /SSRF Policy Violation/
+  );
+});
+

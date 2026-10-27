@@ -17,12 +17,9 @@ import {
 } from './db.ts';
 import type { DbMission, DbAgentTask } from './db.ts';
 import { safeFetch } from './ssrf.ts';
-import { exec } from 'child_process';
-import util from 'util';
+import { executeSandboxedCommand } from './sandbox.ts';
 import path from 'path';
 import fs from 'fs/promises';
-
-const execPromise = util.promisify(exec);
 
 export interface MissionPlanInput {
   title: string;
@@ -404,8 +401,10 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       .trim()
       .slice(0, 60);
 
+    const searchedQuery = cleanQuery || topic.slice(0, 40);
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(searchedQuery)}&limit=4&namespace=0&format=json`;
+
     try {
-      const searchUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(cleanQuery || topic.slice(0, 40))}&limit=4&namespace=0&format=json`;
       const fetchRes = await safeFetch(searchUrl, { timeoutMs: 6000 });
 
       if (fetchRes.ok) {
@@ -413,21 +412,6 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
         titles = parsed[1] || [];
         descriptions = parsed[2] || [];
         links = parsed[3] || [];
-      }
-
-      // If full phrase returned 0 matches, try core subject terms
-      if (links.length === 0 && cleanQuery.includes(' ')) {
-        const coreSubject = cleanQuery.split(/\s+/).slice(0, 2).join(' ');
-        const fallbackUrl = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(coreSubject)}&limit=4&namespace=0&format=json`;
-        const fbRes = await safeFetch(fallbackUrl, { timeoutMs: 6000 });
-        if (fbRes.ok) {
-          const fbParsed = JSON.parse(fbRes.bodyText);
-          if (fbParsed[3] && fbParsed[3].length > 0) {
-            titles = fbParsed[1] || [];
-            descriptions = fbParsed[2] || [];
-            links = fbParsed[3] || [];
-          }
-        }
       }
     } catch (err: unknown) {
       const error = err as Error;
@@ -438,8 +422,18 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       });
     }
 
-    if (links.length > 0) {
-      const citations = links;
+    // Explicitly categorize sources: searched, retrieved, and supporting
+    const searchedQueries = [searchedQuery];
+    const searchedSources = [searchUrl];
+    const retrievedSources = [...links];
+    // Supporting sources are retrieved sources that contain substantive content matching query
+    const supportingSources = retrievedSources.filter((_, idx) => {
+      const desc = (descriptions[idx] || '').trim();
+      return desc.length > 10 && !desc.toLowerCase().includes('may refer to');
+    });
+
+    if (supportingSources.length > 0) {
+      const citations = supportingSources;
       const summaryFindings = titles.map((t, i) => `${t}: ${descriptions[i] || 'Overview'}`).join('; ');
 
       recordEvidence({
@@ -450,6 +444,10 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
         actionType: 'browser_visit',
         summary: `Scout collected ${citations.length} verified technical citations`,
         details: {
+          searchedQueries,
+          searchedSources,
+          retrievedSources,
+          supportingSources,
           sourceCitations: citations,
           findings: summaryFindings,
           sourceTitles: titles,
@@ -465,14 +463,18 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       return updateAgentTask(task.id, {
         status: 'completed',
         outputs: {
+          searchedQueries,
+          searchedSources,
+          retrievedSources,
+          supportingSources,
           citations,
           findings: summaryFindings,
           sourceTitles: titles,
         },
       })!;
     } else {
-      // HONEST RECORDING: NO SUBSTITUTE AI URL!
-      const summaryFindings = `No authoritative external sources found matching query "${cleanQuery || topic}".`;
+      // HONEST RECORDING: NO SUBSTITUTE URL!
+      const summaryFindings = `No authoritative external sources found supporting query "${searchedQuery}".`;
 
       recordEvidence({
         missionId: task.missionId,
@@ -482,6 +484,10 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
         actionType: 'browser_visit',
         summary: `Search yielded 0 authoritative source citations for query`,
         details: {
+          searchedQueries,
+          searchedSources,
+          retrievedSources,
+          supportingSources: [],
           sourceCitations: [],
           findings: summaryFindings,
           sourceTitles: [],
@@ -492,12 +498,16 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       verifyAgentTask(task.id, {
         verified: false,
         method: 'citation_validation',
-        details: `Unverified: No authoritative source citations found matching "${cleanQuery || topic}". Zero sources fabricated.`,
+        details: `Unverified: No authoritative source citations found matching "${searchedQuery}". Zero citations fabricated.`,
       });
 
       return updateAgentTask(task.id, {
         status: 'completed',
         outputs: {
+          searchedQueries,
+          searchedSources,
+          retrievedSources,
+          supportingSources: [],
           citations: [],
           findings: summaryFindings,
           sourceTitles: [],
@@ -713,38 +723,16 @@ ${citationsList}
 
     updateAgentTask(task.id, { status: 'in_progress' });
 
-    // Step 2: Isolated Execution with Clean Environment
-    const isWin = process.platform === 'win32';
-    let stdout = '';
-    let exitCode = 0;
+    // Step 2: Isolated Execution through Resource-Limited Sandbox Runtime
+    const sandboxResult = await executeSandboxedCommand({
+      agentId: 'cipher',
+      command: rawCmd,
+      timeoutMs: 10000,
+      maxBufferBytes: 1024 * 256,
+    });
 
-    const cleanEnv: Record<string, string | undefined> = { ...process.env };
-    for (const key of Object.keys(cleanEnv)) {
-      const lower = key.toLowerCase();
-      if (lower.includes('secret') || lower.includes('api_key') || lower.includes('token') || lower.startsWith('nook_')) {
-        delete cleanEnv[key];
-      }
-    }
-    cleanEnv.HOME = sandboxDir;
-    cleanEnv.USER = 'nook-cipher';
-    cleanEnv.NODE_ENV = 'test';
-
-    try {
-      const execResult = await execPromise(rawCmd, {
-        cwd: sandboxDir,
-        timeout: 10000,
-        maxBuffer: 1024 * 256,
-        shell: isWin ? 'powershell.exe' : '/bin/sh',
-        env: cleanEnv as NodeJS.ProcessEnv,
-      });
-      stdout = execResult.stdout || '[Success]';
-      exitCode = 0;
-    } catch (err: unknown) {
-      const error = err as { stdout?: string; stderr?: string; message?: string; code?: number };
-      stdout = error.stdout || error.stderr || error.message || 'Execution error';
-      exitCode = typeof error.code === 'number' ? error.code : 1;
-    }
-
+    const stdout = (sandboxResult.stdout || sandboxResult.stderr || '[Success]').trim();
+    const exitCode = sandboxResult.exitCode;
     const testPassed = exitCode === 0 && (stdout.includes('✔') || stdout.includes('pass') || stdout.includes('ok'));
 
     addAgentTaskObservation(task.id, {

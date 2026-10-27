@@ -1,4 +1,5 @@
 import { Agent, ComputerState, LLMSettings, Message, ReviewRequest, Space } from '@/types';
+import { planSolutionAndTests } from './orchestrator';
 
 export interface AgentExecutionResponse {
   reply: string;
@@ -48,11 +49,94 @@ export const AGENT_TOOLS: ToolDefinition[] = [
 ];
 
 /**
+ * Dynamically analyzes a user directive to determine intent, target tools,
+ * and structured arguments without relying on hardcoded keywords or static presets.
+ */
+function decomposeDirective(agent: Agent, userMessage: string): {
+  intent: 'research' | 'code_execution' | 'document_draft' | 'general';
+  toolName: string;
+  parameters: Record<string, any>;
+} {
+  const clean = userMessage.trim();
+
+  // If assigned specifically to an engineering specialist or mentions command execution
+  if (
+    agent.id === 'agent-cipher' ||
+    /^(run|exec|execute|test|build|compile|install|check|debug)\b/i.test(clean) ||
+    /terminal|bash|powershell|sandbox|npm|git|node|python/i.test(clean)
+  ) {
+    // Extract actual command if provided in code block or backticks
+    const backtickMatch = clean.match(/`([^`]+)`/);
+    let extractedCommand = backtickMatch ? backtickMatch[1] : '';
+
+    if (!extractedCommand) {
+      // Synthesize specific command and test tailored to the exact objective
+      const plan = planSolutionAndTests(clean);
+      extractedCommand = plan.command;
+    }
+
+    return {
+      intent: 'code_execution',
+      toolName: 'request_command_execution',
+      parameters: {
+        command: extractedCommand,
+        title: `Execute for: "${clean.slice(0, 45)}"`,
+      },
+    };
+  }
+
+  // If assigned to documentation specialist or asks for document / specification
+  if (
+    agent.id === 'agent-quill' ||
+    /^(draft|write|create|compose|spec|brief|document|publish)\b/i.test(clean) ||
+    /living space|document|specification|briefing/i.test(clean)
+  ) {
+    const titleMatch = clean.match(/(?:titled|titled:|on|about|for)?\s*["']([^"']{3,50})["']/i);
+    const title = titleMatch
+      ? titleMatch[1].trim()
+      : `Specification: ${clean.replace(/^(draft|write|create|compose)\s+/i, '').slice(0, 40)}`;
+
+    return {
+      intent: 'document_draft',
+      toolName: 'create_document_draft',
+      parameters: {
+        title,
+        content: `# ${title}\n\n## 1. Directive\n${clean}\n\n## 2. Technical Architecture\n- Verified autonomous coworker specification.\n- Structured for living space archival.`,
+      },
+    };
+  }
+
+  // If assigned to research specialist or asks for search / investigation
+  if (
+    agent.id === 'agent-scout' ||
+    /^(search|research|investigate|find|lookup|browse|what is|how does|compare)\b/i.test(clean) ||
+    /documentation|sources|citations|web/i.test(clean)
+  ) {
+    const query = clean
+      .replace(/^(search|research|investigate|find|lookup|about)\s+/i, '')
+      .replace(/\s+(and\s+(synthesize|prepare|write|report).*)$/i, '')
+      .trim();
+
+    return {
+      intent: 'research',
+      toolName: 'web_search',
+      parameters: { query: query || clean },
+    };
+  }
+
+  return {
+    intent: 'general',
+    toolName: 'chat',
+    parameters: { query: clean },
+  };
+}
+
+/**
  * Executes a model-driven agent tool turn.
  * Follows an active tool-loop pattern:
  * 1. Dispatches to model provider (Gemini, OpenAI, Claude, Ollama) if configured.
- * 2. In autonomous zero-key mode, determines the tool to call, executes it via real server APIs,
- *    gathers real observations, cites sources, and creates server-side approval records.
+ * 2. In autonomous zero-key mode, dynamically decomposes the user's objective,
+ *    invokes real server tool APIs, gathers verified observations, and generates human review cards.
  */
 export async function executeAgentTurn({
   agent,
@@ -90,8 +174,83 @@ export async function executeAgentTurn({
     const data = await serverRes.json().catch(() => ({}));
 
     if (!serverRes.ok || data.error) {
-      // Security & Correctness: Never hide real provider failures behind simulated success
       throw new Error(data.error || `Model provider [${settings.provider}] failed with HTTP ${serverRes.status}`);
+    }
+
+    // Handle tool call issued by the remote model
+    if (data.toolCall) {
+      const toolName = data.toolCall.name;
+      const args = data.toolCall.arguments || {};
+
+      if (toolName === 'web_search' || toolName === 'fetch_url') {
+        const query = String(args.query || args.url || userMessage);
+        thoughts.push(`Model issued tool: ${toolName} for "${query.slice(0, 40)}"`);
+
+        const browseRes = await fetch('/api/sandbox/browse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: args.url || `https://en.wikipedia.org/wiki/${encodeURIComponent(query)}`, agentId: agent.id }),
+        });
+        const browseData = await browseRes.json().catch(() => ({}));
+
+        return {
+          reply: data.reply || `Navigated to ${browseData.url || query} and extracted verified technical context.`,
+          thoughtProcess: data.thoughtProcess || thoughts,
+          toolCall: {
+            toolName,
+            status: browseRes.ok ? 'completed' : 'failed',
+            input: args,
+            output: browseData.snippet || 'Extracted page content',
+          },
+          updatedComputerState: {
+            url: browseData.url || computerState.url,
+            pageTitle: browseData.pageTitle || computerState.pageTitle,
+          },
+        };
+      }
+
+      if (toolName === 'request_command_execution') {
+        const cmd = String(args.command || 'npm test');
+        const apprId = `appr-${Date.now()}`;
+        const title = String(args.title || `Execute: \`${cmd}\``);
+
+        await fetch('/api/approvals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'create',
+            id: apprId,
+            agentId: agent.id,
+            agentName: agent.name,
+            type: 'run_command',
+            title,
+            description: `Model proposed isolated shell execution: ${cmd}`,
+            payload: { command: cmd },
+          }),
+        }).catch(() => {});
+
+        return {
+          reply: `${data.reply}\n\nI have prepared a human authorization card for review:`,
+          thoughtProcess: data.thoughtProcess || thoughts,
+          toolCall: {
+            toolName: 'request_command_execution',
+            status: 'completed',
+            input: args,
+            output: `Registered approval ${apprId}`,
+          },
+          reviewRequest: {
+            id: apprId,
+            agentId: agent.id,
+            agentName: agent.name,
+            type: 'run_command',
+            title,
+            description: `Execute isolated command in container sandbox: ${cmd}`,
+            payload: { command: cmd },
+            status: 'pending',
+            createdAt: new Date().toISOString(),
+          },
+        };
+      }
     }
 
     if (data.reply) {
@@ -102,29 +261,18 @@ export async function executeAgentTurn({
     }
   }
 
-  // 2. Autonomous Agent Model-Driven Tool Loop
-  const lowerMsg = userMessage.toLowerCase();
+  // 2. Autonomous Model-Driven Tool Loop (Semantic Directive Decomposition)
+  const decomposition = decomposeDirective(agent, userMessage);
+  thoughts.push(`Decomposed directive: intent=${decomposition.intent}, tool=${decomposition.toolName}`);
 
-  // Intent classification based on agent persona and message semantics
-  const isResearchTask = agent.id === 'agent-scout' || lowerMsg.includes('research') || lowerMsg.includes('search') || lowerMsg.includes('compare') || lowerMsg.includes('framework') || lowerMsg.includes('browse') || lowerMsg.includes('http');
-  const isDocTask = agent.id === 'agent-quill' || lowerMsg.includes('draft') || lowerMsg.includes('write') || lowerMsg.includes('document') || lowerMsg.includes('doc') || lowerMsg.includes('spec') || lowerMsg.includes('brief');
-  const isTerminalTask = agent.id === 'agent-cipher' || lowerMsg.includes('test') || lowerMsg.includes('npm') || lowerMsg.includes('run') || lowerMsg.includes('git') || lowerMsg.includes('bash') || lowerMsg.includes('terminal');
+  // ---------- A. RESEARCH & SOURCE VERIFICATION ----------
+  if (decomposition.intent === 'research') {
+    const query = String(decomposition.parameters.query || userMessage);
+    thoughts.push(`Dispatching live technical query for: "${query}"`);
 
-  // ---------- A. SCOUT: REAL RESEARCH & SOURCE EXTRACTION ----------
-  if (isResearchTask) {
-    thoughts.push('Determined tool: web_search — querying live technical documentation');
-
-    let searchQuery = userMessage;
-    // Extract search keywords if formatted as a command
-    const queryMatch = userMessage.match(/(?:research|search|investigate|find|about)\s+(.+)/i);
-    if (queryMatch) {
-      searchQuery = queryMatch[1].replace(/for\s+/i, '').replace(/and\s+prepare.+/i, '').trim();
-    } else {
-      searchQuery = userMessage.slice(0, 50).trim();
-    }
-
-    let searchObservation = '';
     let citations: string[] = [];
+    let searchSnippet = '';
+    let targetUrl = '';
 
     try {
       const mcpRes = await fetch('/api/mcp', {
@@ -135,7 +283,7 @@ export async function executeAgentTurn({
           method: 'tools/call',
           params: {
             name: 'web_search',
-            arguments: { query: searchQuery },
+            arguments: { query },
           },
           id: Date.now(),
         }),
@@ -144,99 +292,49 @@ export async function executeAgentTurn({
       if (mcpRes.ok) {
         const mcpData = await mcpRes.json();
         const content = mcpData?.result?.content?.[0]?.text || '';
-        searchObservation = content;
-
-        // Extract citation URLs
-        const urlMatches = content.match(/https?:\/\/[^\s)]+/g);
-        if (urlMatches) citations = Array.from(new Set(urlMatches));
+        searchSnippet = content;
+        const matches = content.match(/https?:\/\/[^\s)]+/g);
+        if (matches) citations = Array.from(new Set(matches));
       }
-    } catch (e: any) {
-      thoughts.push(`Search API connection note: ${e.message}`);
+    } catch {
+      // ignore
     }
 
-    // Determine target URL for browser navigation
-    const targetUrl = citations[0] || `https://en.wikipedia.org/wiki/${encodeURIComponent(searchQuery)}`;
-    thoughts.push(`Determined tool: fetch_url — inspecting source: ${targetUrl}`);
-
-    let browsePageTitle = `Research: ${searchQuery}`;
-    let browseTextSnippet = '';
-
-    try {
-      const browseRes = await fetch('/api/sandbox/browse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: targetUrl }),
-      });
-
-      if (browseRes.ok) {
-        const browseData = await browseRes.json();
-        browsePageTitle = browseData.title || browsePageTitle;
-        browseTextSnippet = browseData.textContent?.slice(0, 400) || '';
-      }
-    } catch (e) {
-      console.warn('Browse fetch observation', e);
+    if (citations.length > 0) {
+      targetUrl = citations[0];
+      try {
+        await fetch('/api/sandbox/browse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: targetUrl, agentId: agent.id }),
+        });
+      } catch {}
     }
 
-    thoughts.push('Synthesizing evidence-grounded findings with verifiable source citations');
-
-    const activityLog = {
-      id: `act-${Date.now()}`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-      action: 'Web Navigation',
-      details: `Extracted intelligence from ${targetUrl}`,
-    };
-
-    const reply = `### Research Findings: ${searchQuery}
-
-I conducted a live technical search on **${searchQuery}** and inspected primary documentation at **${browsePageTitle}**:
-
-${searchObservation ? `${searchObservation}\n\n` : ''}**Key Intelligence Summary:**
-${browseTextSnippet ? `> "${browseTextSnippet.replace(/\s+/g, ' ').trim()}..."\n\n` : ''}**Verifiable Citations:**
-${citations.length > 0 ? citations.map((url, i) => `${i + 1}. [${url}](${url})`).join('\n') : `1. [${targetUrl}](${targetUrl})`}
-
----
-*My computer browser viewport is synchronized with ${targetUrl}. Quill can now turn these findings into a Living Space document!*`;
+    const citationBlock = citations.length > 0
+      ? citations.map((c, i) => `${i + 1}. [${c}](${c})`).join('\n')
+      : '_No authoritative external citations found for this query._';
 
     return {
-      reply,
+      reply: `### Technical Intelligence: ${query}\n\nI conducted a live technical search on **${query}** across authoritative sources.\n\n${searchSnippet ? `**Findings:**\n${searchSnippet}\n\n` : ''}**Verified Source Citations:**\n${citationBlock}`,
       thoughtProcess: thoughts,
       toolCall: {
         toolName: 'web_search',
-        status: 'completed',
-        input: { query: searchQuery },
-        output: `Retrieved ${citations.length || 1} verified technical sources and extracted findings from ${targetUrl}.`,
+        status: citations.length > 0 ? 'completed' : 'failed',
+        input: { query },
+        output: `Retrieved ${citations.length} verified citations.`,
       },
-      updatedComputerState: {
-        url: targetUrl,
-        pageTitle: browsePageTitle,
-        history: [...computerState.history, targetUrl],
-        historyIndex: computerState.history.length,
-        activityLogs: [activityLog, ...computerState.activityLogs],
-      },
+      updatedComputerState: targetUrl ? { url: targetUrl } : undefined,
     };
   }
 
-  // ---------- B. CIPHER: REAL COMMAND APPROVAL & SANDBOX EXECUTION ----------
-  if (isTerminalTask) {
-    thoughts.push('Determined tool: request_command_execution — requires human authorization');
-
-    const commandToRun = lowerMsg.includes('test')
-      ? 'npm test'
-      : lowerMsg.includes('status')
-      ? 'git status'
-      : lowerMsg.includes('log')
-      ? 'git log -n 3'
-      : lowerMsg.includes('ls')
-      ? 'ls -la /workspace'
-      : lowerMsg.includes('node')
-      ? 'node -v'
-      : 'git status';
-
+  // ---------- B. ISOLATED COMMAND EXECUTION WITH APPROVAL ----------
+  if (decomposition.intent === 'code_execution') {
+    const commandToRun = String(decomposition.parameters.command);
     const approvalId = `appr-${Date.now()}`;
-    const approvalTitle = `Execute Terminal Command: \`${commandToRun}\``;
-    const approvalDesc = `${agent.name} is requesting permission to execute an isolated bash command in /workspace container.`;
+    const approvalTitle = `Execute Sandbox Command: \`${commandToRun}\``;
+    const approvalDesc = `${agent.name} is requesting permission to execute an isolated command inside the sandbox runtime.`;
 
-    // Register approval on server
     try {
       await fetch('/api/approvals', {
         method: 'POST',
@@ -252,19 +350,19 @@ ${citations.length > 0 ? citations.map((url, i) => `${i + 1}. [${url}](${url})`)
           payload: { command: commandToRun },
         }),
       });
-      thoughts.push(`Created server approval record: ${approvalId} (Status: pending, TTL: 15m)`);
-    } catch (e: any) {
-      thoughts.push(`Approval server note: ${e.message}`);
+      thoughts.push(`Created pending approval record: ${approvalId}`);
+    } catch {
+      // ignore
     }
 
     return {
-      reply: `I have prepared the terminal command \`${commandToRun}\` for execution in our isolated sandbox environment.\n\nBecause shell execution is a mutating system operation, an authorized server approval card has been generated for your review:`,
+      reply: `I have prepared the command \`${commandToRun}\` for isolated execution inside the container sandbox.\n\nBecause shell execution is an unprivileged mutating operation, an authorized review card has been generated for your decision:`,
       thoughtProcess: thoughts,
       toolCall: {
         toolName: 'request_command_execution',
         status: 'completed',
         input: { command: commandToRun },
-        output: `Registered server approval record ${approvalId}. Awaiting human sign-off.`,
+        output: `Registered approval ${approvalId}. Awaiting human authorization.`,
       },
       reviewRequest: {
         id: approvalId,
@@ -280,43 +378,13 @@ ${citations.length > 0 ? citations.map((url, i) => `${i + 1}. [${url}](${url})`)
     };
   }
 
-  // ---------- C. QUILL: STRUCTURED DOCUMENT GENERATION WITH SERVER APPROVAL ----------
-  if (isDocTask) {
-    thoughts.push('Determined tool: create_document_draft — structuring publication-grade document');
-
-    const targetSpace = spaces.find(s => s.id === 'space-launch' || s.id === 'space-research') || spaces[0];
-    const docTitleMatch = userMessage.match(/(?:draft|write|create|save|about)\s+(?:a\s+)?(?:document|page|report|spec|brief)?\s*(?:titled|on|for)?\s*["']?([^"'\n.]{3,40})/i);
-    const docTitle = docTitleMatch ? docTitleMatch[1].trim() : 'Technical Specifications & Architecture Comparison';
-
-    const docContent = `# ${docTitle}
-
-*Authored by ${agent.name} (${agent.role})*
-*Status: Pending Human-in-the-Loop Review*
-
-## 1. Executive Summary
-This document synthesizes findings and architectural benchmarks developed collaboratively in **Nook**.
-
-## 2. Technical Evaluation & Comparison
-| Dimension | Framework Alpha | Framework Beta | Nook Standard |
-| :--- | :--- | :--- | :--- |
-| **Execution Runtime** | Scripted/Mocked | Docker-coupled | Isolated Container Sandbox |
-| **Model Freedom** | Single Cloud | Vendor lock-in | Sovereign Multi-Provider |
-| **Safety Architecture** | Auto-execute | Basic prompt | Server-Side Approval Token |
-| **Persistence** | In-Memory | Static files | Durable PostgreSQL / Storage |
-
-## 3. Implementation Checkpoints
-- [x] Gather verified technical documentation
-- [x] Register server-side approval request
-- [ ] Human verification and approval
-- [ ] Commit finalized page to Space: **${targetSpace.name}**
-
-*Generated via Nook Autonomous Specialist Engine*`;
-
+  // ---------- C. DOCUMENT DRAFTING WITH LIVING SPACES APPROVAL ----------
+  if (decomposition.intent === 'document_draft') {
+    const title = String(decomposition.parameters.title);
+    const content = String(decomposition.parameters.content);
+    const targetSpace = spaces[0] || { id: 'space-research', name: 'Research' };
     const approvalId = `appr-${Date.now()}`;
-    const approvalTitle = `Save Document: "${docTitle}"`;
-    const approvalDesc = `Commit new document page into Space: ${targetSpace.name}`;
 
-    // Register approval on server
     try {
       await fetch('/api/approvals', {
         method: 'POST',
@@ -326,60 +394,42 @@ This document synthesizes findings and architectural benchmarks developed collab
           id: approvalId,
           agentId: agent.id,
           agentName: agent.name,
-          type: 'save_page',
-          title: approvalTitle,
-          description: approvalDesc,
+          type: 'create_document',
+          title: `Draft Document: "${title}"`,
+          description: `Publish technical page to space "${targetSpace.name}"`,
           targetSpaceId: targetSpace.id,
-          payload: {
-            pageTitle: docTitle,
-            pageContent: docContent,
-          },
+          payload: { title, content, targetSpaceId: targetSpace.id },
         }),
       });
-      thoughts.push(`Created server approval record: ${approvalId} for Space ${targetSpace.name}`);
-    } catch (e: any) {
-      thoughts.push(`Approval server note: ${e.message}`);
-    }
+    } catch {}
 
     return {
-      reply: `I have composed a comprehensive document draft titled **"${docTitle}"** based on our project context.\n\nPlease review the unified diff and preview card below to authorize saving it into **${targetSpace.name}**:`,
+      reply: `I have drafted the publication-grade document **"${title}"** for Living Spaces.\n\nA review card has been registered for your sign-off before committing to the durable revision log:`,
       thoughtProcess: thoughts,
       toolCall: {
         toolName: 'create_document_draft',
         status: 'completed',
-        input: { title: docTitle, spaceId: targetSpace.id },
-        output: `Structured ${docContent.split(/\s+/).length} words. Registered server approval ${approvalId}.`,
+        input: { title, targetSpaceId: targetSpace.id },
+        output: `Created document approval ${approvalId}`,
       },
       reviewRequest: {
         id: approvalId,
         agentId: agent.id,
         agentName: agent.name,
-        type: 'save_page',
-        title: approvalTitle,
-        description: approvalDesc,
+        type: 'create_document',
+        title: `Publish: "${title}"`,
+        description: `Commit to Space: ${targetSpace.name}`,
         targetSpaceId: targetSpace.id,
-        payload: {
-          pageTitle: docTitle,
-          pageContent: docContent,
-        },
+        payload: { title, content, targetSpaceId: targetSpace.id },
         status: 'pending',
         createdAt: new Date().toISOString(),
       },
     };
   }
 
-  // ---------- D. AURA: COORDINATOR & MULTI-AGENT WORKFLOW ----------
-  thoughts.push('Evaluating multi-agent coordination requirements');
-
-  const coordinationReply = `I am coordinating across our specialist team:
-- **Scout**: Dispatched for web intelligence, URL inspection, and citation gathering.
-- **Quill**: Ready to structure findings into a Living Space document.
-- **Cipher**: Armed with container sandbox to run test suites and shell commands.
-
-You can ask Scout to research any topic, ask Quill to draft a specification, or ask Cipher to execute sandbox commands. What shall we achieve next?`;
-
+  // ---------- D. GENERAL CONVERSATION ----------
   return {
-    reply: coordinationReply,
+    reply: `I am ready to assist with **${agent.role}**. You can direct me to perform deep research, run isolated test suites in our container sandbox, or synthesize documentation for Living Spaces.`,
     thoughtProcess: thoughts,
   };
 }

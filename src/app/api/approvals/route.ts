@@ -91,15 +91,24 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. User interactive direct session execution: creates and authorizes in one step
+    // 3. User interactive direct session execution: strictly restricted to human interactive session
     if (action === 'create_and_approve') {
-      const { agentId, agentName, type, title, description, targetSpaceId, payload } = body;
+      const { agentId, agentName, type, title, description, targetSpaceId, payload, missionId } = body;
+
+      // Strict security boundary: autonomous agents and missions CANNOT auto-approve privileged operations!
+      if ((agentId && agentId.startsWith('agent-')) || missionId) {
+        logAuditEvent('APPROVAL_BYPASS_ATTEMPT', `Blocked automated self-approval attempt by ${agentId}`, 'denied', agentId);
+        return NextResponse.json({
+          error: 'Security violation: Autonomous agents and missions cannot auto-approve privileged commands. Review card human approval required.',
+        }, { status: 403 });
+      }
+
       const record = createApproval({
         agentId: agentId || 'user',
         agentName: agentName || 'User Session',
         type: type || 'run_command',
         title: title || 'User Interactive Execution',
-        description: description || 'Executed directly by authenticated user',
+        description: description || 'Executed directly by authenticated user in interactive terminal',
         targetSpaceId,
         payload: payload || {},
       });

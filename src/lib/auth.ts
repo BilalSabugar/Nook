@@ -14,16 +14,19 @@ export interface AuthValidationResult {
 }
 
 /**
- * Retrieves or initializes the persistent cryptographic server master secret.
- * Used for signing and verifying single-user session tokens.
+ * Retrieves the cryptographic server master secret derived from configured owner credentials.
+ * Strictly FAILS CLOSED: Never uses process.pid fallbacks or unconfigured auto-generation.
  */
 function getMasterSecret(): string {
-  if (process.env.NOOK_API_KEY && process.env.NOOK_API_KEY.trim().length >= 16) {
-    return process.env.NOOK_API_KEY.trim();
-  }
+  const configured = (
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    ''
+  ).trim();
 
-  if (process.env.NOOK_SECRET_TOKEN && process.env.NOOK_SECRET_TOKEN.trim().length >= 16) {
-    return process.env.NOOK_SECRET_TOKEN.trim();
+  if (configured && configured.length >= 8) {
+    return crypto.createHmac('sha256', configured).update('nook-owner-session-secret-v1').digest('hex');
   }
 
   try {
@@ -34,30 +37,25 @@ function getMasterSecret(): string {
       }
     }
   } catch {
-    // fall through to generate
+    // ignore
   }
 
-  try {
-    if (!fs.existsSync(STORAGE_DIR)) {
-      fs.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
-    }
-    const newSecret = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(SECRET_FILE, newSecret, { encoding: 'utf8', mode: 0o600 });
-    return newSecret;
-  } catch {
-    // In-memory fallback if disk is temporarily unwritable
-    return 'nook-fallback-hardened-entropy-' + process.pid;
-  }
+  throw new Error('Authentication setup incomplete: No master owner secret configured. Set NOOK_API_KEY or NOOK_PASSWORD in server environment.');
 }
 
 /**
  * Creates a cryptographically signed session token:
  * format: <sessionId>.<expiresAt>.<hmacSignature>
+ * Strictly fails closed if server auth setup is incomplete.
  */
 export function createSessionToken(
   sessionId = 'nook-owner',
   ttlMs = 7 * 24 * 60 * 60 * 1000 // 7 days
 ): string {
+  if (!isServerAuthSetupComplete()) {
+    throw new Error('Cannot issue session token: Server authentication setup is incomplete.');
+  }
+
   const secret = getMasterSecret();
   const expiresAt = Date.now() + ttlMs;
   const payload = `${sessionId}.${expiresAt}`;
@@ -69,6 +67,10 @@ export function createSessionToken(
  * Verifies that a session token is valid and unexpired.
  */
 export function verifySessionToken(token: string): { valid: boolean; sessionId?: string; error?: string } {
+  if (!isServerAuthSetupComplete()) {
+    return { valid: false, error: 'Server authentication setup is incomplete' };
+  }
+
   if (!token || typeof token !== 'string') {
     return { valid: false, error: 'Missing token' };
   }

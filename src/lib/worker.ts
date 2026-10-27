@@ -6,12 +6,91 @@ import {
   failJob,
   saveDocumentWithRevision,
   logAuditEvent,
+  listMissions,
+  updateMissionStatus,
+  listTasksForMission,
+  getDatabase,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';
 import { safeFetch } from './ssrf.ts';
+import { tickMission } from './orchestrator.ts';
 
 let isWorkerRunning = false;
 let workerInterval: NodeJS.Timeout | null = null;
+let lastCrashRecoveryCheck = 0;
+
+// Mission leases to prevent concurrent workers from stepping the same mission
+const missionLeases = new Map<string, number>();
+const LEASE_DURATION_MS = 25000; // 25 seconds
+
+/**
+ * Crash recovery: Detects abandoned jobs or mission tasks where the worker crashed,
+ * reclaims expired leases, and resumes or safely retries execution.
+ */
+export function recoverStaleJobsAndMissions(): { recoveredJobs: number; recoveredMissions: number } {
+  let recoveredJobs = 0;
+  let recoveredMissions = 0;
+  const now = Date.now();
+  const db = getDatabase();
+
+  // 1. Recover stale background jobs (running for > 45 seconds without completion)
+  try {
+    const staleJobs = db.prepare(`
+      SELECT * FROM background_jobs
+      WHERE status = 'running'
+    `).all() as any[];
+
+    for (const j of staleJobs) {
+      const updatedAtMs = new Date(j.updated_at || j.created_at).getTime();
+      if (now - updatedAtMs > 45000) {
+        const retryCount = (j.retry_count || 0) + 1;
+        if (retryCount <= 3) {
+          db.prepare(`
+            UPDATE background_jobs
+            SET status = 'queued', retry_count = ?, updated_at = ?
+            WHERE id = ?
+          `).run(retryCount, new Date().toISOString(), j.id);
+          recoveredJobs++;
+          logAuditEvent('WORKER_CRASH_RECOVERY', `Recovered crashed job ${j.id} (attempt ${retryCount}/3)`, 'recovered', j.agent_id);
+        } else {
+          db.prepare(`
+            UPDATE background_jobs
+            SET status = 'failed', error = 'Job exceeded max retries after worker process crashes', updated_at = ?
+            WHERE id = ?
+          `).run(new Date().toISOString(), j.id);
+          logAuditEvent('WORKER_JOB_EXHAUSTED', `Job ${j.id} failed after repeated worker crashes`, 'failed', j.agent_id);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. Recover stale mission tasks (in_progress for > 60 seconds)
+  try {
+    const staleTasks = db.prepare(`
+      SELECT * FROM agent_tasks
+      WHERE status = 'in_progress'
+    `).all() as any[];
+
+    for (const t of staleTasks) {
+      const updatedAtMs = new Date(t.updated_at || t.created_at).getTime();
+      if (now - updatedAtMs > 60000) {
+        db.prepare(`
+          UPDATE agent_tasks
+          SET status = 'pending', updated_at = ?
+          WHERE id = ?
+        `).run(new Date().toISOString(), t.id);
+        recoveredMissions++;
+        logAuditEvent('WORKER_CRASH_RECOVERY', `Recovered interrupted mission task ${t.id} to pending`, 'recovered', t.assigned_agent_id);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return { recoveredJobs, recoveredMissions };
+}
 
 /**
  * Executes a single claimed background job through authentic steps.
@@ -129,32 +208,95 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
 }
 
 /**
- * Worker tick: Claims and executes next queued job if available.
+ * Automatically advances any active background missions without requiring an open browser.
  */
-export async function tickWorker(): Promise<boolean> {
-  const job = claimNextQueuedJob();
-  if (!job) return false;
+export async function tickActiveMissions(): Promise<boolean> {
+  const missions = listMissions();
+  const now = Date.now();
+  let advancedAny = false;
 
-  await executeJob(job);
-  return true;
+  for (const m of missions) {
+    if (m.status !== 'active' && m.status !== 'draft') continue;
+
+    // Check lease to avoid duplicate worker execution
+    const leaseExpires = missionLeases.get(m.id) || 0;
+    if (now < leaseExpires) continue;
+
+    // Acquire lease
+    missionLeases.set(m.id, now + LEASE_DURATION_MS);
+
+    try {
+      const updated = await tickMission(m.id);
+      advancedAny = true;
+
+      // If mission reached terminal or paused state, release lease
+      if (updated.status === 'completed' || updated.status === 'failed' || updated.status === 'paused' || updated.status === 'cancelled') {
+        missionLeases.delete(m.id);
+      }
+    } catch (err: any) {
+      missionLeases.delete(m.id);
+      logAuditEvent('MISSION_WORKER_ERROR', `Worker failed ticking mission ${m.id}: ${err.message}`, 'error', 'agent-aura');
+    }
+  }
+
+  return advancedAny;
 }
 
 /**
- * Starts durable worker loop.
+ * Worker tick: Claims next queued job and advances active missions.
+ */
+export async function tickWorker(): Promise<boolean> {
+  const now = Date.now();
+
+  // Periodic crash recovery check every 30 seconds
+  if (now - lastCrashRecoveryCheck > 30000) {
+    lastCrashRecoveryCheck = now;
+    recoverStaleJobsAndMissions();
+  }
+
+  // 1. Advance active missions
+  const missionProgress = await tickActiveMissions();
+
+  // 2. Claim and execute queued jobs
+  const job = claimNextQueuedJob();
+  if (job) {
+    await executeJob(job);
+    return true;
+  }
+
+  return missionProgress;
+}
+
+/**
+ * Starts durable worker loop inside the server environment.
  */
 export function ensureWorkerStarted(): void {
   if (isWorkerRunning) return;
   isWorkerRunning = true;
 
+  // Run initial crash recovery on startup
+  recoverStaleJobsAndMissions();
+
   workerInterval = setInterval(async () => {
     try {
       await tickWorker();
     } catch (e) {
-      console.error('Worker loop tick error:', e);
+      console.error('Worker supervisor tick error:', e);
     }
-  }, 3000);
+  }, 2500);
 
   if (workerInterval.unref) {
     workerInterval.unref();
   }
+}
+
+/**
+ * Stops worker supervisor cleanly.
+ */
+export function stopWorker(): void {
+  if (workerInterval) {
+    clearInterval(workerInterval);
+    workerInterval = null;
+  }
+  isWorkerRunning = false;
 }

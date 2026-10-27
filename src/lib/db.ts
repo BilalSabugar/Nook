@@ -877,7 +877,7 @@ export interface DbAgentTask {
   verification?: {
     verified: boolean;
     verifiedAt?: string;
-    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval';
+    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval' | 'structured_test_runner';
     details: string;
   };
   approvalId?: string;
@@ -1164,7 +1164,7 @@ export function verifyAgentTask(
   id: string,
   verification: {
     verified: boolean;
-    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval';
+    method: 'test_exit_code' | 'citation_validation' | 'schema_check' | 'human_approval' | 'structured_test_runner';
     details: string;
   }
 ): void {

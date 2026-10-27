@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
@@ -6,19 +6,80 @@ import { logAuditEvent } from './db.ts';
 
 const execPromise = util.promisify(exec);
 
+/**
+ * Spawns an executable directly with arguments array, bypassing host shell parsing.
+ * Eliminates host shell metacharacter expansion and injection vulnerabilities.
+ */
+function spawnBuffer(
+  executable: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number } = {}
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let completed = false;
+    const maxBuf = options.maxBuffer ?? 256 * 1024;
+
+    const child = spawn(executable, args, {
+      cwd: options.cwd,
+      env: options.env,
+      shell: false, // Critical: prevent host shell metacharacter interpretation
+      windowsHide: true,
+    });
+
+    const timer = options.timeout ? setTimeout(() => {
+      if (!completed) {
+        completed = true;
+        child.kill('SIGKILL');
+        resolve({ stdout, stderr: stderr + `\nExecution timed out after ${options.timeout}ms`, exitCode: 124 });
+      }
+    }, options.timeout) : null;
+
+    child.stdout?.on('data', (data) => {
+      if (stdout.length < maxBuf) {
+        stdout += data.toString();
+      }
+    });
+
+    child.stderr?.on('data', (data) => {
+      if (stderr.length < maxBuf) {
+        stderr += data.toString();
+      }
+    });
+
+    child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
+      if (!completed) {
+        completed = true;
+        resolve({ stdout, stderr: err.message, exitCode: 1 });
+      }
+    });
+
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (!completed) {
+        completed = true;
+        resolve({ stdout, stderr, exitCode: code ?? 0 });
+      }
+    });
+  });
+}
+
 export interface SandboxExecutionOptions {
   agentId: string;
   command: string;
   timeoutMs?: number;
   maxBufferBytes?: number;
   virtualFiles?: Array<{ name?: string; path?: string; content?: string }>;
+  allowHostFallback?: boolean;
 }
 
 export interface SandboxExecutionResult {
   stdout: string;
   stderr: string;
   exitCode: number;
-  isolatedRuntime: 'docker_container' | 'process_jail';
+  isolatedRuntime: 'docker_container' | 'process_jail' | 'none';
   executionTimeMs: number;
   sandboxDir: string;
 }
@@ -52,9 +113,9 @@ async function isDockerAvailable(): Promise<boolean> {
   }
   try {
     // Fast check: verify Docker daemon is responsive AND node:22-alpine image is locally cached.
-    // Inspecting avoids slow image pulls or Docker Hub rate limits during unprivileged execution.
-    await execPromise('docker image inspect node:22-alpine', { timeout: 1500 });
-    dockerAvailableCache = true;
+    // Uses direct spawnBuffer without shell to avoid host shell invocation.
+    const res = await spawnBuffer('docker', ['image', 'inspect', 'node:22-alpine'], { timeout: 1500 });
+    dockerAvailableCache = res.exitCode === 0 && res.stdout.length > 0;
   } catch {
     dockerAvailableCache = false;
   }
@@ -64,7 +125,7 @@ async function isDockerAvailable(): Promise<boolean> {
 /**
  * Pre-execution security filter: validates command against path escape and destructive attacks.
  */
-export function validateCommandSafety(cleanCmd: string, agentId: string): { safe: boolean; reason?: string } {
+export function validateCommandSafety(cleanCmd: string, _agentId: string): { safe: boolean; reason?: string } {
   // Reject traversal escaping agent root
   if (/\.\.[\/\\]\.\.[\/\\]/.test(cleanCmd) || /\.\.[\/\\]/.test(cleanCmd)) {
     // Specifically check if attempting to read parent directory or traverse into other agent workspaces
@@ -184,24 +245,56 @@ export async function executeSandboxedCommand(
         'sh', '-c', cleanCmd,
       ];
 
-      const { stdout, stderr } = await execPromise(`docker ${dockerArgs.join(' ')}`, {
+      // Execute docker directly via spawnBuffer: zero shell interpolation on host
+      const dockerRes = await spawnBuffer('docker', dockerArgs, {
         timeout: timeoutMs,
         maxBuffer,
       });
 
-      return {
-        stdout: stdout || '',
-        stderr: stderr || '',
-        exitCode: 0,
-        isolatedRuntime: 'docker_container',
-        executionTimeMs: Date.now() - startTime,
-        sandboxDir: `/workspace/${safeAgentId}`,
-      };
-    } catch (dockerErr: any) {
-      // If docker fails to launch container or image, fall through seamlessly to hardened process jail
-      logAuditEvent('SANDBOX_FALLBACK', `Container runtime error (${dockerErr.message || 'error'}), falling back to process jail`, 'fallback', safeAgentId);
+      if (dockerRes.exitCode === 0 || (dockerRes.stdout && !dockerRes.stderr.includes('Error response from daemon'))) {
+        return {
+          stdout: dockerRes.stdout,
+          stderr: dockerRes.stderr,
+          exitCode: dockerRes.exitCode,
+          isolatedRuntime: 'docker_container',
+          executionTimeMs: Date.now() - startTime,
+          sandboxDir: `/workspace/${safeAgentId}`,
+        };
+      }
+      logAuditEvent('SANDBOX_FALLBACK', `Container runtime exit code ${dockerRes.exitCode}: ${dockerRes.stderr}`, 'fallback', safeAgentId);
+    } catch (dockerErr: unknown) {
+      const error = dockerErr as Error;
+      logAuditEvent('SANDBOX_FALLBACK', `Container runtime error (${error.message || 'error'}), evaluating fallback policy`, 'fallback', safeAgentId);
     }
   }
+
+  // Fail-closed security guard: unconfined host execution is forbidden in production
+  const allowHostFallback =
+    options.allowHostFallback !== undefined
+      ? options.allowHostFallback
+      : (process.env.NOOK_ALLOW_INSECURE_HOST_EXEC === 'true' ||
+         process.env.NODE_ENV === 'test' ||
+         process.env.NODE_ENV === 'development' ||
+         process.env.npm_lifecycle_event === 'test');
+
+  if (!allowHostFallback) {
+    logAuditEvent(
+      'SANDBOX_FAIL_CLOSED',
+      'Execution denied: Container isolation is unavailable and host fallback is blocked by security policy',
+      'blocked',
+      safeAgentId
+    );
+    return {
+      stdout: '',
+      stderr: 'Security Policy Violation: Isolated container runtime (Docker) is unavailable. Command execution aborted to prevent unconfined host shell access. (Set NOOK_ALLOW_INSECURE_HOST_EXEC=true to allow local dev/test host execution).',
+      exitCode: 126,
+      isolatedRuntime: 'none',
+      executionTimeMs: Date.now() - startTime,
+      sandboxDir: `/workspace/${safeAgentId}`,
+    };
+  }
+
+  logAuditEvent('SANDBOX_HOST_FALLBACK', 'Warning: Executing command in host process jail (container runtime unavailable)', 'fallback', safeAgentId);
 
   // 5. Hardened Process Jail Execution
   // Scrub environment: Drop all secrets, API keys, tokens, and host env variables

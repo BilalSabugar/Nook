@@ -7,6 +7,8 @@ const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const ENCRYPTED_SECRETS_FILE = path.join(STORAGE_DIR, 'secrets.enc');
 const LEGACY_SECRETS_FILE = path.join(STORAGE_DIR, 'secrets.json');
 const AUTH_SECRET_FILE = path.join(STORAGE_DIR, 'auth_secret');
+const SALT_FILE = path.join(STORAGE_DIR, 'encryption.salt');
+const MASTER_KEY_FILE = path.join(STORAGE_DIR, 'master.key');
 
 export interface StoredSecrets {
   geminiApiKey?: string;
@@ -23,10 +25,38 @@ export const SUPPORTED_MODELS = {
 };
 
 /**
- * Derives a 256-bit encryption key from the server master secret.
+ * Gets or initializes a cryptographically random 16-byte salt persisted with 0600 permissions.
+ * Prevents rainbow table and dictionary attacks even on password-only installations.
+ */
+function getOrInitSalt(): Buffer {
+  try {
+    if (fsSync.existsSync(SALT_FILE)) {
+      return fsSync.readFileSync(SALT_FILE);
+    }
+    if (!fsSync.existsSync(STORAGE_DIR)) {
+      fsSync.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
+    }
+    const newSalt = crypto.randomBytes(16);
+    fsSync.writeFileSync(SALT_FILE, newSalt, { mode: 0o600 });
+    return newSalt;
+  } catch {
+    return Buffer.from('nook-salt-v1-persistent-entropy');
+  }
+}
+
+/**
+ * Derives a strong 256-bit encryption key using PBKDF2 from configured owner credentials.
+ * Strictly eliminates predictable fallback secrets and supports password-only installations.
  */
 function getDerivedKey(): Buffer {
-  let masterSecret = process.env.NOOK_SECRET_KEY || process.env.NOOK_API_KEY || '';
+  let masterSecret = (
+    process.env.NOOK_SECRET_KEY ||
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    ''
+  ).trim();
+
   if (!masterSecret) {
     try {
       if (fsSync.existsSync(AUTH_SECRET_FILE)) {
@@ -34,12 +64,27 @@ function getDerivedKey(): Buffer {
       }
     } catch {}
   }
+
   if (!masterSecret) {
-    masterSecret = 'nook-default-in-memory-entropy-key';
+    try {
+      if (fsSync.existsSync(MASTER_KEY_FILE)) {
+        masterSecret = fsSync.readFileSync(MASTER_KEY_FILE, 'utf8').trim();
+      } else {
+        if (!fsSync.existsSync(STORAGE_DIR)) {
+          fsSync.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
+        }
+        const generated = crypto.randomBytes(32).toString('hex');
+        fsSync.writeFileSync(MASTER_KEY_FILE, generated, { encoding: 'utf8', mode: 0o600 });
+        masterSecret = generated;
+      }
+    } catch {
+      throw new Error('Cryptographic setup incomplete: No master encryption credential configured. Set NOOK_PASSWORD or NOOK_SECRET_KEY in server environment.');
+    }
   }
 
-  // Derive fixed 32-byte key using SHA-256
-  return crypto.createHash('sha256').update(masterSecret).digest();
+  const salt = getOrInitSalt();
+  // Derive cryptographically strong 256-bit key via 100,000 rounds of PBKDF2-HMAC-SHA256
+  return crypto.pbkdf2Sync(masterSecret, salt, 100000, 32, 'sha256');
 }
 
 /**

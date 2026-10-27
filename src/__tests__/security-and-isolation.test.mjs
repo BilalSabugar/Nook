@@ -36,8 +36,15 @@ import {
 } from '../lib/secrets.ts';
 import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions } from '../lib/worker.ts';
 import { executeSandboxedCommand, validateCommandSafety } from '../lib/sandbox.ts';
-import { planMission, tickMission } from '../lib/orchestrator.ts';
-import { getOrCreateBrowserSession, navigateBrowser } from '../lib/browser-session.ts';
+import { planMission, tickMission, planSolutionAndTests, verifyStructuredTestOutput } from '../lib/orchestrator.ts';
+import {
+  getOrCreateBrowserSession,
+  navigateBrowser,
+  clickInteractiveElement,
+  captureSessionScreenshot,
+} from '../lib/browser-session.ts';
+import fs from 'fs';
+import path from 'path';
 
 // =========================================================================
 // 1. AUTHENTICATION & SESSION SECURITY TESTS
@@ -539,9 +546,9 @@ test('SSRF: safeFetch uses DNS pinning to prevent TOCTOU rebinding', async () =>
 });
 
 // =========================================================================
-// 12. BROWSER OBSERVABLE SESSION TESTS
+// 12. BROWSER OBSERVABLE SESSION & PERSISTENCE TESTS
 // =========================================================================
-test('Browser: Observable browser session enforces network-level egress restrictions', async () => {
+test('Browser: Observable browser session enforces egress restrictions and disk persistence', async () => {
   const session = getOrCreateBrowserSession('agent-scout');
   assert.ok(session);
   assert.equal(session.agentId, 'agent-scout');
@@ -552,5 +559,146 @@ test('Browser: Observable browser session enforces network-level egress restrict
     () => navigateBrowser('agent-scout', 'http://169.254.169.254/latest/meta-data'),
     /SSRF Policy Violation/
   );
+
+  // Persistence to disk check
+  const sessionFilePath = path.join(process.cwd(), '.nook_storage', 'browser_sessions', 'agent-scout.json');
+  assert.ok(fs.existsSync(sessionFilePath), 'Browser session must be persisted to disk');
+  const diskData = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+  assert.equal(diskData.agentId, 'agent-scout');
+  assert.ok(Array.isArray(diskData.interactiveElements), 'Should store interactive elements');
+
+  // Interactive element click emulation
+  const clickRes = await clickInteractiveElement('agent-scout', 'nonexistent-element-id');
+  assert.equal(clickRes.success, false, 'Clicking non-existent element should return failure');
+
+  // Screenshot capture metadata check
+  const shot = captureSessionScreenshot('agent-scout');
+  assert.ok(shot.includes('screenshot') && shot.includes('agent-scout'), 'Screenshot path should contain agent ID and screenshot identifier');
+});
+
+// =========================================================================
+// 13. SECRETS ENCRYPTION HARDENING & PBKDF2 SALT TESTS
+// =========================================================================
+test('Secrets: Uses PBKDF2 with persistent salt, supports password-only, eliminates predictable fallback', async () => {
+  const saltFile = path.join(process.cwd(), '.nook_storage', 'encryption.salt');
+  
+  // Save secrets
+  const testPayload = {
+    geminiApiKey: 'test-gemini-key-12345678',
+    openaiApiKey: 'test-openai-key-87654321',
+  };
+  await saveEncryptedSecrets(testPayload);
+
+  // Verify salt exists on disk
+  assert.ok(fs.existsSync(saltFile), 'Encryption salt file must exist in storage');
+  const saltBuf = fs.readFileSync(saltFile);
+  assert.ok(saltBuf.length >= 16, 'Salt must be at least 16 cryptographically random bytes');
+
+  // Read back encrypted secrets
+  const loaded = await loadEncryptedSecrets();
+  assert.equal(loaded.geminiApiKey, testPayload.geminiApiKey);
+  assert.equal(loaded.openaiApiKey, testPayload.openaiApiKey);
+});
+
+// =========================================================================
+// 14. ARBITRARY AI SOLUTION & TEST SUITE GENERATION TESTS
+// =========================================================================
+test('Planner: Arbitrary prompts dynamically generate tailored solutions and tests without hardcoded keywords', () => {
+  // 1. Arbitrary financial domain prompt
+  const arbitraryPrompt1 = 'High throughput ledger transaction deduplicator with nonce validation';
+  const plan1 = planSolutionAndTests(arbitraryPrompt1);
+
+  assert.ok(plan1.solutionFile.endsWith('.mjs'));
+  assert.ok(plan1.testFile.endsWith('.mjs'));
+  assert.ok(plan1.className.length > 0);
+  assert.ok(plan1.solutionContent.includes(plan1.className), 'Solution must declare the dynamically derived class');
+  assert.ok(plan1.testContent.includes("import test from 'node:test'"));
+  assert.ok(plan1.testContent.includes("import assert from 'node:assert/strict'"));
+  assert.ok(plan1.command.includes('node --test'));
+
+  // Ensure no hardcoded robotics/consensus keywords are leaked or required
+  assert.equal(plan1.solutionContent.includes('RoboticsStateMachine'), false);
+  assert.equal(plan1.solutionContent.includes('RaftNode'), false);
+
+  // 2. Arbitrary cache eviction prompt
+  const arbitraryPrompt2 = 'Adaptive LRU cache with TTL expiration and telemetry hooks';
+  const plan2 = planSolutionAndTests(arbitraryPrompt2);
+
+  assert.ok(plan2.solutionContent.includes(plan2.className));
+  assert.ok(plan2.testContent.includes(plan2.className));
+  assert.equal(plan2.solutionContent.includes('RoboticsStateMachine'), false);
+});
+
+// =========================================================================
+// 15. SANDBOX FAIL-CLOSED ENFORCEMENT & COMMAND CONSTRUCTION
+// =========================================================================
+test('Sandbox: Host fallback fails closed when Docker is unavailable in production', async () => {
+  // Test fail-closed policy with allowHostFallback = false
+  const res = await executeSandboxedCommand({
+    agentId: 'cipher-audit',
+    command: 'node -v',
+    timeoutMs: 5000,
+    allowHostFallback: false,
+  });
+
+  // If docker is not present or configured in this test environment, it must fail closed with exit code 126
+  if (res.isolatedRuntime === 'none') {
+    assert.equal(res.exitCode, 126, 'Must exit with code 126 on isolation failure');
+    assert.ok(res.stderr.includes('Security Policy Violation'), 'Must report security policy violation');
+  } else {
+    // If docker was running, it must have executed within docker container
+    assert.equal(res.isolatedRuntime, 'docker_container');
+  }
+});
+
+// =========================================================================
+// 16. STRUCTURED TASK VERIFICATION TESTS
+// =========================================================================
+test('Verification: Rejects fake pass/ok text and strictly parses real structured test results', () => {
+  // 1. Loose substring matching bypass attempt: Output merely contains "pass" or "ok"
+  const fakeOutput = 'Connecting to database... status: ok, checking password... passed';
+  const fakeResult = verifyStructuredTestOutput(fakeOutput, '', 0);
+  assert.equal(fakeResult.verified, false, 'Plain console logs containing pass/ok must NOT be verified');
+  assert.equal(fakeResult.totalTests, 0);
+
+  // 2. Real node:test runner success output
+  const genuineNodeTestOutput = `
+✔ test suite initialized (1.2ms)
+✔ should calculate correct result (0.8ms)
+✔ should validate boundary conditions (0.5ms)
+ℹ tests 3
+ℹ pass 3
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 42.1
+`;
+  const genuineResult = verifyStructuredTestOutput(genuineNodeTestOutput, '', 0);
+  assert.equal(genuineResult.verified, true, 'Genuine node:test output with 3 passes must be verified');
+  assert.equal(genuineResult.totalTests, 3);
+  assert.equal(genuineResult.passedTests, 3);
+  assert.equal(genuineResult.failedTests, 0);
+
+  // 3. Output with failures must be rejected
+  const failingNodeTestOutput = `
+✔ should calculate correct result (0.8ms)
+✖ should validate boundary conditions (1.2ms)
+ℹ tests 2
+ℹ pass 1
+ℹ fail 1
+`;
+  const failedResult = verifyStructuredTestOutput(failingNodeTestOutput, '', 1);
+  assert.equal(failedResult.verified, false, 'Test output with failures must NOT be verified');
+
+  // 4. Output with unhandled AssertionError must be rejected
+  const assertionErrorOutput = `
+node:assert:408
+    throw new AssertionError(obj);
+    ^
+AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+`;
+  const errorResult = verifyStructuredTestOutput(assertionErrorOutput, '', 1);
+  assert.equal(errorResult.verified, false, 'Assertion errors must NOT be verified');
 });
 

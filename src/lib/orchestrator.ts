@@ -28,7 +28,8 @@ export interface MissionPlanInput {
 }
 
 import { planSolutionAndTests } from './solution-planner.ts';
-export { planSolutionAndTests };
+import { verifyStructuredTestOutput } from './test-verifier.ts';
+export { planSolutionAndTests, verifyStructuredTestOutput };
 
 /**
  * Aura's planning engine: decomposes high-level user objective into structured,
@@ -478,14 +479,16 @@ ${citationsList}
       maxBufferBytes: 1024 * 256,
     });
 
-    const stdout = (sandboxResult.stdout || sandboxResult.stderr || '[Success]').trim();
+    const stdout = (sandboxResult.stdout || '').trim();
+    const stderr = (sandboxResult.stderr || '').trim();
     const exitCode = sandboxResult.exitCode;
-    const testPassed = exitCode === 0 && (stdout.includes('✔') || stdout.includes('pass') || stdout.includes('ok'));
+    const testVerification = verifyStructuredTestOutput(stdout, stderr, exitCode);
+    const testPassed = testVerification.verified;
 
     addAgentTaskObservation(task.id, {
       tool: 'request_command_execution',
       input: { command: rawCmd },
-      output: stdout.slice(0, 500),
+      output: (stdout || stderr || '[Success]').slice(0, 500),
       status: testPassed ? 'success' : 'error',
     });
 
@@ -495,11 +498,12 @@ ${citationsList}
       agentId: 'agent-cipher',
       agentName: 'Cipher',
       actionType: 'shell_exec',
-      summary: `Cipher executed "${rawCmd}" in isolated sandbox (exit code ${exitCode}, tests passed: ${testPassed})`,
+      summary: `Cipher executed "${rawCmd}" in isolated sandbox (exit code ${exitCode}, tests passed: ${testPassed}, passed: ${testVerification.passedTests}/${testVerification.totalTests})`,
       details: {
-        output: stdout.slice(0, 1000),
+        output: (stdout || stderr || '[No Output]').slice(0, 1000),
         exitCode,
         testsPassed: testPassed,
+        testVerification,
         artifacts: [solutionFile, testFile],
       },
       status: testPassed ? 'success' : 'failed',
@@ -507,10 +511,8 @@ ${citationsList}
 
     verifyAgentTask(task.id, {
       verified: testPassed,
-      method: 'test_exit_code',
-      details: testPassed
-        ? `Automated test suite passed all assertions with exit code 0.`
-        : `Automated test suite failed with exit code ${exitCode}. Details: ${stdout.slice(0, 100)}`,
+      method: 'structured_test_runner',
+      details: testVerification.details,
     });
 
     return updateAgentTask(task.id, {

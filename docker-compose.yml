@@ -15,6 +15,9 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - NOOK_PASSWORD=${NOOK_PASSWORD:-}
+      - NOOK_API_KEY=${NOOK_API_KEY:-}
+      - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
       interval: 30s
@@ -23,7 +26,34 @@ services:
       start_period: 15s
     volumes:
       - nook_data:/app/.nook_storage
+      - nook_sandboxes:/app/.nook_sandboxes
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nook-worker
+    image: nook:latest
+    restart: unless-stopped
+    command: ["npm", "run", "worker"]
+    depends_on:
+      nook:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - NOOK_PASSWORD=${NOOK_PASSWORD:-}
+      - NOOK_API_KEY=${NOOK_API_KEY:-}
+      - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
+    volumes:
+      - nook_data:/app/.nook_storage
+      - nook_sandboxes:/app/.nook_sandboxes
 
 volumes:
   nook_data:
+    driver: local
+  nook_sandboxes:
     driver: local

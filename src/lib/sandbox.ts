@@ -80,7 +80,7 @@ export interface SandboxExecutionResult {
   stdout: string;
   stderr: string;
   exitCode: number;
-  isolatedRuntime: 'docker_container' | 'process_jail' | 'none';
+  isolatedRuntime: 'docker_container' | 'none';
   executionTimeMs: number;
   sandboxDir: string;
 }
@@ -202,7 +202,7 @@ export async function executeSandboxedCommand(
       stdout: '',
       stderr: safetyCheck.reason || 'Command rejected by sandbox isolation policy.',
       exitCode: 1,
-      isolatedRuntime: 'process_jail',
+      isolatedRuntime: 'none',
       executionTimeMs: Date.now() - startTime,
       sandboxDir: `/workspace/${safeAgentId}`,
     };
@@ -275,7 +275,7 @@ export async function executeSandboxedCommand(
           stdout?: string;
           stderr?: string;
           exitCode?: number;
-          isolatedRuntime?: 'docker_container' | 'process_jail' | 'none';
+          isolatedRuntime?: 'docker_container' | 'none';
         };
         return {
           stdout: result.stdout || '',

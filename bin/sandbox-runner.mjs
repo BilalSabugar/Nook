@@ -446,27 +446,23 @@ const server = http.createServer(async (req, res) => {
         sanitizedEnv.USER = `agent_${safeAgentId}`;
         sanitizedEnv.NODE_OPTIONS = '--max-old-space-size=128';
 
-        // 5. Select isolated shell or container runtime
-        const isWin = process.platform === 'win32';
-        const executable = isWin ? 'powershell.exe' : '/bin/sh';
-        const args = isWin
-          ? ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', command]
-          : ['-c', command];
-
-        // 6. Execute with genuine per-task container isolation.
-        // Fallback to shared process execution inside the runner container is strictly denied in production.
+        // 5. Execute with genuine per-task container isolation ONLY.
+        // Fallback to shared process execution inside the runner container is completely removed.
+        // If container execution is unavailable, execution is strictly denied.
         let result;
-        let runtimeUsed = 'docker_container';
+        const dockerBin = process.env.DOCKER_BIN || 'docker';
+        const dockerPrefix = process.env.DOCKER_ARGS_PREFIX ? [process.env.DOCKER_ARGS_PREFIX] : [];
 
         if (process.env.NOOK_DISABLE_DOCKER !== 'true') {
           try {
             const hasDocker = await new Promise((resolve) => {
-              const p = spawn('docker', ['version'], { stdio: 'ignore' });
+              const p = spawn(dockerBin, [...dockerPrefix, 'version'], { stdio: 'ignore' });
               p.on('close', (c) => resolve(c === 0));
               p.on('error', () => resolve(false));
             });
             if (hasDocker) {
               const dockerArgs = [
+                ...dockerPrefix,
                 'run', '--rm',
                 '--network', 'none',
                 '--memory', '128m',
@@ -477,37 +473,25 @@ const server = http.createServer(async (req, res) => {
                 'node:22-alpine',
                 'sh', '-c', command,
               ];
-              result = await spawnIsolatedBuffer('docker', dockerArgs, {
+              result = await spawnIsolatedBuffer(dockerBin, dockerArgs, {
                 timeout: clampedTimeout,
                 maxBuffer: clampedBuffer,
               });
-              runtimeUsed = 'docker_container';
             }
           } catch {}
         }
 
-        // Strict isolation enforcement: if container runtime is unavailable,
-        // and unsafe host fallback is not explicitly permitted for local test harnesses, deny execution!
+        // Strict isolation enforcement: if container runtime is unavailable, deny execution!
         if (!result) {
-          if (process.env.ALLOW_UNSAFE_PROCESS_JAIL === 'true' && process.env.NODE_ENV !== 'production') {
-            result = await spawnIsolatedBuffer(executable, args, {
-              cwd: taskWorkspaceDir,
-              env: sanitizedEnv,
-              timeout: clampedTimeout,
-              maxBuffer: clampedBuffer,
-            });
-            runtimeUsed = 'process_jail';
-          } else {
-            res.writeHead(422, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              error: 'Execution denied: Genuine per-task container isolation is required. Unsafe host/container fallback is disabled.',
-              exitCode: 126,
-              isolatedRuntime: 'none',
-              sandboxDir: taskWorkspaceDir,
-              agentId: safeAgentId,
-            }));
-            return;
-          }
+          res.writeHead(422, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            error: 'Execution denied: Genuine per-task container isolation is required. Unsafe host/container fallback is disabled.',
+            exitCode: 126,
+            isolatedRuntime: 'none',
+            sandboxDir: taskWorkspaceDir,
+            agentId: safeAgentId,
+          }));
+          return;
         }
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -515,7 +499,7 @@ const server = http.createServer(async (req, res) => {
           stdout: result.stdout,
           stderr: result.stderr,
           exitCode: result.exitCode,
-          isolatedRuntime: runtimeUsed,
+          isolatedRuntime: 'docker_container',
           sandboxDir: taskWorkspaceDir,
           agentId: safeAgentId,
         }));

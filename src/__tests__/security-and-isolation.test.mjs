@@ -79,7 +79,8 @@ try {
       ...process.env,
       PORT: '4010',
       SANDBOX_RUNNER_SECRET: TEST_RUNNER_SECRET,
-      ALLOW_UNSAFE_PROCESS_JAIL: 'true',
+      DOCKER_BIN: process.execPath,
+      DOCKER_ARGS_PREFIX: path.resolve(process.cwd(), 'bin/mock-docker.mjs'),
     },
     stdio: 'ignore',
   });
@@ -528,7 +529,7 @@ test('Sandbox: Command execution enforces resource limits, scrubs secrets, and b
 
     assert.equal(res.exitCode, 0, 'Safe command must succeed in sandbox');
     assert.ok(res.stdout.includes('SANDBOX_OK'), 'Output should contain command result');
-    assert.ok(res.isolatedRuntime === 'docker_container' || res.isolatedRuntime === 'process_jail');
+    assert.equal(res.isolatedRuntime, 'docker_container', 'Runtime must strictly be docker_container');
   } finally {
     process.env.NOOK_API_KEY = origKey;
   }
@@ -1388,8 +1389,8 @@ test('Cipher Mission: Full end-to-end execution path with human approval, task w
 // =========================================================================
 // 38. RUNNER STRICT ISOLATION: DENIES FALLBACK WHEN DOCKER IS UNAVAILABLE
 // =========================================================================
-test('Runner Isolation: Denies execution when genuine container isolation is unavailable and unsafe process jail is disabled', async () => {
-  // Start a test runner without ALLOW_UNSAFE_PROCESS_JAIL on port 4011
+test('Runner Isolation: Denies execution when genuine container isolation is unavailable', async () => {
+  // Start a test runner without container execution enabled on port 4011
   const strictSecret = crypto.randomBytes(32).toString('hex');
   const strictRunner = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
     env: {
@@ -1397,7 +1398,6 @@ test('Runner Isolation: Denies execution when genuine container isolation is una
       PORT: '4011',
       SANDBOX_RUNNER_SECRET: strictSecret,
       NOOK_DISABLE_DOCKER: 'true',
-      ALLOW_UNSAFE_PROCESS_JAIL: 'false',
     },
     stdio: 'ignore',
   });

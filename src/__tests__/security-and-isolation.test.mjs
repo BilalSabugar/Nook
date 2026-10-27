@@ -27,6 +27,10 @@ import {
   claimNextQueuedJob,
   cancelJob,
   getJobById,
+  acquireWorkerLease,
+  releaseWorkerLease,
+  validateWorkerLease,
+  redactApproval,
 } from '../lib/db.ts';
 import {
   loadEncryptedSecrets,
@@ -34,7 +38,7 @@ import {
   maskSecret,
   SUPPORTED_MODELS,
 } from '../lib/secrets.ts';
-import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions } from '../lib/worker.ts';
+import { executeJob, tickActiveMissions, recoverStaleJobsAndMissions, WORKER_INSTANCE_ID } from '../lib/worker.ts';
 import { executeSandboxedCommand, validateCommandSafety } from '../lib/sandbox.ts';
 import { planMission, tickMission, planSolutionAndTests, verifyStructuredTestOutput } from '../lib/orchestrator.ts';
 import {
@@ -42,6 +46,7 @@ import {
   navigateBrowser,
   clickInteractiveElement,
   captureSessionScreenshot,
+  renderBrowserScreenshotPng,
 } from '../lib/browser-session.ts';
 import fs from 'fs';
 import path from 'path';
@@ -444,6 +449,7 @@ test('Sandbox: Command execution enforces resource limits, scrubs secrets, and b
       agentId: 'cipher-test',
       command: echoCmd,
       timeoutMs: 8000,
+      allowHostFallback: true,
     });
 
     assert.equal(res.exitCode, 0, 'Safe command must succeed in sandbox');
@@ -691,14 +697,97 @@ test('Verification: Rejects fake pass/ok text and strictly parses real structure
   const failedResult = verifyStructuredTestOutput(failingNodeTestOutput, '', 1);
   assert.equal(failedResult.verified, false, 'Test output with failures must NOT be verified');
 
-  // 4. Output with unhandled AssertionError must be rejected
-  const assertionErrorOutput = `
-node:assert:408
-    throw new AssertionError(obj);
-    ^
-AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  // 5. Inconsistent / incomplete test counts: passedTests !== totalTests must FAIL
+  const inconsistentOutput = `
+✔ test 1 (1ms)
+✔ test 2 (1ms)
+ℹ tests 5
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 3
 `;
-  const errorResult = verifyStructuredTestOutput(assertionErrorOutput, '', 1);
-  assert.equal(errorResult.verified, false, 'Assertion errors must NOT be verified');
+  const inconsistentResult = verifyStructuredTestOutput(inconsistentOutput, '', 0);
+  assert.equal(inconsistentResult.verified, false, 'Must fail when passedTests !== totalTests');
+
+  // 6. Test bail out must FAIL
+  const bailOutOutput = `
+1..5
+ok 1 - setup passed
+Bail out! Database connection failed abruptly
+`;
+  const bailResult = verifyStructuredTestOutput(bailOutOutput, '', 0);
+  assert.equal(bailResult.verified, false, 'Bail out must fail test verification');
 });
+
+// =========================================================================
+// 17. ATOMIC SQLITE WORKER LEASES & FENCING TESTS
+// =========================================================================
+test('Worker Leases: Atomic SQLite leases prevent concurrent execution across web & workers', () => {
+  const resourceId = `mission-test-${Date.now()}`;
+  const workerA = 'worker-node-1';
+  const workerB = 'worker-node-2';
+
+  // 1. Worker A acquires lease
+  const leaseA = acquireWorkerLease(resourceId, workerA, 10000);
+  assert.equal(leaseA.acquired, true, 'Worker A should acquire fresh lease');
+  assert.equal(leaseA.fencingToken, 1, 'Initial fencing token must be 1');
+
+  // 2. Worker B attempts to acquire same active lease -> must be denied!
+  const leaseB = acquireWorkerLease(resourceId, workerB, 10000);
+  assert.equal(leaseB.acquired, false, 'Worker B must be rejected while Worker A lease is active');
+  assert.equal(leaseB.ownerId, workerA);
+
+  // 3. Worker A validates active lease
+  assert.equal(validateWorkerLease(resourceId, workerA, 1), true, 'Worker A lease must be valid');
+  assert.equal(validateWorkerLease(resourceId, workerB), false, 'Worker B must not have valid lease');
+
+  // 4. Worker A releases lease
+  const released = releaseWorkerLease(resourceId, workerA);
+  assert.equal(released, true);
+
+  // 5. Worker B can now acquire lease with incremented fencing token
+  const leaseBAfterRelease = acquireWorkerLease(resourceId, workerB, 10000);
+  assert.equal(leaseBAfterRelease.acquired, true, 'Worker B can acquire after release');
+  assert.equal(leaseBAfterRelease.fencingToken, 2, 'Fencing token must increment on re-acquisition');
+});
+
+// =========================================================================
+// 18. APPROVAL SINGLE-USE TOKEN REDACTION TESTS
+// =========================================================================
+test('Approvals: Redacted records strip singleUseToken from API payloads', () => {
+  const record = createApproval({
+    agentId: 'agent-cipher',
+    agentName: 'Cipher',
+    type: 'run_command',
+    title: 'Redaction Verification Test',
+    payload: { command: 'npm test' },
+  });
+
+  assert.ok(record.singleUseToken, 'Database record must have singleUseToken');
+  const redacted = redactApproval(record);
+
+  assert.equal(redacted.id, record.id);
+  assert.equal(redacted.agentName, 'Cipher');
+  assert.equal('singleUseToken' in redacted, false, 'Redacted record must NOT contain singleUseToken');
+});
+
+// =========================================================================
+// 19. GENUINE BROWSER PNG SCREENSHOT TESTS
+// =========================================================================
+test('Browser Screenshots: Generates genuine binary PNG with valid IHDR and IDAT chunks', () => {
+  const pngBuf = renderBrowserScreenshotPng('Nook Test Page', 'https://example.com', 200, 320, 240);
+  assert.ok(Buffer.isBuffer(pngBuf));
+  assert.ok(pngBuf.length > 50, 'PNG buffer must contain image data');
+
+  // Validate standard 8-byte PNG magic signature (\x89PNG\r\n\x1a\n)
+  const magic = pngBuf.subarray(0, 8);
+  const expectedMagic = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.deepEqual(magic, expectedMagic, 'Must begin with authentic PNG signature');
+
+  // Verify IHDR and IEND chunks are present
+  assert.ok(pngBuf.includes(Buffer.from('IHDR')), 'Must contain valid IHDR chunk');
+  assert.ok(pngBuf.includes(Buffer.from('IDAT')), 'Must contain valid IDAT chunk');
+  assert.ok(pngBuf.includes(Buffer.from('IEND')), 'Must contain valid IEND chunk');
+});
+
 

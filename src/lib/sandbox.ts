@@ -227,7 +227,39 @@ export async function executeSandboxedCommand(
     }
   }
 
-  // 4. Try Containerized Docker Execution if available
+  // 4. Try dedicated restricted sandbox runner service if configured
+  const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL;
+  if (sandboxServiceUrl) {
+    try {
+      const response = await fetch(`${sandboxServiceUrl}/exec`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentId: safeAgentId,
+          command: cleanCmd,
+          timeoutMs,
+          maxBufferBytes: maxBuffer,
+          virtualFiles: options.virtualFiles,
+        }),
+      });
+
+      if (response.ok) {
+        const result = (await response.json()) as any;
+        return {
+          stdout: result.stdout || '',
+          stderr: result.stderr || '',
+          exitCode: result.exitCode ?? 0,
+          isolatedRuntime: 'docker_container',
+          executionTimeMs: Date.now() - startTime,
+          sandboxDir: `/workspace/${safeAgentId}`,
+        };
+      }
+    } catch (serviceErr: unknown) {
+      logAuditEvent('SANDBOX_SERVICE_ERROR', `Sandbox runner service unavailable: ${serviceErr instanceof Error ? serviceErr.message : String(serviceErr)}`, 'fallback', safeAgentId);
+    }
+  }
+
+  // 5. Try Containerized Docker Execution if available
   const hasDocker = await isDockerAvailable();
   if (hasDocker) {
     try {
@@ -268,14 +300,9 @@ export async function executeSandboxedCommand(
     }
   }
 
-  // Fail-closed security guard: unconfined host execution is forbidden in production
-  const allowHostFallback =
-    options.allowHostFallback !== undefined
-      ? options.allowHostFallback
-      : (process.env.NOOK_ALLOW_INSECURE_HOST_EXEC === 'true' ||
-         process.env.NODE_ENV === 'test' ||
-         process.env.NODE_ENV === 'development' ||
-         process.env.npm_lifecycle_event === 'test');
+  // Fail-closed security guard: automatic host execution fallback is completely eliminated.
+  // Execution strictly fails closed unless explicitly permitted via options.allowHostFallback === true.
+  const allowHostFallback = options.allowHostFallback === true;
 
   if (!allowHostFallback) {
     logAuditEvent(
@@ -286,7 +313,7 @@ export async function executeSandboxedCommand(
     );
     return {
       stdout: '',
-      stderr: 'Security Policy Violation: Isolated container runtime (Docker) is unavailable. Command execution aborted to prevent unconfined host shell access. (Set NOOK_ALLOW_INSECURE_HOST_EXEC=true to allow local dev/test host execution).',
+      stderr: 'Security Policy Violation: Isolated container runtime (Docker) is unavailable. Command execution aborted to prevent unconfined host shell access. (Set allowHostFallback: true in test options or run with dedicated container runtime).',
       exitCode: 126,
       isolatedRuntime: 'none',
       executionTimeMs: Date.now() - startTime,

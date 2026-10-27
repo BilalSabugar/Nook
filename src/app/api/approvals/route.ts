@@ -6,6 +6,7 @@ import {
   decideApproval,
   verifyAndConsumeApproval,
   logAuditEvent,
+  redactApproval,
 } from '@/lib/db';
 
 /**
@@ -63,10 +64,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        approval: {
-          ...record,
-          // Token is kept on server until decision or returned for pending confirmation
-        },
+        approval: redactApproval(record),
       }, { status: 201 });
     }
 
@@ -86,7 +84,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         success: true,
-        approval: outcome.approval,
+        approval: redactApproval(outcome.approval),
       });
     }
 
@@ -115,7 +113,7 @@ export async function POST(req: NextRequest) {
       const outcome = decideApproval(record.id, 'approve', 'Authorized directly in authenticated interactive terminal');
       return NextResponse.json({
         success: true,
-        approval: outcome.approval,
+        approval: redactApproval(outcome.approval),
       }, { status: 201 });
     }
 
@@ -140,7 +138,7 @@ export async function POST(req: NextRequest) {
 
       return NextResponse.json({
         authorized: true,
-        approval: outcome.approval,
+        approval: redactApproval(outcome.approval),
       });
     }
 

@@ -29,9 +29,9 @@ export function verifyStructuredTestOutput(
 
   const combined = `${stdout}\n${stderr}`;
 
-  // Check for fatal errors, assertion failures, or unhandled exceptions
+  // Check for fatal errors, assertion failures, bailout, or unhandled exceptions
   if (
-    /AssertionError|UnhandledPromiseRejection|ERR_ASSERTION|SyntaxError|ReferenceError|TypeError/i.test(
+    /AssertionError|UnhandledPromiseRejection|ERR_ASSERTION|SyntaxError|ReferenceError|TypeError|Bail out!/i.test(
       combined
     )
   ) {
@@ -40,7 +40,7 @@ export function verifyStructuredTestOutput(
       totalTests: 0,
       passedTests: 0,
       failedTests: 1,
-      details: 'Test execution produced an assertion failure or unhandled runtime exception.',
+      details: 'Test execution produced an assertion failure, unhandled runtime exception, or test bail out.',
     };
   }
 
@@ -52,6 +52,8 @@ export function verifyStructuredTestOutput(
   const testsMatch = combined.match(/(?:ℹ|#)\s+tests\s+(\d+)/i);
   const passMatch = combined.match(/(?:ℹ|#)\s+pass\s+(\d+)/i);
   const failMatch = combined.match(/(?:ℹ|#)\s+fail\s+(\d+)/i);
+  const cancelledMatch = combined.match(/(?:ℹ|#)\s+cancelled\s+(\d+)/i);
+  const skippedMatch = combined.match(/(?:ℹ|#)\s+skipped\s+(\d+)/i);
 
   const checkmarkMatches = combined.match(/✔\s+[^\r\n]+/g) || [];
   const crossMatches = combined.match(/✖\s+[^\r\n]+/g) || [];
@@ -77,14 +79,19 @@ export function verifyStructuredTestOutput(
     totalTests = passedTests + failedTests;
   }
 
-  // Strict verification criteria:
-  // - At least one real test must have executed (totalTests > 0)
-  // - All executed tests must have passed (failedTests === 0 && passedTests === totalTests)
-  // - No failure markers (crossMatches === 0 && tapNotOkMatches === 0)
-  const hasNoFailures = failedTests === 0 && crossMatches.length === 0 && tapNotOkMatches.length === 0;
-  const verified = totalTests > 0 && passedTests > 0 && hasNoFailures;
+  const cancelledCount = cancelledMatch ? parseInt(cancelledMatch[1], 10) : 0;
+  const skippedCount = skippedMatch ? parseInt(skippedMatch[1], 10) : 0;
 
-  if (!verified) {
+  // Strict verification criteria:
+  // 1. At least one real test must have executed (totalTests > 0)
+  // 2. passedTests must strictly equal totalTests (all tests must have executed and passed)
+  // 3. failedTests must be strictly 0
+  // 4. No failures or cancelled tests
+  // 5. No failure markers (crossMatches === 0 && tapNotOkMatches === 0)
+  const hasNoFailures = failedTests === 0 && crossMatches.length === 0 && tapNotOkMatches.length === 0 && cancelledCount === 0;
+  const isStrictlyAllPassed = totalTests > 0 && passedTests === totalTests && hasNoFailures;
+
+  if (!isStrictlyAllPassed) {
     if (totalTests === 0) {
       return {
         verified: false,
@@ -93,6 +100,15 @@ export function verifyStructuredTestOutput(
         failedTests: 0,
         details:
           'No structured test runner assertions or results were detected in execution output. Plain text or console logs are insufficient for verification.',
+      };
+    }
+    if (passedTests !== totalTests) {
+      return {
+        verified: false,
+        totalTests,
+        passedTests,
+        failedTests,
+        details: `Test suite verification failed: only ${passedTests} of ${totalTests} tests passed (${failedTests} failed, ${cancelledCount} cancelled, ${skippedCount} skipped). All tests must pass.`,
       };
     }
     return {

@@ -174,11 +174,48 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
     const searchedQueries = [searchedQuery];
     const searchedSources = [searchUrl];
     const retrievedSources = [...links];
-    // Supporting sources are retrieved sources that contain substantive content matching query
-    const supportingSources = retrievedSources.filter((_, idx) => {
+
+    // Inspect actual source content via safeFetch to verify claims against primary text
+    const verifiedClaims: Array<{ sourceUrl: string; sourceTitle: string; snippet: string; verified: boolean }> = [];
+    const verifiedCitations: string[] = [];
+
+    for (let idx = 0; idx < Math.min(links.length, 3); idx++) {
+      const link = links[idx];
+      const title = titles[idx] || 'Source Document';
       const desc = (descriptions[idx] || '').trim();
-      return desc.length > 10 && !desc.toLowerCase().includes('may refer to');
-    });
+      if (!desc || desc.toLowerCase().includes('may refer to')) continue;
+
+      try {
+        const pageRes = await safeFetch(link, { timeoutMs: 4000 });
+        if (pageRes.ok && pageRes.bodyText) {
+          const bodyLower = pageRes.bodyText.toLowerCase();
+          const queryWords = searchedQuery.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+          const hasKeywordMatch = queryWords.length === 0 || queryWords.some((w) => bodyLower.includes(w));
+
+          if (hasKeywordMatch) {
+            const cleanText = pageRes.bodyText
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 300);
+
+            if (cleanText.length > 30) {
+              verifiedCitations.push(link);
+              verifiedClaims.push({
+                sourceUrl: link,
+                sourceTitle: title,
+                snippet: cleanText,
+                verified: true,
+              });
+            }
+          }
+        }
+      } catch {
+        // Fetch or DNS pinning check failed or timed out
+      }
+    }
+
+    const supportingSources = verifiedCitations;
 
     if (supportingSources.length > 0) {
       const citations = supportingSources;
@@ -190,13 +227,14 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
         agentId: 'agent-scout',
         agentName: 'Scout',
         actionType: 'browser_visit',
-        summary: `Scout collected ${citations.length} verified technical citations`,
+        summary: `Scout inspected and verified ${citations.length} primary source citations against page content`,
         details: {
           searchedQueries,
           searchedSources,
           retrievedSources,
           supportingSources,
           sourceCitations: citations,
+          verifiedClaims,
           findings: summaryFindings,
           sourceTitles: titles,
         },
@@ -205,7 +243,7 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
       verifyAgentTask(task.id, {
         verified: true,
         method: 'citation_validation',
-        details: `Verified ${citations.length} authentic source links from authoritative knowledge base.`,
+        details: `Verified ${citations.length} authentic source links after inspecting primary page content.`,
       });
 
       return updateAgentTask(task.id, {
@@ -216,6 +254,7 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
           retrievedSources,
           supportingSources,
           citations,
+          verifiedClaims,
           findings: summaryFindings,
           sourceTitles: titles,
         },
@@ -272,19 +311,30 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
 
     // Collect research outputs from dependencies
     let citations: string[] = [];
-    let findings = 'Foundational architecture principles verified.';
+    let findings = 'Foundational architecture principles.';
+    let isUpstreamVerified = true;
 
     for (const depId of task.dependencies) {
       const dep = getAgentTaskById(depId);
-      if (dep?.outputs?.citations) {
-        citations = citations.concat(dep.outputs.citations as string[]);
-      }
-      if (dep?.outputs?.findings) {
-        findings = String(dep.outputs.findings);
+      if (dep) {
+        if (dep.verification && dep.verification.verified === false) {
+          isUpstreamVerified = false;
+        }
+        if (dep.outputs?.citations) {
+          citations = citations.concat(dep.outputs.citations as string[]);
+        }
+        if (dep.outputs?.findings) {
+          findings = String(dep.outputs.findings);
+        }
       }
     }
 
-    const docTitle = String(task.inputs.documentTitle || task.title);
+    if (citations.length === 0) {
+      isUpstreamVerified = false;
+    }
+
+    const rawTitle = String(task.inputs.documentTitle || task.title);
+    const docTitle = isUpstreamVerified ? rawTitle : `${rawTitle} [Unverified Draft]`;
     const spaceId = String(task.inputs.targetSpaceId || 'space-research');
     const docId = `doc-briefing-${task.missionId}`;
 
@@ -294,8 +344,9 @@ export async function executeTaskStep(task: DbAgentTask): Promise<DbAgentTask> {
 
     const documentContent = `# ${docTitle}
 
-> **Executive Briefing & Verified Intelligence**
-> Prepared by Quill, synthesized from Scout's technical investigation.
+> **Executive Briefing & Technical Investigation**
+> Prepared by Quill, synthesized from Scout's investigation.
+> Verification Status: ${isUpstreamVerified ? 'VERIFIED PRIMARY SOURCES' : 'UNVERIFIED PRELIMINARY DRAFT'}
 
 ## Core Findings
 ${findings}
@@ -304,7 +355,7 @@ ${findings}
 ${citationsList}
 
 ## Architecture Review
-- **Integrity**: Cross-verified against primary specifications.
+- **Integrity**: ${isUpstreamVerified ? 'Cross-verified against primary specifications.' : 'Preliminary claims awaiting independent primary source verification.'}
 - **Verification Status**: Sealed into Living Spaces with immutable revision log.
 `;
 
@@ -315,17 +366,19 @@ ${citationsList}
       title: docTitle,
       content: documentContent,
       excerpt: findings.slice(0, 160),
-      icon: 'file-text',
+      icon: isUpstreamVerified ? 'file-text' : 'alert-circle',
       authorAgentId: 'agent-quill',
-      tags: ['mission-output', 'briefing', 'verified'],
+      tags: isUpstreamVerified
+        ? ['mission-output', 'briefing', 'verified']
+        : ['mission-output', 'briefing', 'unverified'],
       changeSummary: `Created technical briefing page for mission ${task.missionId}`,
     });
 
     addAgentTaskObservation(task.id, {
       tool: 'format_document',
       input: { docId, spaceId },
-      output: `Published document ${docId} with ${documentContent.length} bytes to space ${spaceId}`,
-      status: 'success',
+      output: `Published document ${docId} with ${documentContent.length} bytes to space ${spaceId} (verified: ${isUpstreamVerified})`,
+      status: isUpstreamVerified ? 'success' : 'warning',
     });
 
     recordEvidence({
@@ -334,19 +387,23 @@ ${citationsList}
       agentId: 'agent-quill',
       agentName: 'Quill',
       actionType: 'file_write',
-      summary: `Quill synthesized and published document "${docTitle}" to Living Space`,
+      summary: `Quill published document "${docTitle}" to Living Space (verified: ${isUpstreamVerified})`,
       details: {
         documentId: docId,
         spaceId,
         version: 1,
         contentLength: documentContent.length,
+        verified: isUpstreamVerified,
       },
+      status: isUpstreamVerified ? 'success' : 'warning',
     });
 
     verifyAgentTask(task.id, {
-      verified: true,
+      verified: isUpstreamVerified,
       method: 'schema_check',
-      details: `Living Space document ${docId} confirmed created with revision tracking.`,
+      details: isUpstreamVerified
+        ? `Living Space document ${docId} confirmed created with verified primary sources.`
+        : `Living Space document ${docId} marked unverified due to lack of verified upstream source citations.`,
     });
 
     return updateAgentTask(task.id, {
@@ -560,14 +617,17 @@ export async function tickMission(missionId: string): Promise<DbMission> {
   const anyBlocked = updatedTasks.some((t) => t.status === 'blocked');
 
   if (allCompleted) {
+    const allVerified = updatedTasks.every((t) => t.verification?.verified !== false);
     updateMissionStatus(missionId, 'completed');
     recordEvidence({
       missionId,
       agentId: 'agent-aura',
       agentName: 'Aura',
       actionType: 'verification',
-      summary: `Mission "${mission.title}" successfully completed all milestones with full verification`,
-      status: 'success',
+      summary: allVerified
+        ? `Mission "${mission.title}" successfully completed all milestones with full verification`
+        : `Mission "${mission.title}" completed all milestones with preliminary/unverified caveats`,
+      status: allVerified ? 'success' : 'warning',
     });
   } else if (anyFailed) {
     updateMissionStatus(missionId, 'failed');

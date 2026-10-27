@@ -11,6 +11,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - SANDBOX_SERVICE_URL=http://sandbox-runner:4000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -18,6 +19,9 @@ services:
       - NOOK_PASSWORD=${NOOK_PASSWORD:-}
       - NOOK_API_KEY=${NOOK_API_KEY:-}
       - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
+    depends_on:
+      sandbox-runner:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
       interval: 30s
@@ -39,8 +43,12 @@ services:
     depends_on:
       nook:
         condition: service_healthy
+      sandbox-runner:
+        condition: service_healthy
     environment:
       - NODE_ENV=production
+      - NOOK_WORKER_ROLE=dedicated_worker
+      - SANDBOX_SERVICE_URL=http://sandbox-runner:4000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -50,6 +58,26 @@ services:
       - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
     volumes:
       - nook_data:/app/.nook_storage
+      - nook_sandboxes:/app/.nook_sandboxes
+
+  sandbox-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nook-sandbox-runner
+    image: nook:latest
+    restart: unless-stopped
+    command: ["npm", "run", "sandbox-runner"]
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:4000/health"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    environment:
+      - PORT=4000
+      - NODE_ENV=production
+    volumes:
       - nook_sandboxes:/app/.nook_sandboxes
 
 volumes:

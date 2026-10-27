@@ -31,7 +31,10 @@ export const SUPPORTED_MODELS = {
 function getOrInitSalt(): Buffer {
   try {
     if (fsSync.existsSync(SALT_FILE)) {
-      return fsSync.readFileSync(SALT_FILE);
+      const existing = fsSync.readFileSync(SALT_FILE);
+      if (existing.length >= 16) {
+        return existing;
+      }
     }
     if (!fsSync.existsSync(STORAGE_DIR)) {
       fsSync.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
@@ -39,8 +42,9 @@ function getOrInitSalt(): Buffer {
     const newSalt = crypto.randomBytes(16);
     fsSync.writeFileSync(SALT_FILE, newSalt, { mode: 0o600 });
     return newSalt;
-  } catch {
-    return Buffer.from('nook-salt-v1-persistent-entropy');
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cryptographic failure: Unable to initialize or access secure persistent salt at ${SALT_FILE}. Refusing insecure constant salt fallback. Details: ${message}`);
   }
 }
 

@@ -129,20 +129,19 @@ Security and correctness take strict precedence over release claims or cosmetic 
 | **Model Provider Router** | **Implemented & Verified** | Gemini, OpenAI, Claude, local Ollama; fails loud with HTTP 502 on provider errors. |
 | **Model Context Protocol (MCP)** | **Implemented & Verified** | JSON-RPC 2.0 (`web_search`, `fetch_url`, `calculate`, `format_document`). |
 | **Living Spaces Persistence** | **Implemented & Verified** | SQLite WAL engine, version increments (`v1`...`vN`), immutable revisions, rollback. |
-| **Background Worker Queue** | **Implemented & Verified** | Queue claiming, step progress persistence, real task execution, cancellation. |
-| **Terminal Execution** | **Implemented & Verified** | Sandboxed shell runner with clean environment and process timeouts. |
-| **Browser / Web Scraper** | **Implemented & Verified** | SSRF-validated web content extraction and readable text generation. |
+| **Background Worker Queue** | **Implemented & Verified** | Database-backed atomic leases with fencing, queue claiming, crash recovery. |
+| **Terminal Execution** | **Implemented & Verified** | Dedicated sandbox runner with zero host socket exposure and fail-closed security. |
+| **Browser State & Snapshots** | **Implemented & Verified** | Persistent disk sessions, SSRF-validated egress, and rendered PNG viewport captures. |
 | **Voice Calls** | **Simulation** | UI demonstration with reactive Web Audio API waveforms and captions. |
-| **Interactive Headless Browser** | **Planned (Roadmap)** | Remote interactive Playwright / WebRTC container streaming. |
 
 ---
 
-## 🏆 Competitive Parity & Benchmarks
+## 🔬 Architectural Evaluations & Demonstrations
 
-Nook is benchmarked against CopilotKit OpenDots (`commit 8091324` / `c2569bb`) and OpenBot:
+Nook provides transparent, reproducible engineering evaluations:
 
-- **Exhaustive Competitive Audit**: See [`docs/competitive/OPENDOTS_COMPARISON.md`](docs/competitive/OPENDOTS_COMPARISON.md) for side-by-side technical evaluation across 17 architectural categories.
-- **Reproducible Benchmark Suite**: See [`benchmarks/nook-vs-opendots/BENCHMARK_RESULTS.md`](benchmarks/nook-vs-opendots/BENCHMARK_RESULTS.md) for automated benchmarks (100% pass rate).
+- **Technical Architecture Comparison**: See [`docs/competitive/OPENDOTS_COMPARISON.md`](docs/competitive/OPENDOTS_COMPARISON.md) for detailed evaluation across 17 architectural categories.
+- **Automated Validation Suite**: Comprehensive test suite covering authentication, database leases, fail-closed isolation, structured TAP/node:test verifiers, and PBKDF2 secrets derivation.
 - **Verified End-to-End Demonstrations**: See [`docs/demonstrations/DEMONSTRATIONS.md`](docs/demonstrations/DEMONSTRATIONS.md) covering autonomous research, sandbox testing, multi-agent collaboration, and persistent crash recovery.
 - **Sovereign Self-Hosting Guide**: See [`docs/deployment/SELF_HOSTED_GUIDE.md`](docs/deployment/SELF_HOSTED_GUIDE.md) for step-by-step local setup with Ollama.
 - **Plugin Developer Guide**: See [`docs/plugins/DEVELOPER_GUIDE.md`](docs/plugins/DEVELOPER_GUIDE.md) for creating custom tools.
@@ -166,7 +165,7 @@ cd Nook
 npm ci
 
 # 3. Run validation checks
-npm test               # Runs 21 unit & integration security tests
+npm test               # Runs 34+ unit & integration security tests
 npm run typecheck      # Verifies TypeScript types with zero errors
 npm run lint           # Runs ESLint checks
 npm run build          # Builds production bundle

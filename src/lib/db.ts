@@ -170,6 +170,16 @@ export function getDatabase(): DatabaseSync {
 
     CREATE INDEX IF NOT EXISTS idx_evidence_mission ON evidence_records(mission_id);
     CREATE INDEX IF NOT EXISTS idx_evidence_task ON evidence_records(task_id);
+
+    CREATE TABLE IF NOT EXISTS worker_leases (
+      resource_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      fencing_token INTEGER NOT NULL DEFAULT 1,
+      acquired_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_leases_expires ON worker_leases(expires_at);
   `);
 
   _dbInstance = db;
@@ -223,6 +233,17 @@ export interface DbApprovalRecord {
     output?: string;
     exitCode?: number;
   };
+}
+
+export type RedactedApprovalRecord = Omit<DbApprovalRecord, 'singleUseToken'>;
+
+export function redactApproval(record: DbApprovalRecord): RedactedApprovalRecord;
+export function redactApproval(record: undefined): undefined;
+export function redactApproval(record?: DbApprovalRecord): RedactedApprovalRecord | undefined;
+export function redactApproval(record?: DbApprovalRecord): RedactedApprovalRecord | undefined {
+  if (!record) return undefined;
+  const { singleUseToken: _, ...rest } = record;
+  return rest;
 }
 
 export function createApproval(record: {
@@ -1327,4 +1348,92 @@ export function exportRedactedActivityReport(missionId?: string): {
     })),
   };
 }
+
+// ==========================================
+// ATOMIC DATABASE-BACKED WORKER LEASES
+// ==========================================
+export interface WorkerLease {
+  resourceId: string;
+  ownerId: string;
+  fencingToken: number;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
+/**
+ * Atomically acquires or renews a lease on a shared resource (e.g., a Mission or Background Job).
+ * Prevents split-brain and concurrent execution across web servers and dedicated workers
+ * using atomic SQLite upserts, expiration timestamps, and incrementing fencing tokens.
+ */
+export function acquireWorkerLease(
+  resourceId: string,
+  ownerId: string,
+  durationMs: number = 25000
+): { acquired: boolean; fencingToken: number; ownerId: string } {
+  const db = getDatabase();
+  const now = Date.now();
+  const acquiredAt = new Date(now).toISOString();
+  const expiresAt = new Date(now + durationMs).toISOString();
+
+  // Atomic SQLite upsert guarded by lease expiration and ownership check
+  const stmt = db.prepare(`
+    INSERT INTO worker_leases (resource_id, owner_id, fencing_token, acquired_at, expires_at)
+    VALUES (?, ?, 1, ?, ?)
+    ON CONFLICT(resource_id) DO UPDATE SET
+      owner_id = excluded.owner_id,
+      fencing_token = worker_leases.fencing_token + 1,
+      acquired_at = excluded.acquired_at,
+      expires_at = excluded.expires_at
+    WHERE worker_leases.expires_at < ? OR worker_leases.owner_id = ?
+  `);
+
+  const info = stmt.run(resourceId, ownerId, acquiredAt, expiresAt, acquiredAt, ownerId);
+  if (info.changes === 0) {
+    const current = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as any;
+    return {
+      acquired: false,
+      fencingToken: current ? current.fencing_token : 0,
+      ownerId: current ? current.owner_id : '',
+    };
+  }
+
+  const updated = db.prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`).get(resourceId) as any;
+  return {
+    acquired: true,
+    fencingToken: updated.fencing_token,
+    ownerId: updated.owner_id,
+  };
+}
+
+/**
+ * Releases a worker lease cleanly once task processing is complete or aborted.
+ * Preserves the resource row so fencing tokens strictly monotonically increment across acquisitions.
+ */
+export function releaseWorkerLease(resourceId: string, ownerId: string): boolean {
+  const db = getDatabase();
+  const stmt = db.prepare(`
+    UPDATE worker_leases
+    SET owner_id = '', expires_at = '1970-01-01T00:00:00.000Z'
+    WHERE resource_id = ? AND owner_id = ?
+  `);
+  const info = stmt.run(resourceId, ownerId);
+  return info.changes > 0;
+}
+
+/**
+ * Validates whether a specific worker holds a valid, active unexpired lease with the expected fencing token.
+ */
+export function validateWorkerLease(resourceId: string, ownerId: string, expectedFencingToken?: number): boolean {
+  const db = getDatabase();
+  const nowIso = new Date().toISOString();
+  let query = `SELECT * FROM worker_leases WHERE resource_id = ? AND owner_id = ? AND expires_at > ?`;
+  const params: any[] = [resourceId, ownerId, nowIso];
+  if (expectedFencingToken !== undefined) {
+    query += ` AND fencing_token = ?`;
+    params.push(expectedFencingToken);
+  }
+  const row = db.prepare(query).get(...params);
+  return Boolean(row);
+}
+
 

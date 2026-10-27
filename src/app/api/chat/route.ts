@@ -67,11 +67,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'userMessage is required' }, { status: 400 });
     }
 
+    // Strict security boundary: Always use trusted server-side credentials and endpoints.
+    // Client-supplied credentials in chat requests are ignored to prevent credential tampering and SSRF.
     const serverSecrets = await loadEncryptedSecrets();
-    const geminiKey = serverSecrets.geminiApiKey || process.env.GEMINI_API_KEY || settings?.geminiApiKey;
-    const openaiKey = serverSecrets.openaiApiKey || process.env.OPENAI_API_KEY || settings?.openaiApiKey;
-    const anthropicKey = serverSecrets.anthropicApiKey || process.env.ANTHROPIC_API_KEY || settings?.anthropicApiKey;
-    const ollamaUrl = serverSecrets.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || settings?.ollamaEndpoint || 'http://localhost:11434';
+    const geminiKey = (serverSecrets.geminiApiKey || process.env.GEMINI_API_KEY || '').trim();
+    const openaiKey = (serverSecrets.openaiApiKey || process.env.OPENAI_API_KEY || '').trim();
+    const anthropicKey = (serverSecrets.anthropicApiKey || process.env.ANTHROPIC_API_KEY || '').trim();
+    const ollamaUrl = (serverSecrets.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:11434').trim();
 
     const provider = settings?.provider || 'simulation';
 

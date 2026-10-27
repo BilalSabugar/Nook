@@ -34,7 +34,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test src/__tests__/*.test.mjs",
-    "worker": "node --experimental-strip-types bin/worker.mjs"
+    "worker": "node --experimental-strip-types bin/worker.mjs",
+    "sandbox-runner": "node bin/sandbox-runner.mjs"
   },
   "engines": {
     "node": ">=22.6.0"

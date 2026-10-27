@@ -8,6 +8,8 @@ import {
   logAuditEvent,
   listMissions,
   getDatabase,
+  acquireWorkerLease,
+  releaseWorkerLease,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';
 import { safeFetch } from './ssrf.ts';
@@ -17,8 +19,10 @@ let isWorkerRunning = false;
 let workerInterval: NodeJS.Timeout | null = null;
 let lastCrashRecoveryCheck = 0;
 
-// Mission leases to prevent concurrent workers from stepping the same mission
-const missionLeases = new Map<string, number>();
+// Unique worker instance ID for atomic lease ownership across distributed supervisor processes
+export const WORKER_INSTANCE_ID =
+  process.env.NOOK_WORKER_ID ||
+  `worker-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
 const LEASE_DURATION_MS = 25000; // 25 seconds
 
 /**
@@ -210,18 +214,17 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
  */
 export async function tickActiveMissions(): Promise<boolean> {
   const missions = listMissions();
-  const now = Date.now();
   let advancedAny = false;
 
   for (const m of missions) {
     if (m.status !== 'active' && m.status !== 'draft') continue;
 
-    // Check lease to avoid duplicate worker execution
-    const leaseExpires = missionLeases.get(m.id) || 0;
-    if (now < leaseExpires) continue;
-
-    // Acquire lease
-    missionLeases.set(m.id, now + LEASE_DURATION_MS);
+    // Acquire atomic SQLite lease with ownership and fencing to prevent concurrent stepping
+    const lease = acquireWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID, LEASE_DURATION_MS);
+    if (!lease.acquired) {
+      // Lease is currently held by another worker instance or web process
+      continue;
+    }
 
     try {
       const updated = await tickMission(m.id);
@@ -229,11 +232,11 @@ export async function tickActiveMissions(): Promise<boolean> {
 
       // If mission reached terminal or paused state, release lease
       if (updated.status === 'completed' || updated.status === 'failed' || updated.status === 'paused' || updated.status === 'cancelled') {
-        missionLeases.delete(m.id);
+        releaseWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID);
       }
     } catch (err: any) {
-      missionLeases.delete(m.id);
-      logAuditEvent('MISSION_WORKER_ERROR', `Worker failed ticking mission ${m.id}: ${err.message}`, 'error', 'agent-aura');
+      releaseWorkerLease(`mission:${m.id}`, WORKER_INSTANCE_ID);
+      logAuditEvent('MISSION_WORKER_ERROR', `Worker ${WORKER_INSTANCE_ID} failed ticking mission ${m.id}: ${err.message}`, 'error', 'agent-aura');
     }
   }
 

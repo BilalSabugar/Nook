@@ -1,8 +1,7 @@
-import { exec, spawn } from 'child_process';
+import { exec } from 'child_process';
 import util from 'util';
 import path from 'path';
 import fs from 'fs/promises';
-import { existsSync } from 'fs';
 import { logAuditEvent } from './db.ts';
 
 const execPromise = util.promisify(exec);
@@ -24,8 +23,7 @@ export interface SandboxExecutionResult {
   sandboxDir: string;
 }
 
-const STORAGE_ROOT = path.resolve(process.cwd());
-const SANDBOXES_BASE = path.join(STORAGE_ROOT, '.nook_sandboxes');
+const SANDBOXES_BASE = path.join(process.cwd(), '.nook_sandboxes');
 
 // Whitelisted minimal safe environment variables for unprivileged execution
 const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];

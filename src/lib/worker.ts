@@ -7,8 +7,6 @@ import {
   saveDocumentWithRevision,
   logAuditEvent,
   listMissions,
-  updateMissionStatus,
-  listTasksForMission,
   getDatabase,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';

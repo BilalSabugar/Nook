@@ -1,5 +1,5 @@
 import { Agent, ComputerState, LLMSettings, Message, ReviewRequest, Space } from '@/types';
-import { planSolutionAndTests } from './orchestrator.ts';
+import { planSolutionAndTests } from './solution-planner.ts';
 
 export interface AgentExecutionResponse {
   reply: string;

@@ -8,6 +8,8 @@ import {
   createSessionToken,
   verifySessionToken,
   validateApiRequest,
+  isServerAuthSetupComplete,
+  verifyOwnerCredentials,
 } from '../lib/auth.ts';
 import {
   validateOutboundUrl,
@@ -82,6 +84,63 @@ test('Auth: Legitimate cryptographic session tokens succeed', () => {
   const authRes = validateApiRequest(reqCookie);
   assert.equal(authRes.authorized, true, 'Valid session cookie must authenticate request');
 });
+
+test('Auth: Fail-closed on missing credentials and verifyOwnerCredentials validation', () => {
+  const origKey = process.env.NOOK_API_KEY;
+  const origPwd = process.env.NOOK_PASSWORD;
+  const origSec = process.env.NOOK_SECRET_TOKEN;
+
+  try {
+    delete process.env.NOOK_API_KEY;
+    delete process.env.NOOK_PASSWORD;
+    delete process.env.NOOK_SECRET_TOKEN;
+
+    // 1. Without credentials, setup is incomplete
+    assert.equal(isServerAuthSetupComplete(), false, 'Setup must be incomplete without key or password');
+    assert.equal(verifyOwnerCredentials('any-attempted-password'), false, 'Must fail closed when unconfigured');
+
+    // 2. Setup with short credentials (< 8 chars) fails
+    process.env.NOOK_PASSWORD = 'short';
+    assert.equal(isServerAuthSetupComplete(), false, 'Passwords under 8 chars must be considered incomplete');
+    assert.equal(verifyOwnerCredentials('short'), false);
+
+    // 3. Setup with valid credentials
+    process.env.NOOK_PASSWORD = 'super-secure-owner-secret-123';
+    assert.equal(isServerAuthSetupComplete(), true, 'Setup must be complete with valid password');
+    assert.equal(verifyOwnerCredentials('wrong-password'), false, 'Wrong password must be rejected');
+    assert.equal(verifyOwnerCredentials('super-secure-owner-secret-123'), true, 'Exact password must be accepted');
+
+    // 4. API key validation
+    delete process.env.NOOK_PASSWORD;
+    process.env.NOOK_API_KEY = 'nook-master-api-key-9999';
+    assert.equal(isServerAuthSetupComplete(), true);
+    assert.equal(verifyOwnerCredentials('nook-master-api-key-9999'), true);
+  } finally {
+    process.env.NOOK_API_KEY = origKey;
+    process.env.NOOK_PASSWORD = origPwd;
+    process.env.NOOK_SECRET_TOKEN = origSec;
+  }
+});
+
+test('Auth: Cookie and Bearer session verification enforces strict HMAC and expiry', () => {
+  const token = createSessionToken('nook-owner', 1000 * 60); // 1 minute
+  const verified = verifySessionToken(token);
+  assert.equal(verified.valid, true);
+  assert.equal(verified.sessionId, 'nook-owner');
+
+  // Verify expired token fails
+  const expiredToken = createSessionToken('nook-owner', -1000); // already expired
+  const expVerified = verifySessionToken(expiredToken);
+  assert.equal(expVerified.valid, false);
+  assert.ok(expVerified.error?.includes('expired'));
+
+  // Verify malformed token fails
+  assert.equal(verifySessionToken('').valid, false);
+  assert.equal(verifySessionToken('only-one-part').valid, false);
+  assert.equal(verifySessionToken('two.parts').valid, false);
+  assert.equal(verifySessionToken('three.parts.with-invalid-signature').valid, false);
+});
+
 
 // =========================================================================
 // 2. SERVER APPROVALS & REPLAY PROTECTION TESTS

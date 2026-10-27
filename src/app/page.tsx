@@ -34,6 +34,7 @@ import { AgentModal } from '@/components/modals/AgentModal';
 import { SpaceModal } from '@/components/modals/SpaceModal';
 import { SettingsModal } from '@/components/modals/SettingsModal';
 import { CommandPalette } from '@/components/navigation/CommandPalette';
+import { AuthBarrier } from '@/components/auth/AuthBarrier';
 
 export default function NookApp() {
   // Primary State
@@ -71,15 +72,15 @@ export default function NookApp() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Load durable server state on mount with LocalStorage fallback
-  useEffect(() => {
-    let isMounted = true;
+  // Authentication Barrier State
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [isSetupConfigured, setIsSetupConfigured] = useState<boolean>(true);
 
-    // 1. Fetch durable server state
+  // Load durable server state with LocalStorage fallback
+  const loadWorkspaceState = () => {
     fetch('/api/workspace/state')
       .then((res) => (res.ok ? res.json() : null))
       .then((serverState) => {
-        if (!isMounted) return;
         if (serverState?.hasDurableState && serverState?.data) {
           const { agents: sAgents, spaces: sSpaces, computerStates: sComps, messages: sMsgs, settings: sSettings } = serverState.data;
           if (Array.isArray(sAgents) && sAgents.length > 0) setAgents(sAgents);
@@ -90,7 +91,7 @@ export default function NookApp() {
           return;
         }
 
-        // 2. Fallback to browser LocalStorage if server state was uninitialized
+        // Fallback to browser LocalStorage if server state was uninitialized
         try {
           const storedSettings = localStorage.getItem('nook_settings');
           if (storedSettings) setLlmSettings(JSON.parse(storedSettings));
@@ -134,11 +135,42 @@ export default function NookApp() {
         }
       })
       .catch(() => {});
+  };
+
+  // Check owner session authentication status on mount
+  useEffect(() => {
+    let isMounted = true;
+
+    fetch('/api/auth/session')
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!isMounted) return;
+        if (res.ok && data?.authenticated) {
+          setIsAuthenticated(true);
+          loadWorkspaceState();
+        } else {
+          setIsAuthenticated(false);
+          if (data && typeof data.setupConfigured === 'boolean') {
+            setIsSetupConfigured(data.setupConfigured);
+          }
+        }
+      })
+      .catch(() => {
+        if (isMounted) setIsAuthenticated(false);
+      });
 
     return () => {
       isMounted = false;
     };
   }, []);
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/session', { method: 'DELETE' });
+    } catch {}
+    setIsAuthenticated(false);
+    setIsSettingsModalOpen(false);
+  };
 
   // Sync state to durable server disk & localStorage
   const syncServerPersistence = (payload: {
@@ -696,6 +728,31 @@ export default function NookApp() {
   const currentAgent = agents.find((a) => a.id === activeAgentId) || agents[0];
   const currentSpace = spaces.find((s) => s.id === activeSpaceId) || spaces[0];
 
+  if (isAuthenticated === null) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[#070709] text-white select-none">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white text-black flex items-center justify-center shadow-lg animate-pulse">
+            <div className="w-3 h-3 rounded-full bg-black" />
+          </div>
+          <p className="text-xs text-neutral-500 font-mono tracking-wider uppercase">Loading Nook...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <AuthBarrier
+        isSetupConfigured={isSetupConfigured}
+        onAuthenticated={() => {
+          setIsAuthenticated(true);
+          loadWorkspaceState();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0a0a0a] text-zinc-100 font-sans antialiased selection:bg-white selection:text-black">
       {/* Primary Sidebar */}
@@ -802,6 +859,7 @@ export default function NookApp() {
         onClose={() => setIsSettingsModalOpen(false)}
         settings={llmSettings}
         onSaveSettings={persistSettings}
+        onLogout={handleLogout}
         onExportWorkspace={() => {
           const backup = {
             version: '1.0.0',

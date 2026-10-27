@@ -271,3 +271,52 @@ export function unauthorizedResponse(errorMsg = 'Unauthorized: Access denied', s
     { status }
   );
 }
+
+/**
+ * Checks whether owner authentication credentials have been configured in server environment.
+ */
+export function isServerAuthSetupComplete(): boolean {
+  const configured = (
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    ''
+  ).trim();
+
+  return Boolean(configured && configured.length >= 8);
+}
+
+/**
+ * Verifies owner credentials against configured server secrets.
+ * Fails closed if NOOK_API_KEY, NOOK_PASSWORD, or NOOK_SECRET_TOKEN is not configured.
+ * Uses constant-time comparison to prevent timing side-channel attacks.
+ */
+export function verifyOwnerCredentials(candidate: string): boolean {
+  const configured = (
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    ''
+  ).trim();
+
+  // Fail closed if unconfigured or insecurely short (< 8 chars)
+  if (!configured || configured.length < 8) {
+    return false;
+  }
+
+  if (!candidate || typeof candidate !== 'string') {
+    return false;
+  }
+
+  const candBuf = Buffer.from(candidate.trim(), 'utf8');
+  const confBuf = Buffer.from(configured, 'utf8');
+
+  if (candBuf.length !== confBuf.length) {
+    // Constant-time dummy comparison to prevent timing leak on string length
+    crypto.timingSafeEqual(confBuf, confBuf);
+    return false;
+  }
+
+  return crypto.timingSafeEqual(candBuf, confBuf);
+}
+

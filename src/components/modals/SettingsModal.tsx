@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { LLMSettings, LLMProvider } from '@/types';
-import { Settings2, Key, Cpu, Sparkles, Check, Server, Download, RotateCcw, X, ShieldCheck } from 'lucide-react';
+import { Settings2, Key, Cpu, Sparkles, Check, Server, Download, RotateCcw, X, ShieldCheck, LogOut } from 'lucide-react';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -12,6 +12,7 @@ interface SettingsModalProps {
   onExportWorkspace?: () => void;
   onImportWorkspace?: (data: string) => void;
   onResetWorkspace?: () => void;
+  onLogout?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -21,6 +22,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSaveSettings,
   onExportWorkspace,
   onResetWorkspace,
+  onLogout,
 }) => {
   const [provider, setProvider] = useState<LLMProvider>(settings.provider);
   const [geminiApiKey, setGeminiApiKey] = useState('');
@@ -317,6 +319,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   <span>Reset</span>
+                </button>
+              )}
+              {onLogout && (
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="px-2.5 py-1.5 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-neutral-400 hover:text-white border border-white/[0.06] text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Lock workspace and sign out"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Sign Out</span>
                 </button>
               )}
             </div>

@@ -94,14 +94,17 @@ Security and correctness take strict precedence over release claims or cosmetic 
    - Reusable authorization tokens are redacted from general API listings.
 
 3. **Filesystem & Execution Isolation**:
-   - Per-agent isolated sandboxes (`.nook_sandboxes/<agentId>`).
-   - Rejection of path traversal (`../`, absolute paths, null bytes) during file synchronization.
+   - Per-agent and per-task isolated workspace jail (`.nook_sandboxes/<agentId>/tasks/<taskId>`).
+   - Strict cross-agent traversal rejection blocking attempts to reference sibling agent sandboxes.
+   - Cryptographically bound execution tickets with human approval chain (`approvalId`) or verified task (`taskId`).
+   - Mandatory high-entropy `SANDBOX_RUNNER_SECRET` (refusing execution on weak or default secrets).
    - Host secrets and provider API keys are stripped from execution child process environments.
    - Destructive commands (`rm -rf /`, fork bombs, mkfs) are blocked before execution.
 
-4. **Centralized SSRF Defense Engine**:
+4. **Centralized SSRF Defense Engine & Playwright Interception**:
    - Comprehensive outbound URL validator blocking IPv4/IPv6 private ranges (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.169.254` cloud metadata, `::1`, link-local).
    - DNS pre-resolution and hop-by-hop revalidation on HTTP redirects (max 5 hops).
+   - Deep Playwright network route interception (`page.route('**/*', ...)`) enforcing SSRF restrictions on all navigations, redirects, subresources, and XHR calls.
    - Stream byte limits (max 2MB) to prevent buffer exhaustion.
 
 5. **Encrypted Secrets Vault**:

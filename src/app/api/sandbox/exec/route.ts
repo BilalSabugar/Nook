@@ -157,6 +157,8 @@ export async function POST(req: NextRequest) {
     const sandboxResult = await executeSandboxedCommand({
       agentId: safeAgentId,
       command: cleanCmd,
+      approvalId,
+      authorizationType: 'human_approval',
       timeoutMs: 10000,
       maxBufferBytes: 1024 * 512,
     });

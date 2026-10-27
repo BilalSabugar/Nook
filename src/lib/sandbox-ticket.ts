@@ -4,16 +4,65 @@ export interface SandboxExecutionTicket {
   ticketId: string;
   commandHash: string;
   agentId: string;
+  taskId: string;
+  approvalId?: string;
+  authorizationType: 'human_approval' | 'system_verified_test';
   action: string;
   issuedAt: number;
   expiresAt: number;
   signature: string;
 }
 
-const DEFAULT_SECRET = 'nook_internal_runner_auth_secret_v1';
+export interface CreateTicketOptions {
+  command: string;
+  agentId: string;
+  taskId?: string;
+  approvalId?: string;
+  authorizationType?: 'human_approval' | 'system_verified_test';
+  ttlMs?: number;
+  secret?: string;
+}
+
+const INSECURE_DEFAULT_SECRETS = new Set([
+  'nook_internal_runner_auth_secret_v1',
+  'test-audit-runner-secret-key-32bytes',
+  'default',
+  'secret',
+  'change-me',
+]);
+
+// Ephemeral runtime secret generated per-process instance when none configured in dev/test
+let _ephemeralRunnerSecret: string | null = null;
 
 export function getSandboxRunnerSecret(): string {
-  return process.env.SANDBOX_RUNNER_SECRET || DEFAULT_SECRET;
+  const envSecret = process.env.SANDBOX_RUNNER_SECRET?.trim();
+
+  if (envSecret) {
+    if (INSECURE_DEFAULT_SECRETS.has(envSecret)) {
+      throw new Error(
+        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is set to an insecure, publicly known default value. A unique high-entropy secret is strictly required.'
+      );
+    }
+    if (envSecret.length < 16) {
+      throw new Error(
+        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is too short (< 16 characters). High-entropy cryptographic secret required.'
+      );
+    }
+    return envSecret;
+  }
+
+  // In production, missing secret must fail closed immediately
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL: SANDBOX_RUNNER_SECRET must be explicitly configured in production. Execution authorization refused.'
+    );
+  }
+
+  // Development & test: generate cryptographically secure ephemeral random secret
+  if (!_ephemeralRunnerSecret) {
+    _ephemeralRunnerSecret = crypto.randomBytes(32).toString('hex');
+  }
+  return _ephemeralRunnerSecret;
 }
 
 export function computeCommandHash(command: string): string {
@@ -25,24 +74,53 @@ export function computeCommandHash(command: string): string {
  * The ticket is signed with HMAC-SHA256 and expires in 30 seconds.
  */
 export function createSandboxExecutionTicket(
-  command: string,
-  agentId: string,
+  commandOrOptions: string | CreateTicketOptions,
+  agentId?: string,
   ttlMs = 30000,
-  secret = getSandboxRunnerSecret()
+  secret?: string
 ): SandboxExecutionTicket {
+  let command: string;
+  let safeAgentId: string;
+  let taskId: string;
+  let approvalId: string | undefined;
+  let authorizationType: 'human_approval' | 'system_verified_test';
+  let ttl: number;
+  let signingSecret: string;
+
+  if (typeof commandOrOptions === 'object') {
+    command = commandOrOptions.command;
+    safeAgentId = commandOrOptions.agentId;
+    taskId = commandOrOptions.taskId || crypto.randomUUID();
+    approvalId = commandOrOptions.approvalId;
+    authorizationType = commandOrOptions.authorizationType || (approvalId ? 'human_approval' : 'system_verified_test');
+    ttl = commandOrOptions.ttlMs ?? 30000;
+    signingSecret = commandOrOptions.secret || getSandboxRunnerSecret();
+  } else {
+    command = commandOrOptions;
+    safeAgentId = agentId || 'default';
+    taskId = crypto.randomUUID();
+    approvalId = undefined;
+    authorizationType = 'system_verified_test';
+    ttl = ttlMs;
+    signingSecret = secret || getSandboxRunnerSecret();
+  }
+
   const ticketId = crypto.randomUUID();
   const commandHash = computeCommandHash(command);
   const issuedAt = Date.now();
-  const expiresAt = issuedAt + ttlMs;
+  const expiresAt = issuedAt + ttl;
   const action = 'sandboxed_exec';
 
-  const payload = `${ticketId}:${commandHash}:${agentId}:${issuedAt}:${expiresAt}:${action}`;
-  const signature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  const payload = `${ticketId}:${commandHash}:${safeAgentId}:${taskId}:${approvalId || 'none'}:${authorizationType}:${issuedAt}:${expiresAt}:${action}`;
+  const signature = crypto.createHmac('sha256', signingSecret).update(payload).digest('hex');
 
   return {
     ticketId,
     commandHash,
-    agentId,
+    agentId: safeAgentId,
+    taskId,
+    approvalId,
+    authorizationType,
     action,
     issuedAt,
     expiresAt,
@@ -58,10 +136,17 @@ export function verifySandboxExecutionTicket(
   command: string,
   agentId: string,
   consumedTicketIds?: Set<string> | Map<string, number>,
-  secret = getSandboxRunnerSecret()
+  secret?: string
 ): { valid: boolean; error?: string } {
   if (!ticket || !ticket.ticketId || !ticket.signature) {
     return { valid: false, error: 'Malformed or missing execution ticket fields' };
+  }
+
+  let verifyingSecret: string;
+  try {
+    verifyingSecret = secret || getSandboxRunnerSecret();
+  } catch (err: unknown) {
+    return { valid: false, error: err instanceof Error ? err.message : 'Runner secret configuration error' };
   }
 
   const now = Date.now();
@@ -95,8 +180,8 @@ export function verifySandboxExecutionTicket(
   }
 
   // Verify HMAC signature
-  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
-  const expectedSig = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
+  const expectedSig = crypto.createHmac('sha256', verifyingSecret).update(payload).digest('hex');
 
   const sigBuf = Buffer.from(ticket.signature, 'hex');
   const expBuf = Buffer.from(expectedSig, 'hex');
@@ -114,6 +199,11 @@ export function verifySandboxExecutionTicket(
   // Verify bound agent
   if (ticket.agentId !== agentId) {
     return { valid: false, error: 'Execution ticket is bound to a different agent' };
+  }
+
+  // Verify authorization chain
+  if (ticket.authorizationType === 'human_approval' && !ticket.approvalId) {
+    return { valid: false, error: 'Human approval authorization type requires bound approvalId' };
   }
 
   return { valid: true };

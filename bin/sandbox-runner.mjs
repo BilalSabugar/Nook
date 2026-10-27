@@ -24,7 +24,28 @@ import crypto from 'crypto';
 const PORT = Number(process.env.PORT || process.env.SANDBOX_PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
 const SANDBOXES_BASE = path.resolve(process.cwd(), '.nook_sandboxes');
-const RUNNER_SECRET = process.env.SANDBOX_RUNNER_SECRET || 'nook_internal_runner_auth_secret_v1';
+const INSECURE_DEFAULT_SECRETS = new Set([
+  'nook_internal_runner_auth_secret_v1',
+  'test-audit-runner-secret-key-32bytes',
+  'default',
+  'secret',
+  'change-me',
+]);
+
+const rawSecret = process.env.SANDBOX_RUNNER_SECRET?.trim();
+if (!rawSecret) {
+  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET environment variable is missing. The runner refuses to start without an explicit secret.');
+  process.exit(1);
+}
+if (INSECURE_DEFAULT_SECRETS.has(rawSecret)) {
+  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET matches a known public default. The runner refuses to start in an untrusted state.');
+  process.exit(1);
+}
+if (rawSecret.length < 16) {
+  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET is too short (< 16 characters). Must be a high-entropy secret.');
+  process.exit(1);
+}
+const RUNNER_SECRET = rawSecret;
 const MAX_BODY_BYTES = 64 * 1024; // 64KB strict body limit
 
 const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
@@ -73,6 +94,16 @@ function validateRunnerCommandSafety(cleanCmd) {
     }
   }
 
+  // Cross-agent boundary check
+  if (/(?:\.\.[\/\\])+agent-/i.test(cleanCmd) ||
+      /\/tasks\/[a-zA-Z0-9_-]+\/\.\./i.test(cleanCmd) ||
+      /\.nook_sandboxes[\/\\]+[a-zA-Z0-9_-]+/i.test(cleanCmd)) {
+    return {
+      safe: false,
+      reason: 'Security violation: Cross-agent filesystem access or sandbox escape blocked.',
+    };
+  }
+
   // Reject access to host secrets or database files
   for (const pattern of PROTECTED_SYSTEM_PATTERNS) {
     if (pattern.test(cleanCmd)) {
@@ -100,7 +131,7 @@ function validateRunnerCommandSafety(cleanCmd) {
 /**
  * Validates the HMAC-SHA256 execution ticket.
  */
-function validateTicket(rawTicketHeader, command, agentId) {
+function validateTicket(rawTicketHeader, command, agentId, taskId) {
   if (!rawTicketHeader) {
     return { valid: false, status: 401, error: 'Unauthorized: Missing execution ticket. Direct unauthenticated execution is forbidden.' };
   }
@@ -140,8 +171,8 @@ function validateTicket(rawTicketHeader, command, agentId) {
     return { valid: false, status: 403, error: 'Execution ticket already consumed (replay attack detected).' };
   }
 
-  // Cryptographic HMAC check
-  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
+  // Cryptographic HMAC check over full authorization chain
+  const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
   const expectedSig = crypto.createHmac('sha256', RUNNER_SECRET).update(payload).digest('hex');
 
   const sigBuf = Buffer.from(ticket.signature, 'hex');
@@ -162,9 +193,27 @@ function validateTicket(rawTicketHeader, command, agentId) {
     return { valid: false, status: 403, error: 'Ticket agent mismatch: ticket is bound to a different agent.' };
   }
 
+  // Bound task check if taskId is provided
+  if (taskId && ticket.taskId && ticket.taskId !== taskId) {
+    return { valid: false, status: 403, error: 'Ticket task mismatch: ticket is bound to a different task.' };
+  }
+
+  // Authorization chain verification
+  if (ticket.authorizationType === 'human_approval') {
+    if (!ticket.approvalId) {
+      return { valid: false, status: 403, error: 'Authorization chain failed: human approval ticket missing bound approvalId.' };
+    }
+  } else if (ticket.authorizationType === 'system_verified_test') {
+    if (!ticket.taskId) {
+      return { valid: false, status: 403, error: 'Authorization chain failed: system verified test ticket missing bound taskId.' };
+    }
+  } else {
+    return { valid: false, status: 403, error: 'Authorization chain failed: unknown or unapproved authorization type.' };
+  }
+
   // Mark ticket consumed
   consumedTickets.set(ticket.ticketId, ticket.expiresAt);
-  return { valid: true };
+  return { valid: true, ticket };
 }
 
 /**
@@ -322,7 +371,7 @@ const server = http.createServer(async (req, res) => {
 
         // 2. Mandatory Authentication & Execution Ticket Verification
         const ticketHeader = req.headers['x-nook-sandbox-ticket'] || req.headers['authorization'];
-        const authCheck = validateTicket(ticketHeader, command, safeAgentId);
+        const authCheck = validateTicket(ticketHeader, command, safeAgentId, taskId);
         if (!authCheck.valid) {
           res.writeHead(authCheck.status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: authCheck.error }));
@@ -339,7 +388,8 @@ const server = http.createServer(async (req, res) => {
 
         // 3. Per-Task Workspace Jail & Filesystem Boundary
         const agentSandboxDir = path.resolve(SANDBOXES_BASE, safeAgentId);
-        const safeTaskId = (taskId || crypto.randomUUID()).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const effectiveTaskId = authCheck.ticket?.taskId || taskId || crypto.randomUUID();
+        const safeTaskId = effectiveTaskId.replace(/[^a-zA-Z0-9_-]/g, '_');
         const taskWorkspaceDir = path.resolve(agentSandboxDir, 'tasks', safeTaskId);
 
         // Path containment check: ensure workspace is strictly within SANDBOXES_BASE

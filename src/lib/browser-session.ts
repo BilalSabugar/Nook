@@ -236,6 +236,13 @@ export async function captureRealBrowserScreenshot(
   targetUrl: string,
   viewport = { width: 1280, height: 800 }
 ): Promise<{ buffer: Buffer; engine: string } | null> {
+  // 1. Initial SSRF policy verification before browser dispatch
+  const initialCheck = await validateOutboundUrl(targetUrl);
+  if (!initialCheck.allowed) {
+    logAuditEvent('BROWSER_EGRESS_BLOCKED', `Playwright blocked navigation to ${targetUrl}: ${initialCheck.reason}`, 'blocked');
+    return null;
+  }
+
   try {
     const dynamicImport = new Function('specifier', 'return import(specifier)');
     const pw = (await dynamicImport('playwright')) as typeof import('playwright');
@@ -243,11 +250,20 @@ export async function captureRealBrowserScreenshot(
     let browser: import('playwright').Browser | null = null;
     let engine = 'playwright_chromium';
 
+    const customExecPath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+      (process.platform === 'linux' && fsSync.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
+
+    const baseArgs = ['--disable-dev-shm-usage', '--disable-gpu'];
+    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || process.env.NOOK_IN_DOCKER === 'true' || process.platform === 'linux') {
+      baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+    }
+
     // 1. Try default bundled or installed chromium
     try {
       browser = await chromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        executablePath: customExecPath,
+        args: baseArgs,
       });
       engine = 'playwright_chromium';
     } catch {
@@ -258,7 +274,7 @@ export async function captureRealBrowserScreenshot(
           browser = await chromium.launch({
             channel,
             headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+            args: baseArgs,
           });
           engine = `playwright_${channel}`;
           break;
@@ -272,6 +288,28 @@ export async function captureRealBrowserScreenshot(
 
     try {
       const page = await browser.newPage({ viewport });
+
+      // Apply strict network route interception: enforce Nook's SSRF policy on all navigations, subresources, and XHR
+      await page.route('**/*', async (route) => {
+        const reqUrl = route.request().url();
+        if (reqUrl.startsWith('data:') || reqUrl.startsWith('blob:')) {
+          await route.continue();
+          return;
+        }
+
+        try {
+          const val = await validateOutboundUrl(reqUrl);
+          if (!val.allowed) {
+            logAuditEvent('BROWSER_SSRF_SUBRESOURCE_BLOCKED', `Playwright route interception blocked forbidden outbound request to ${reqUrl}: ${val.reason}`, 'blocked');
+            await route.abort('blockedbyclient');
+            return;
+          }
+          await route.continue();
+        } catch {
+          await route.abort('failed');
+        }
+      });
+
       await page.goto(targetUrl, { timeout: 15000, waitUntil: 'domcontentloaded' });
       const buffer = await page.screenshot({ type: 'png' });
       return { buffer: Buffer.from(buffer), engine };

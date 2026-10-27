@@ -70,6 +70,9 @@ function spawnBuffer(
 export interface SandboxExecutionOptions {
   agentId: string;
   command: string;
+  taskId?: string;
+  approvalId?: string;
+  authorizationType?: 'human_approval' | 'system_verified_test';
   timeoutMs?: number;
   maxBufferBytes?: number;
   virtualFiles?: Array<{ name?: string; path?: string; content?: string }>;
@@ -127,15 +130,25 @@ async function isDockerAvailable(): Promise<boolean> {
  * Pre-execution security filter: validates command against path escape and destructive attacks.
  */
 export function validateCommandSafety(cleanCmd: string, _agentId: string): { safe: boolean; reason?: string } {
+  // Reject cross-agent directory traversal or references to other agents
+  if (
+    /(?:\.\.[\/\\])+agent-/i.test(cleanCmd) ||
+    /\.nook_sandboxes[\/\\]+[a-zA-Z0-9_-]+/i.test(cleanCmd) ||
+    /\/tasks\/[a-zA-Z0-9_-]+\/\.\./i.test(cleanCmd) ||
+    /\b(?:agent-[a-zA-Z0-9_-]+[\/\\]+tasks)/i.test(cleanCmd)
+  ) {
+    return {
+      safe: false,
+      reason: 'Security violation: Cross-agent directory access or sandbox escape blocked.',
+    };
+  }
+
   // Reject traversal escaping agent root
-  if (/\.\.[\/\\]\.\.[\/\\]/.test(cleanCmd) || /\.\.[\/\\]/.test(cleanCmd)) {
-    // Specifically check if attempting to read parent directory or traverse into other agent workspaces
-    if (/cat\s+[\.\/\\]+|type\s+[\.\/\\]+|ls\s+[\.\/\\]+|dir\s+[\.\/\\]+/i.test(cleanCmd)) {
-      return {
-        safe: false,
-        reason: 'Security violation: Directory traversal (..) escaping agent workspace is strictly blocked.',
-      };
-    }
+  if (/\.\.[\/\\]/.test(cleanCmd)) {
+    return {
+      safe: false,
+      reason: 'Security violation: Directory traversal (..) escaping agent workspace is strictly blocked.',
+    };
   }
 
   // Reject access to host secrets or system files
@@ -232,7 +245,14 @@ export async function executeSandboxedCommand(
   const sandboxServiceUrl = process.env.SANDBOX_SERVICE_URL;
   if (sandboxServiceUrl) {
     try {
-      const ticket = createSandboxExecutionTicket(cleanCmd, safeAgentId, timeoutMs + 10000);
+      const ticket = createSandboxExecutionTicket({
+        command: cleanCmd,
+        agentId: safeAgentId,
+        taskId: options.taskId,
+        approvalId: options.approvalId,
+        authorizationType: options.authorizationType || (options.approvalId ? 'human_approval' : 'system_verified_test'),
+        ttlMs: timeoutMs + 10000,
+      });
       const ticketBase64 = Buffer.from(JSON.stringify(ticket)).toString('base64');
       const response = await fetch(`${sandboxServiceUrl}/exec`, {
         method: 'POST',
@@ -243,6 +263,9 @@ export async function executeSandboxedCommand(
         },
         body: JSON.stringify({
           agentId: safeAgentId,
+          taskId: ticket.taskId,
+          approvalId: ticket.approvalId,
+          authorizationType: ticket.authorizationType,
           command: cleanCmd,
           timeoutMs,
           maxBufferBytes: maxBuffer,

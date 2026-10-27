@@ -48,10 +48,12 @@ import {
   clickInteractiveElement,
   captureSessionScreenshot,
   renderBrowserScreenshotPng,
+  captureRealBrowserScreenshot,
 } from '../lib/browser-session.ts';
 import {
   createSandboxExecutionTicket,
   verifySandboxExecutionTicket,
+  getSandboxRunnerSecret,
 } from '../lib/sandbox-ticket.ts';
 import fs from 'fs';
 import path from 'path';
@@ -801,15 +803,28 @@ test('Browser Screenshots: Generates genuine binary PNG with valid IHDR and IDAT
 // =========================================================================
 // 20. SANDBOX RUNNER EXECUTION TICKET AUTHENTICATION & REPLAY DEFENSE
 // =========================================================================
-test('Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered, replayed, or expired requests', () => {
-  const secret = 'test-audit-runner-secret-key-32bytes';
+// =========================================================================
+// 20. SANDBOX RUNNER EXECUTION TICKET AUTHENTICATION & AUTHORIZATION CHAIN
+// =========================================================================
+test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain, and rejects insecure defaults or replay', () => {
+  const secret = 'a9f2c8d1e3b50742a8c3d7e1f4095861b2a4c6e80d2f4a6b8c0e2d4f6a8b0c2e';
   const command = 'node -e "console.log(process.version)"';
   const agentId = 'agent-cipher-audit';
+  const approvalId = 'appr-audit-human-123';
 
-  // 1. Generate valid ticket
-  const ticket = createSandboxExecutionTicket(command, agentId, 30000, secret);
+  // 1. Generate valid human approval ticket
+  const ticket = createSandboxExecutionTicket({
+    command,
+    agentId,
+    approvalId,
+    authorizationType: 'human_approval',
+    ttlMs: 30000,
+    secret,
+  });
   assert.ok(ticket.signature.length > 20, 'Ticket must contain valid HMAC signature');
   assert.equal(ticket.agentId, agentId);
+  assert.equal(ticket.approvalId, approvalId);
+  assert.equal(ticket.authorizationType, 'human_approval');
 
   // 2. Legitimate verification succeeds
   const verified = verifySandboxExecutionTicket(ticket, command, agentId, undefined, secret);
@@ -826,12 +841,12 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered,
   assert.ok(spoofedAgent.error?.includes('different agent'));
 
   // 5. Wrong secret fails
-  const badSecret = verifySandboxExecutionTicket(ticket, command, agentId, undefined, 'wrong-secret-key');
+  const badSecret = verifySandboxExecutionTicket(ticket, command, agentId, undefined, 'f4095861b2a4c6e80d2f4a6b8c0e2d4fa9f2c8d1e3b50742a8c3d7e1');
   assert.equal(badSecret.valid, false, 'Wrong secret must be rejected');
   assert.ok(badSecret.error?.includes('cryptographic signature is invalid'));
 
   // 6. Expired ticket fails
-  const expiredTicket = createSandboxExecutionTicket(command, agentId, -1000, secret);
+  const expiredTicket = createSandboxExecutionTicket({ command, agentId, approvalId, authorizationType: 'human_approval', ttlMs: -1000, secret });
   const expiredRes = verifySandboxExecutionTicket(expiredTicket, command, agentId, undefined, secret);
   assert.equal(expiredRes.valid, false, 'Expired ticket must be rejected');
   assert.ok(expiredRes.error?.includes('expired'));
@@ -841,27 +856,35 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets and rejects tampered,
   const replayed = verifySandboxExecutionTicket(ticket, command, agentId, consumedTickets, secret);
   assert.equal(replayed.valid, false, 'Replayed ticket must be rejected');
   assert.ok(replayed.error?.includes('replay detected'));
+
+  // 8. Insecure default secret rejection
+  const origEnvSecret = process.env.SANDBOX_RUNNER_SECRET;
+  try {
+    process.env.SANDBOX_RUNNER_SECRET = 'nook_internal_runner_auth_secret_v1';
+    assert.throws(() => getSandboxRunnerSecret(), /SECURITY FAULT: SANDBOX_RUNNER_SECRET is set to an insecure/);
+    const insecureRes = verifySandboxExecutionTicket(ticket, command, agentId);
+    assert.equal(insecureRes.valid, false);
+    assert.ok(insecureRes.error?.includes('SECURITY FAULT'));
+  } finally {
+    process.env.SANDBOX_RUNNER_SECRET = origEnvSecret;
+  }
 });
 
 // =========================================================================
-// 21. BROWSER SCREENSHOT METADATA & SYNTHETIC PLACEHOLDER LABELING
+// 21. BROWSER SCREENSHOT METADATA & REAL CAPTURE VERIFICATION
 // =========================================================================
-test('Browser Screenshots: Distinguishes authentic Playwright captures from synthetic fallbacks with honest metadata', async () => {
+test('Browser Screenshots: Real Playwright browser capture produces authentic PNG and strictly rejects placeholders', async () => {
   const session = getOrCreateBrowserSession('agent-audit-inspector');
   await navigateBrowser('agent-audit-inspector', 'https://example.com/checkout');
 
   assert.ok(session.screenshotMetadata, 'Session must expose screenshotMetadata');
-  if (session.screenshotMetadata.isSyntheticPlaceholder) {
-    assert.equal(session.screenshotMetadata.captureType, 'synthetic_placeholder');
-    assert.ok(session.screenshotMetadata.notice);
-  } else {
-    assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture');
-    assert.ok(
-      session.screenshotMetadata.engine?.includes('playwright') ||
-      session.screenshotMetadata.engine?.includes('chromium')
-    );
-    assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false);
-  }
+  assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false, 'Real browser acceptance suite strictly rejects placeholders');
+  assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture', 'Must be authentic playwright_browser_capture');
+  assert.ok(
+    session.screenshotMetadata.engine?.includes('playwright') ||
+    session.screenshotMetadata.engine?.includes('chromium'),
+    'Engine must be verified chromium or playwright browser'
+  );
 });
 
 // =========================================================================
@@ -990,7 +1013,7 @@ test('Solution Planner: Dynamic synthesis produces genuine requirement-driven co
   assert.ok(dedupPlan.methods.includes('normalize'));
 
   // Completely novel custom engineering prompt
-  const novelPlan = synthesizeSolutionWithModel('Synthesize a distributed vector clock for causal consistency ordering');
+  const novelPlan = await synthesizeSolutionWithModel('Synthesize a distributed vector clock for causal consistency ordering');
   assert.equal(novelPlan.domain, 'arbitrary_algorithm');
   assert.ok(novelPlan.solution.includes('process'));
   assert.ok(novelPlan.testCode.includes('assert'));
@@ -1017,3 +1040,74 @@ test('Runner Safety: validateCommandSafety independently rejects traversal and d
   const safe = validateCommandSafety('node -e "console.log(1+1)"', 'agent-scout');
   assert.equal(safe.safe, true, 'Standard commands must be accepted');
 });
+
+// =========================================================================
+// 28. PLAYWRIGHT SSRF ROUTE INTERCEPTION & NETWORK RESTRICTION
+// =========================================================================
+test('Playwright Security: SSRF route interception blocks navigations to loopback and cloud metadata', async () => {
+  // Cloud metadata endpoint
+  const metadataCapture = await captureRealBrowserScreenshot('http://169.254.169.254/latest/meta-data/');
+  assert.equal(metadataCapture, null, 'Playwright capture to cloud metadata must be blocked');
+
+  // Loopback / private endpoint
+  const loopbackCapture = await captureRealBrowserScreenshot('http://127.0.0.1:3000/api/workspace/state');
+  assert.equal(loopbackCapture, null, 'Playwright capture to local network must be blocked');
+});
+
+// =========================================================================
+// 29. CROSS-AGENT FILESYSTEM BOUNDARY ISOLATION
+// =========================================================================
+test('Filesystem Isolation: Cross-agent task traversal is strictly blocked', () => {
+  // Attempt to read sibling agent's directory
+  const crossAgent = validateCommandSafety('cat ../../agent-cipher/tasks/task-99/secret.key', 'agent-scout');
+  assert.equal(crossAgent.safe, false, 'Cross-agent directory traversal must be blocked');
+
+  // Attempt to escape through .nook_sandboxes base
+  const escapeSandboxes = validateCommandSafety('cat .nook_sandboxes/agent-cipher/tasks', 'agent-scout');
+  assert.equal(escapeSandboxes.safe, false, 'Direct reference to other agent sandbox must be blocked');
+});
+
+// =========================================================================
+// 30. TASK & DOCUMENT EVIDENCE VERIFICATION
+// =========================================================================
+test('Evidence Engine: Document generation requires verifiable evidence and rejects unproven claims', async () => {
+  const job = enqueueJob({
+    agentId: 'agent-quill',
+    taskType: 'doc_generation',
+    title: 'Architecture Review Document',
+    prompt: 'Synthesize architecture findings',
+  });
+
+  await executeJob(job);
+  const executed = getJobById(job.id);
+  assert.ok(executed);
+  assert.equal(executed.status, 'completed');
+
+  // Verify generated document content
+  const db = getDatabase();
+  const doc = db.prepare(`SELECT * FROM documents WHERE id = ?`).get(`doc-${job.id}`);
+  assert.ok(doc);
+  assert.equal(
+    doc.content.includes('Verified architecture alignment'),
+    false,
+    'Must not include unproven boilerplate statements like "Verified architecture alignment"'
+  );
+  assert.ok(
+    doc.content.includes('Verifiable Evidence & Findings'),
+    'Document must have verifiable evidence section'
+  );
+});
+
+// =========================================================================
+// 31. MODEL-DRIVEN ITERATIVE SYNTHESIS & ACCEPTANCE VERIFICATION
+// =========================================================================
+test('Model Coding Engine: Generates verifiable solutions with independent acceptance criteria', async () => {
+  const { synthesizeSolutionWithModel } = await import('../lib/solution-planner.ts');
+  const plan = await synthesizeSolutionWithModel('Build an in-memory priority queue with TTL expiration');
+
+  assert.ok(plan.solution.length > 50, 'Solution code must be generated');
+  assert.ok(plan.testCode.length > 50, 'Test code must be generated');
+  assert.ok(plan.command.includes('node --test'), 'Command must run standard test runner');
+  assert.ok(Array.isArray(plan.requirements), 'Requirements must be parsed into list');
+});
+

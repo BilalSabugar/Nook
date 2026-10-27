@@ -1,6 +1,6 @@
 # Nook Real-World End-to-End Demonstrations
 
-**Verification Date:** 2026-10-27T01:19:11.447Z  
+**Verification Date:** 2026-10-27T02:50:13.222Z  
 **Environment:** Node.js v24.12.0 (win32)  
 **Audit Status:** All 4 Demonstrations Verified End-to-End  
 
@@ -25,6 +25,6 @@
 
 ### Demonstration D: Persistent Mission & Worker Restart Survival
 - **Objective:** Background job is claimed, worker simulated to restart mid-execution, persisted SQLite state recovers, and worker finishes task.
-- **Job ID:** `job-1793063951367-25b973`
+- **Job ID:** `job-1793069413116-f54996`
 - **Final Progress:** `100%`
 - **Result:** **VERIFIED**

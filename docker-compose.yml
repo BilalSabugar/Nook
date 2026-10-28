@@ -102,19 +102,19 @@ services:
       - sandbox_internal
 
   container-supervisor:
-    image: docker:27-dind-rootless
+    image: docker:27-dind
     container_name: nook-container-supervisor
     restart: unless-stopped
     privileged: true
     environment:
       - DOCKER_TLS_CERTDIR=
-      - DOCKER_HOST=tcp://127.0.0.1:2375
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
     networks:
+      - default
       - sandbox_internal
     healthcheck:
-      test: ["CMD-SHELL", "docker info || docker -H tcp://127.0.0.1:2375 info"]
+      test: ["CMD", "docker", "info"]
       interval: 5s
       timeout: 3s
       retries: 10

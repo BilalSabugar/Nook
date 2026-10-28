@@ -64,13 +64,16 @@ jobs:
         run: |
           docker pull node:24-alpine
           docker pull node:22-alpine
-          docker pull docker:27-dind-rootless
+          docker pull docker:27-dind
 
       - name: Build Production Containers
         run: docker compose build
 
       - name: Start Production Stack with Docker Compose
         run: docker compose up -d
+
+      - name: Preload Task Sandbox Image into Supervisor
+        run: docker save node:22-alpine | docker exec -i nook-container-supervisor docker load
 
       - name: Run Production Integration & Cross-Agent Isolation Verification
         run: node bin/test-production-compose.mjs

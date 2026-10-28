@@ -217,8 +217,20 @@ fs.writeFileSync('output_metrics.json', JSON.stringify({
   console.log(`  Runtime: ${execData.isolatedRuntime}`);
 
   // Step 4: Verify in-container filesystem boundary
-  // Command running inside container cannot see /app/.nook_storage or parent directories
-  const boundaryCheckCmd = 'node -e "import fs from \\"fs\\"; console.log(\\"PARENT_DIR_EXISTS:\\", fs.existsSync(\\"/app/.nook_storage\\"))"';
+  // Command running inside container cannot see /app/.nook_storage or host storage directories
+  const boundaryCheckCmd = 'node check_boundary.mjs';
+  const boundaryFiles = [
+    {
+      name: 'check_boundary.mjs',
+      content: `
+import fs from 'fs';
+const hasAppStorage = fs.existsSync('/app/.nook_storage');
+console.log('CONTAINER_FILESYSTEM_CHECK: SUCCESS');
+console.log('APP_STORAGE_ACCESSIBLE: ' + hasAppStorage);
+`,
+    },
+  ];
+
   const boundaryTicket = createSignedTicket({
     command: boundaryCheckCmd,
     agentId: 'agent-cipher',
@@ -236,14 +248,20 @@ fs.writeFileSync('output_metrics.json', JSON.stringify({
       agentId: 'agent-cipher',
       command: boundaryCheckCmd,
       taskId: boundaryTicket.taskId,
+      virtualFiles: boundaryFiles,
       timeoutMs: 15000,
     }),
   });
 
-  assert.equal(boundaryRes.status, 200);
+  assert.equal(boundaryRes.status, 200, `Boundary execution should return 200, got ${boundaryRes.status}`);
   const boundaryData = await boundaryRes.json();
+  assert.equal(boundaryData.exitCode, 0);
   assert.ok(
-    boundaryData.stdout.includes('PARENT_DIR_EXISTS: false'),
+    boundaryData.stdout.includes('CONTAINER_FILESYSTEM_CHECK: SUCCESS'),
+    'Container script should execute successfully'
+  );
+  assert.ok(
+    boundaryData.stdout.includes('APP_STORAGE_ACCESSIBLE: false'),
     'Container filesystem must not expose host or web container storage paths'
   );
   console.log('✔ In-container boundary: Host storage is completely isolated from task container\n');

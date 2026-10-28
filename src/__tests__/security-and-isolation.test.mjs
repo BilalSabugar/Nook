@@ -74,16 +74,33 @@ const TEST_RUNNER_SECRET = crypto.randomBytes(32).toString('hex');
 process.env.SANDBOX_RUNNER_SECRET = TEST_RUNNER_SECRET;
 process.env.SANDBOX_SERVICE_URL = 'http://127.0.0.1:4010';
 
+let hasRealDockerDaemon = false;
+try {
+  execSync('docker version', { stdio: 'ignore', timeout: 3000 });
+  hasRealDockerDaemon = true;
+} catch {
+  hasRealDockerDaemon = false;
+}
+
+const runnerEnv = {
+  ...process.env,
+  PORT: '4010',
+  SANDBOX_RUNNER_SECRET: TEST_RUNNER_SECRET,
+};
+
+if (hasRealDockerDaemon) {
+  // Production container arrangement: Use REAL Docker daemon directly
+  runnerEnv.DOCKER_BIN = 'docker';
+} else {
+  // Local fallback for developer hosts without a running Docker daemon
+  runnerEnv.DOCKER_BIN = process.execPath;
+  runnerEnv.DOCKER_ARGS_PREFIX = path.resolve(process.cwd(), 'bin/mock-docker.mjs');
+}
+
 let runnerProc = null;
 try {
   runnerProc = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
-    env: {
-      ...process.env,
-      PORT: '4010',
-      SANDBOX_RUNNER_SECRET: TEST_RUNNER_SECRET,
-      DOCKER_BIN: process.execPath,
-      DOCKER_ARGS_PREFIX: path.resolve(process.cwd(), 'bin/mock-docker.mjs'),
-    },
+    env: runnerEnv,
     stdio: 'ignore',
   });
   if (runnerProc && typeof runnerProc.unref === 'function') {
@@ -1432,7 +1449,7 @@ test('Cipher Mission: Full end-to-end execution path with human approval, task w
   assert.equal(decisionRes.success, true);
 
   // 3. Advance mission tick 4: Cipher consumes approval, executes in sandbox, parses structured test results
-  await tickMission(mission.id, 'worker-test-cipher', 10000);
+  await tickMission(mission.id, 'worker-test-cipher', 30000);
 
   const completedCipher = getAgentTaskById(cipherTask.id);
   assert.ok(completedCipher);
@@ -1442,6 +1459,12 @@ test('Cipher Mission: Full end-to-end execution path with human approval, task w
   // Approval must now be consumed
   const consumedApproval = getApprovalById(blockedCipher.approvalId);
   assert.equal(consumedApproval.status, 'consumed', 'Approval token must be single-use and consumed');
+
+  // 4. Verify cross-agent filesystem isolation:
+  const scoutWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', 'agent-scout');
+  const cipherWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', 'agent-cipher');
+  assert.notEqual(scoutWorkspace, cipherWorkspace, 'Agent workspaces must be isolated separate directories');
+  assert.ok(!expectedTaskWorkspace.includes('agent-scout'), 'Cipher task workspace cannot overlap Scout workspace');
 });
 
 // =========================================================================

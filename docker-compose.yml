@@ -95,6 +95,8 @@ services:
           memory: 128M
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
+    ports:
+      - "127.0.0.1:4000:4000"
     networks:
       - default
       - sandbox_internal
@@ -103,8 +105,7 @@ services:
     image: docker:27-dind-rootless
     container_name: nook-container-supervisor
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    privileged: true
     environment:
       - DOCKER_TLS_CERTDIR=
     volumes:

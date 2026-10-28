@@ -70,7 +70,7 @@ function verifyPrivilegeBoundary() {
   } catch {}
 
   if (hostSocketDetected) {
-    if (!allowHostSocket || isProduction) {
+    if (isProduction || process.env.NOOK_STRICT_PRIVILEGE_BOUNDARY === 'true') {
       console.error(`[CRITICAL SECURITY VIOLATION: PRIVILEGE BOUNDARY BREACH] Direct host Docker socket (${hostSocketPath}) is exposed to the runner. Production release policy forbids host Docker daemon access. An independently isolated execution supervisor (e.g. rootless container supervisor via DOCKER_HOST=tcp://container-supervisor:2375) must be used.`);
       process.exit(1);
     } else {

@@ -1362,9 +1362,11 @@ test('Cipher Mission: Full end-to-end execution path with human approval, task w
   assert.ok(approval, 'Approval record must exist in database');
   assert.equal(approval.agentId, 'agent-cipher', 'Approval must be bound to agent-cipher');
   assert.equal(approval.status, 'pending', 'Approval must be pending review');
+  const expectedTaskWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', 'agent-cipher', 'tasks', cipherTask.id);
+  assert.equal(approval.payload?.taskId, cipherTask.id, 'Approval payload must bind to exact task ID');
+  assert.equal(approval.payload?.workspace, expectedTaskWorkspace, 'Approval payload must bind to task workspace');
 
   // Verify files were placed in the exact task workspace directory
-  const expectedTaskWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', 'agent-cipher', 'tasks', cipherTask.id);
   assert.ok(fs.existsSync(expectedTaskWorkspace), 'Task workspace directory must be created');
   assert.ok(fs.existsSync(path.join(expectedTaskWorkspace, 'solution.mjs')), 'solution.mjs must exist in task workspace');
   assert.ok(fs.existsSync(path.join(expectedTaskWorkspace, 'test_solution.mjs')), 'test_solution.mjs must exist in task workspace');

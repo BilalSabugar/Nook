@@ -105,6 +105,9 @@ function verifyServerAuthorization(options: {
     if (appr.payload?.command && appr.payload.command.trim() !== options.command.trim()) {
       throw new Error('Server authorization denied: Approval command mismatch.');
     }
+    if (appr.payload?.taskId && options.taskId && appr.payload.taskId !== options.taskId) {
+      throw new Error(`Server authorization denied: Approval task ID mismatch (expected "${options.taskId}", found "${appr.payload.taskId}").`);
+    }
   } else if (options.authorizationType === 'system_verified_test') {
     if (!options.taskId) {
       throw new Error('Server authorization denied: System verified test ticket requires bound taskId.');

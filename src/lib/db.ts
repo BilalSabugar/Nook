@@ -220,6 +220,8 @@ export interface DbApprovalRecord {
     pageContent?: string;
     toolName?: string;
     toolArgs?: Record<string, unknown>;
+    taskId?: string;
+    workspace?: string;
   };
   status: 'pending' | 'approved' | 'declined' | 'consumed' | 'rolled_back';
   createdAt: string;

@@ -522,7 +522,7 @@ ${citationsList}
         type: 'run_command',
         title: `Authorize Sandbox Test: ${rawCmd.slice(0, 40)}`,
         description: `Mission task "${task.title}" requires shell execution of automated test suite in sandbox.`,
-        payload: { command: rawCmd },
+        payload: { command: rawCmd, taskId: task.id, workspace: taskWorkspaceDir },
       });
 
       updateAgentTask(task.id, {

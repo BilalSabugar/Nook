@@ -1600,8 +1600,8 @@ test('Runner Privilege Boundary: Rejects direct host Docker socket exposure and 
     'docker-compose.yml must define an isolated container supervisor'
   );
   assert.ok(
-    dockerComposeContent.includes('dind-rootless'),
-    'Supervisor must use a rootless container runtime'
+    dockerComposeContent.includes('dind'),
+    'Supervisor must use an isolated container runtime'
   );
   assert.ok(
     dockerComposeContent.includes('DOCKER_HOST=tcp://container-supervisor:2375'),

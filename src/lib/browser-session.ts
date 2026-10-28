@@ -305,6 +305,7 @@ export async function getOrCreateLivePlaywrightPage(
     const context = await browser.newContext({
       viewport,
       serviceWorkers: 'block', // Strictly prevent service worker bypass
+      proxy: egressProxy ? { server: egressProxy.url, bypass: '<-loopback>' } : undefined,
     });
     const page = await context.newPage();
 
@@ -433,6 +434,7 @@ export async function captureRealBrowserScreenshot(
       const context = await browser.newContext({
         viewport,
         serviceWorkers: 'block', // Strictly prevent service workers from bypassing route interception
+        proxy: egressProxy ? { server: egressProxy.url, bypass: '<-loopback>' } : undefined,
       });
       const page = await context.newPage();
 

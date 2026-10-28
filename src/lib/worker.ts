@@ -86,11 +86,24 @@ export function recoverStaleJobsAndMissions(): { recoveredJobs: number; recovere
     const staleTasks = db.prepare(`
       SELECT * FROM agent_tasks
       WHERE status = 'in_progress'
-    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; assigned_agent_id: string }>;
+    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; assigned_agent_id: string; approval_id?: string }>;
 
     for (const t of staleTasks) {
       const updatedAtMs = new Date(t.updated_at || t.created_at).getTime();
       if (now - updatedAtMs > 60000) {
+        if (t.approval_id) {
+          // Task had human approval; if it was interrupted while in_progress, its approval was already single-use consumed.
+          // Marking it failed prevents duplicate execution of mutating external actions.
+          db.prepare(`
+            UPDATE agent_tasks
+            SET status = 'failed', updated_at = ?
+            WHERE id = ?
+          `).run(new Date().toISOString(), t.id);
+          recoveredMissions++;
+          logAuditEvent('WORKER_CRASH_RECOVERY', `Interrupted approved task ${t.id} marked failed to preserve approval single-use guarantee`, 'failed', t.assigned_agent_id);
+          continue;
+        }
+
         db.prepare(`
           UPDATE agent_tasks
           SET status = 'pending', updated_at = ?

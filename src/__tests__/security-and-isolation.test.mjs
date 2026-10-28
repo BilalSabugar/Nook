@@ -2086,6 +2086,33 @@ test('Filesystem Boundary: ensureRealDirectoryWithin and writeFileNoFollow refus
   }
 });
 
+// =========================================================================
+// 51. OPERATIONAL RECOVERY: APPROVED TASKS INTERRUPTED BY CRASH
+// =========================================================================
+test('Operational Recovery: Interrupted approved tasks fail safely on crash to preserve single-use approvals', async () => {
+  const db = getDatabase();
+  const testTaskId = `task-recovery-crash-${Date.now()}`;
+  const testApprovalId = `appr-recovery-crash-${Date.now()}`;
+  const pastTime = new Date(Date.now() - 75000).toISOString();
+
+  const testMissionId = `mission-recovery-test-${Date.now()}`;
+  db.prepare(`
+    INSERT INTO missions (id, title, objective, status, priority, assigned_agents_json, milestones_json, created_at, updated_at)
+    VALUES (?, 'Recovery Mission', 'Testing recovery', 'active', 'high', '[]', '[]', ?, ?)
+  `).run(testMissionId, pastTime, pastTime);
+
+  db.prepare(`
+    INSERT INTO agent_tasks (id, mission_id, title, goal, assigned_agent_id, status, approval_id, created_at, updated_at)
+    VALUES (?, ?, 'Approved Task In-Flight', 'Run sensitive action', 'agent-cipher', 'in_progress', ?, ?, ?)
+  `).run(testTaskId, testMissionId, testApprovalId, pastTime, pastTime);
+
+  const res = recoverStaleJobsAndMissions();
+  assert.ok(res.recoveredMissions >= 1, 'Must recover stale task');
+
+  const task = getAgentTaskById(testTaskId);
+  assert.equal(task?.status, 'failed', 'Interrupted approved task must fail safe instead of resetting to pending');
+});
+
 after(async () => {
   killProcessSafely(runnerProc);
   await closeAllBrowserSessions().catch(() => {});

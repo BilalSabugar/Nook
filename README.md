@@ -169,7 +169,7 @@ cd Nook
 npm ci
 
 # 3. Run validation checks
-npm test               # Runs 68 unit & integration security tests
+npm test               # Runs 69 unit & integration security tests
 npm run typecheck      # Verifies TypeScript types with zero errors
 npm run lint           # Runs ESLint checks
 npm run build          # Builds production bundle
@@ -202,7 +202,7 @@ Nook includes an extensive test suite covering security, approvals, isolation, a
 npm test
 ```
 
-Key verified test suites (68 tests passing):
+Key verified test suites (69 tests passing):
 - `Auth: Anonymous and invalid token requests are strictly denied`
 - `Auth: Legitimate cryptographic session tokens succeed`
 - `Auth: Dual human approver credential separation and reverse-proxy IP rate limiting`

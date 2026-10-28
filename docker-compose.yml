@@ -70,6 +70,9 @@ services:
     image: nook:latest
     restart: unless-stopped
     command: ["npm", "run", "sandbox-runner"]
+    depends_on:
+      container-supervisor:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:4000/health"]
       interval: 20s
@@ -79,6 +82,7 @@ services:
     environment:
       - PORT=4000
       - NODE_ENV=production
+      - DOCKER_HOST=tcp://container-supervisor:2375
       - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required. Generate with: openssl rand -hex 32}
     deploy:
       resources:
@@ -90,10 +94,36 @@ services:
           memory: 128M
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
-      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - default
+      - sandbox_internal
+
+  container-supervisor:
+    image: docker:27-dind-rootless
+    container_name: nook-container-supervisor
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - nook_sandboxes:/app/.nook_sandboxes
+    networks:
+      - sandbox_internal
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   nook_data:
     driver: local
   nook_sandboxes:
     driver: local
+
+networks:
+  default:
+  sandbox_internal:
+    internal: true

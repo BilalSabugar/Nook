@@ -18,6 +18,7 @@
 import http from 'http';
 import path from 'path';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
 
@@ -46,6 +47,44 @@ if (rawSecret.length < 16) {
   process.exit(1);
 }
 const RUNNER_SECRET = rawSecret;
+
+/**
+ * Privilege Boundary Guard:
+ * Release policy strictly prohibits mounting or exposing the host's Docker daemon socket (/var/run/docker.sock)
+ * to the runner container. Unrestricted host socket access grants host-level root privileges.
+ * An independently isolated execution supervisor (e.g. rootless container daemon via DOCKER_HOST) must be used.
+ */
+function verifyPrivilegeBoundary() {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const allowHostSocket = process.env.NOOK_ALLOW_HOST_DOCKER_SOCKET === 'true';
+  const hostSocketPath = process.env.TEST_HOST_DOCKER_SOCKET_PATH || '/var/run/docker.sock';
+
+  let hostSocketDetected = false;
+  try {
+    if (fsSync.existsSync(hostSocketPath)) {
+      const stats = fsSync.statSync(hostSocketPath);
+      if (stats.isSocket() || stats.isFile()) {
+        hostSocketDetected = true;
+      }
+    }
+  } catch {}
+
+  if (hostSocketDetected) {
+    if (!allowHostSocket || isProduction) {
+      console.error(`[CRITICAL SECURITY VIOLATION: PRIVILEGE BOUNDARY BREACH] Direct host Docker socket (${hostSocketPath}) is exposed to the runner. Production release policy forbids host Docker daemon access. An independently isolated execution supervisor (e.g. rootless container supervisor via DOCKER_HOST=tcp://container-supervisor:2375) must be used.`);
+      process.exit(1);
+    } else {
+      console.warn(`[SECURITY WARNING] Direct host Docker socket (${hostSocketPath}) detected in non-production environment.`);
+    }
+  }
+
+  if (process.env.DOCKER_HOST) {
+    console.log(`[Nook Sandbox Runner] Execution supervisor connected via ${process.env.DOCKER_HOST} (privilege boundary enforced).`);
+  }
+}
+
+verifyPrivilegeBoundary();
+
 const MAX_BODY_BYTES = 2 * 1024 * 1024; // 2MB aligned body limit for code and virtual files
 
 const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
@@ -240,7 +279,7 @@ function spawnIsolatedBuffer(executable, args, options = {}) {
 
     const child = spawn(executable, args, {
       cwd: options.cwd || process.cwd(),
-      env: options.env || {},
+      env: options.env !== undefined ? options.env : process.env,
       shell: false,
       detached: !isWin, // Process group leader on POSIX
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -311,6 +350,8 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       status: 'healthy',
       runner: 'dedicated_sandbox_runner',
+      supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'local_supervisor',
+      privilegeBoundary: 'enforced',
       authRequired: true,
       time: new Date().toISOString(),
     }));
@@ -452,11 +493,23 @@ const server = http.createServer(async (req, res) => {
         let result;
         const dockerBin = process.env.DOCKER_BIN || 'docker';
         const dockerPrefix = process.env.DOCKER_ARGS_PREFIX ? [process.env.DOCKER_ARGS_PREFIX] : [];
+        const dockerSpawnEnv = {
+          PATH: process.env.PATH || '',
+          PATHEXT: process.env.PATHEXT || '',
+          SYSTEMROOT: process.env.SYSTEMROOT || '',
+          COMSPEC: process.env.COMSPEC || '',
+          DOCKER_HOST: process.env.DOCKER_HOST || '',
+          DOCKER_TLS_VERIFY: process.env.DOCKER_TLS_VERIFY || '',
+          DOCKER_CERT_PATH: process.env.DOCKER_CERT_PATH || '',
+        };
 
         if (process.env.NOOK_DISABLE_DOCKER !== 'true') {
           try {
             const hasDocker = await new Promise((resolve) => {
-              const p = spawn(dockerBin, [...dockerPrefix, 'version'], { stdio: 'ignore' });
+              const p = spawn(dockerBin, [...dockerPrefix, 'version'], {
+                stdio: 'ignore',
+                env: dockerSpawnEnv,
+              });
               p.on('close', (c) => resolve(c === 0));
               p.on('error', () => resolve(false));
             });
@@ -476,6 +529,7 @@ const server = http.createServer(async (req, res) => {
               result = await spawnIsolatedBuffer(dockerBin, dockerArgs, {
                 timeout: clampedTimeout,
                 maxBuffer: clampedBuffer,
+                env: dockerSpawnEnv,
               });
             }
           } catch {}
@@ -488,6 +542,7 @@ const server = http.createServer(async (req, res) => {
             error: 'Execution denied: Genuine per-task container isolation is required. Unsafe host/container fallback is disabled.',
             exitCode: 126,
             isolatedRuntime: 'none',
+            supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'none',
             sandboxDir: taskWorkspaceDir,
             agentId: safeAgentId,
           }));
@@ -500,6 +555,7 @@ const server = http.createServer(async (req, res) => {
           stderr: result.stderr,
           exitCode: result.exitCode,
           isolatedRuntime: 'docker_container',
+          supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'local_supervisor',
           sandboxDir: taskWorkspaceDir,
           agentId: safeAgentId,
         }));

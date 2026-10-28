@@ -616,8 +616,7 @@ test('Supervisor: Background worker advances active missions and recovers from c
 // 11. SSRF DNS PINNING TESTS
 // =========================================================================
 test('SSRF: safeFetch uses DNS pinning to prevent TOCTOU rebinding', async () => {
-  // Safe fetch to Wikipedia API
-  const res = await safeFetch('https://en.wikipedia.org/w/api.php?action=opensearch&search=test&limit=1&format=json', {
+  const res = await safeFetch('https://example.com', {
     timeoutMs: 8000,
   });
 
@@ -1560,6 +1559,72 @@ test('Authorization Matrix: Strictly denies mismatched agent, tampered command, 
     }),
     /Server authorization denied: Approval command mismatch/
   );
+});
+
+// =========================================================================
+// 40. RUNNER PRIVILEGE BOUNDARY: ENFORCES ISOLATED SUPERVISOR AND REJECTS HOST SOCKET
+// =========================================================================
+test('Runner Privilege Boundary: Rejects direct host Docker socket exposure and requires isolated supervisor', async () => {
+  // 1. Verify that docker-compose.yml does NOT mount /var/run/docker.sock
+  const dockerComposeContent = fs.readFileSync(path.resolve(process.cwd(), 'docker-compose.yml'), 'utf8');
+  assert.equal(
+    dockerComposeContent.includes('/var/run/docker.sock:/var/run/docker.sock'),
+    false,
+    'docker-compose.yml must not expose the host Docker socket'
+  );
+  assert.ok(
+    dockerComposeContent.includes('container-supervisor'),
+    'docker-compose.yml must define an isolated container supervisor'
+  );
+  assert.ok(
+    dockerComposeContent.includes('dind-rootless'),
+    'Supervisor must use a rootless container runtime'
+  );
+  assert.ok(
+    dockerComposeContent.includes('DOCKER_HOST=tcp://container-supervisor:2375'),
+    'Runner must communicate with supervisor via isolated network TCP DOCKER_HOST'
+  );
+  assert.ok(
+    dockerComposeContent.includes('internal: true'),
+    'Supervisor network must be strictly internal with no host or external exposure'
+  );
+
+  // 2. Test runner privilege boundary guard: simulate host socket presence in production
+  const fakeSocketDir = path.resolve(process.cwd(), '.nook_sandboxes', 'test_fake_socket_dir');
+  fs.mkdirSync(fakeSocketDir, { recursive: true });
+  const fakeSocketPath = path.resolve(fakeSocketDir, 'docker.sock');
+  fs.writeFileSync(fakeSocketPath, '');
+
+  const secret = crypto.randomBytes(32).toString('hex');
+  const boundaryRunner = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
+    env: {
+      ...process.env,
+      PORT: '4012',
+      NODE_ENV: 'production',
+      SANDBOX_RUNNER_SECRET: secret,
+      TEST_HOST_DOCKER_SOCKET_PATH: fakeSocketPath,
+    },
+    stdio: 'pipe',
+  });
+
+  const exitPromise = new Promise((resolve) => {
+    let errOutput = '';
+    boundaryRunner.stderr.on('data', (d) => { errOutput += d.toString(); });
+    boundaryRunner.on('close', (code) => resolve({ code, errOutput }));
+  });
+
+  const { code, errOutput } = await exitPromise;
+  assert.equal(code, 1, 'Runner must fail closed when host socket exposure is detected in production');
+  assert.ok(
+    errOutput.includes('PRIVILEGE BOUNDARY BREACH') || errOutput.includes('Direct host Docker socket'),
+    'Runner error must explicitly state the privilege boundary violation'
+  );
+
+  // Clean up fake socket
+  try {
+    fs.unlinkSync(fakeSocketPath);
+    fs.rmdirSync(fakeSocketDir);
+  } catch {}
 });
 
 after(() => {

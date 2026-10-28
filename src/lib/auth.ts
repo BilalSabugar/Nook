@@ -135,6 +135,54 @@ function checkRateLimit(key: string): boolean {
   return true;
 }
 
+// Login attempt rate limiting to prevent brute-force attacks
+const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_FAILED_LOGIN_ATTEMPTS = 5; // Max 5 failed attempts per 5 minutes
+const loginAttemptBuckets = new Map<string, { failedCount: number; windowStart: number; blockedUntil?: number }>();
+
+export function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfterSeconds?: number } {
+  const now = Date.now();
+  const record = loginAttemptBuckets.get(ip);
+  if (!record) {
+    return { allowed: true };
+  }
+
+  if (record.blockedUntil && now < record.blockedUntil) {
+    const retryAfterSeconds = Math.ceil((record.blockedUntil - now) / 1000);
+    return { allowed: false, retryAfterSeconds };
+  }
+
+  if (now - record.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
+    loginAttemptBuckets.delete(ip);
+    return { allowed: true };
+  }
+
+  if (record.failedCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
+    record.blockedUntil = now + LOGIN_ATTEMPT_WINDOW_MS;
+    const retryAfterSeconds = Math.ceil(LOGIN_ATTEMPT_WINDOW_MS / 1000);
+    return { allowed: false, retryAfterSeconds };
+  }
+
+  return { allowed: true };
+}
+
+export function recordFailedLogin(ip: string): void {
+  const now = Date.now();
+  const record = loginAttemptBuckets.get(ip);
+  if (!record || now - record.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
+    loginAttemptBuckets.set(ip, { failedCount: 1, windowStart: now });
+  } else {
+    record.failedCount += 1;
+    if (record.failedCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
+      record.blockedUntil = now + LOGIN_ATTEMPT_WINDOW_MS;
+    }
+  }
+}
+
+export function recordSuccessfulLogin(ip: string): void {
+  loginAttemptBuckets.delete(ip);
+}
+
 /**
  * Validates request authorization token across headers or bearer credentials.
  * Enforces:

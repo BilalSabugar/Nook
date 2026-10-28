@@ -65,7 +65,7 @@ export async function GET(req: NextRequest) {
     headers: {
       'Content-Type': 'image/png',
       'Content-Length': fileBytes.length.toString(),
-      'Cache-Control': 'public, max-age=120, immutable',
+      'Cache-Control': 'private, no-store, no-cache, must-revalidate',
       'X-Content-Type-Options': 'nosniff',
       'X-Nook-Capture-Type': captureType,
       'X-Nook-Verified-Browser': isPlaceholder ? 'false' : 'true',

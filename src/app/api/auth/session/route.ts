@@ -4,6 +4,9 @@ import {
   verifySessionToken,
   verifyOwnerCredentials,
   isServerAuthSetupComplete,
+  checkLoginRateLimit,
+  recordFailedLogin,
+  recordSuccessfulLogin,
 } from '@/lib/auth';
 
 /**
@@ -60,6 +63,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+    const rateLimit = checkLoginRateLimit(ip);
+    if (!rateLimit.allowed) {
+      return NextResponse.json(
+        {
+          error: `Too many failed login attempts. Please wait ${rateLimit.retryAfterSeconds} seconds before trying again.`,
+          code: 'RATE_LIMITED',
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(rateLimit.retryAfterSeconds || 60),
+            'Cache-Control': 'no-store',
+          },
+        }
+      );
+    }
+
     const body = await req.json().catch(() => ({}));
     const credential = String(body.apiKey || body.password || body.credential || '').trim();
 
@@ -75,6 +96,7 @@ export async function POST(req: NextRequest) {
 
     const isAuthorized = verifyOwnerCredentials(credential);
     if (!isAuthorized) {
+      recordFailedLogin(ip);
       return NextResponse.json(
         {
           error: 'Unauthorized: Invalid owner credentials.',
@@ -83,6 +105,8 @@ export async function POST(req: NextRequest) {
         { status: 401 }
       );
     }
+
+    recordSuccessfulLogin(ip);
 
     const sessionToken = createSessionToken('nook-owner');
     const response = NextResponse.json({

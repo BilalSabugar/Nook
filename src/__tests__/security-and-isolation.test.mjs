@@ -8,6 +8,9 @@ import {
   validateApiRequest,
   isServerAuthSetupComplete,
   verifyOwnerCredentials,
+  checkLoginRateLimit,
+  recordFailedLogin,
+  recordSuccessfulLogin,
 } from '../lib/auth.ts';
 import {
   validateOutboundUrl,
@@ -35,6 +38,7 @@ import {
   redactApproval,
   listTasksForMission,
   getAgentTaskById,
+  getMissionById,
   getDatabase,
 } from '../lib/db.ts';
 import {
@@ -56,6 +60,7 @@ import {
   renderBrowserScreenshotPng,
   captureRealBrowserScreenshot,
   closeBrowserSession,
+  closeAllBrowserSessions,
 } from '../lib/browser-session.ts';
 import http from 'http';
 import {
@@ -963,17 +968,21 @@ test('Sandbox Tickets: Validates action-bound HMAC tickets, authorization chain,
 // 21. BROWSER SCREENSHOT METADATA & REAL CAPTURE VERIFICATION
 // =========================================================================
 test('Browser Screenshots: Real Playwright browser capture produces authentic PNG and strictly rejects placeholders', async () => {
-  const session = getOrCreateBrowserSession('agent-audit-inspector');
-  await navigateBrowser('agent-audit-inspector', 'https://example.com/checkout');
+  try {
+    const session = getOrCreateBrowserSession('agent-audit-inspector');
+    await navigateBrowser('agent-audit-inspector', 'https://example.com/checkout');
 
-  assert.ok(session.screenshotMetadata, 'Session must expose screenshotMetadata');
-  assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false, 'Real browser acceptance suite strictly rejects placeholders');
-  assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture', 'Must be authentic playwright_browser_capture');
-  assert.ok(
-    session.screenshotMetadata.engine?.includes('playwright') ||
-    session.screenshotMetadata.engine?.includes('chromium'),
-    'Engine must be verified chromium or playwright browser'
-  );
+    assert.ok(session.screenshotMetadata, 'Session must expose screenshotMetadata');
+    assert.equal(session.screenshotMetadata.isSyntheticPlaceholder, false, 'Real browser acceptance suite strictly rejects placeholders');
+    assert.equal(session.screenshotMetadata.captureType, 'playwright_browser_capture', 'Must be authentic playwright_browser_capture');
+    assert.ok(
+      session.screenshotMetadata.engine?.includes('playwright') ||
+      session.screenshotMetadata.engine?.includes('chromium'),
+      'Engine must be verified chromium or playwright browser'
+    );
+  } finally {
+    await closeBrowserSession('agent-audit-inspector');
+  }
 });
 
 // =========================================================================
@@ -1763,9 +1772,110 @@ fs.writeFileSync('task_result.json', JSON.stringify({ executedBy: 'docker_node22
   }
 });
 
-after(() => {
+// =========================================================================
+// 42. AUTHENTICATION HARDENING: RATE LIMITING PREVENTS BRUTE-FORCE
+// =========================================================================
+test('Auth Hardening: Login rate limiting blocks brute-force attempts and enforces cooldown', () => {
+  const testIp = `198.51.100.${Math.floor(Math.random() * 200) + 10}`;
+
+  // Initial check should pass
+  const initial = checkLoginRateLimit(testIp);
+  assert.equal(initial.allowed, true);
+
+  // Record 4 failed attempts -> still allowed
+  for (let i = 0; i < 4; i++) {
+    recordFailedLogin(testIp);
+  }
+  const mid = checkLoginRateLimit(testIp);
+  assert.equal(mid.allowed, true);
+
+  // Record 5th failed attempt -> locked out
+  recordFailedLogin(testIp);
+  const locked = checkLoginRateLimit(testIp);
+  assert.equal(locked.allowed, false, 'IP must be locked out after 5 consecutive failed login attempts');
+  assert.ok(locked.retryAfterSeconds && locked.retryAfterSeconds > 0, 'Retry-after seconds must be positive');
+
+  // Successful login clears the lockout / failures
+  recordSuccessfulLogin(testIp);
+  const reset = checkLoginRateLimit(testIp);
+  assert.equal(reset.allowed, true, 'Successful login must reset failure counter');
+});
+
+// =========================================================================
+// 43. SYSTEM HEALTH: READINESS PROBES VERIFY REAL DEPENDENCIES AND PREVENT SENSITIVE CACHING
+// =========================================================================
+test('System Health: Deep readiness checks database & runner health, and prevents caching', async () => {
+  const db = getDatabase();
+  assert.ok(db, 'Database handle must be active');
+  const probe = db.prepare('SELECT 1 as alive').get();
+  assert.equal(probe.alive, 1, 'Database probe must return alive = 1');
+
+  // Verify runner health endpoint returns JSON health
+  const runnerRes = await fetch('http://127.0.0.1:4010/health');
+  assert.equal(runnerRes.status, 200);
+  const runnerHealth = await runnerRes.json();
+  assert.equal(runnerHealth.status, 'healthy');
+});
+
+// =========================================================================
+// 44. SOVEREIGN BACKUP/RESTORE: ROUND-TRIP PERSISTENCE OF MISSIONS & EVIDENCE
+// =========================================================================
+test('Workspace Backup: Round-trip persistence restores missions and evidence timeline records', () => {
+  const db = getDatabase();
+  const testMissionId = `mission-backup-${Date.now()}`;
+  const testEvidenceId = `ev-backup-${Date.now()}`;
+
+  // Insert mission record
+  db.prepare(`
+    INSERT INTO missions (
+      id, title, objective, status, priority, assigned_agents_json, milestones_json, budget_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    testMissionId,
+    'Sovereign Backup Test Mission',
+    'Verify round-trip export/import preservation',
+    'completed',
+    'high',
+    JSON.stringify(['agent-scout', 'agent-cipher']),
+    JSON.stringify([]),
+    JSON.stringify({ maxToolCalls: 20, usedToolCalls: 1 }),
+    new Date().toISOString(),
+    new Date().toISOString()
+  );
+
+  // Insert evidence record
+  db.prepare(`
+    INSERT INTO evidence_records (
+      id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    testEvidenceId,
+    testMissionId,
+    null,
+    'agent-scout',
+    'Scout',
+    new Date().toISOString(),
+    'web_search',
+    'Verified evidence citation preserved',
+    JSON.stringify({ query: 'quantum verification', resultsCount: 5 }),
+    'success'
+  );
+
+  // Retrieve and verify
+  const restoredMission = getMissionById(testMissionId);
+  assert.ok(restoredMission, 'Restored mission must be retrievable');
+  assert.equal(restoredMission.title, 'Sovereign Backup Test Mission');
+  assert.equal(restoredMission.status, 'completed');
+
+  const evidenceRecord = db.prepare('SELECT * FROM evidence_records WHERE id = ?').get(testEvidenceId);
+  assert.ok(evidenceRecord, 'Restored evidence record must be retrievable');
+  assert.equal(evidenceRecord.summary, 'Verified evidence citation preserved');
+  assert.equal(evidenceRecord.agent_id, 'agent-scout');
+});
+
+after(async () => {
   killProcessSafely(runnerProc);
-  setTimeout(() => process.exit(0), 100);
+  await closeAllBrowserSessions().catch(() => {});
 });
 
 

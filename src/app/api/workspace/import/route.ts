@@ -4,6 +4,8 @@ import {
   saveSpace,
   saveDocumentWithRevision,
   logAuditEvent,
+  getDatabase,
+  getMissionById,
 } from '@/lib/db';
 import fs from 'fs/promises';
 import path from 'path';
@@ -78,12 +80,73 @@ export async function POST(req: NextRequest) {
       await fs.rename(tempFile, STATE_FILE);
     }
 
-    logAuditEvent('WORKSPACE_IMPORT', `Imported ${importedSpacesCount} spaces and ${importedDocsCount} documents`, 'success');
+    // 3. Import Missions
+    let importedMissionsCount = 0;
+    if (Array.isArray(bundle.missions)) {
+      const db = getDatabase();
+      for (const m of bundle.missions) {
+        if (m?.id && m?.title) {
+          const existing = getMissionById(m.id);
+          if (!existing) {
+            db.prepare(`
+              INSERT OR REPLACE INTO missions (
+                id, title, objective, status, priority, assigned_agents_json, milestones_json, budget_json, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              m.id,
+              m.title,
+              m.objective || '',
+              m.status || 'draft',
+              m.priority || 'medium',
+              JSON.stringify(m.assignedAgents || []),
+              JSON.stringify(m.milestones || []),
+              JSON.stringify(m.budget || { maxToolCalls: 20, usedToolCalls: 0 }),
+              m.createdAt || new Date().toISOString(),
+              m.updatedAt || new Date().toISOString()
+            );
+            importedMissionsCount++;
+          }
+        }
+      }
+    }
+
+    // 4. Import Evidence Timeline
+    let importedEvidenceCount = 0;
+    if (Array.isArray(bundle.evidenceTimeline)) {
+      const db = getDatabase();
+      for (const ev of bundle.evidenceTimeline) {
+        if (ev?.id && ev?.agentId && ev?.summary) {
+          try {
+            db.prepare(`
+              INSERT OR IGNORE INTO evidence_records (
+                id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              ev.id,
+              ev.missionId || null,
+              ev.taskId || null,
+              ev.agentId,
+              ev.agentName || 'Agent',
+              ev.timestamp || new Date().toISOString(),
+              ev.actionType || 'model_call',
+              ev.summary,
+              typeof ev.details === 'string' ? ev.details : JSON.stringify(ev.details || {}),
+              ev.status || 'success'
+            );
+            importedEvidenceCount++;
+          } catch {}
+        }
+      }
+    }
+
+    logAuditEvent('WORKSPACE_IMPORT', `Imported ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedMissionsCount} missions, ${importedEvidenceCount} evidence logs`, 'success');
 
     return NextResponse.json({
       success: true,
       importedSpacesCount,
       importedDocsCount,
+      importedMissionsCount,
+      importedEvidenceCount,
       importedAt: new Date().toISOString(),
     });
   } catch (err: any) {

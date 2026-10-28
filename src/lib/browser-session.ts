@@ -260,7 +260,8 @@ export async function getOrCreateLivePlaywrightPage(
       (process.platform === 'linux' && fsSync.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 
     const baseArgs = ['--disable-dev-shm-usage', '--disable-gpu'];
-    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || process.env.NOOK_IN_DOCKER === 'true' || process.platform === 'linux') {
+    const isRootUser = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || isRootUser) {
       baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
     }
 
@@ -339,6 +340,16 @@ export async function closeBrowserSession(agentId: string): Promise<void> {
 }
 
 /**
+ * Closes all active live Playwright browser contexts.
+ */
+export async function closeAllBrowserSessions(): Promise<void> {
+  const agentIds = Array.from(livePlaywrightSessions.keys());
+  for (const agentId of agentIds) {
+    await closeBrowserSession(agentId);
+  }
+}
+
+/**
  * Attempts real headless browser rendering and screenshot capture using Playwright Chromium.
  * Falls back safely if Chromium is not provisioned in the execution runtime.
  */
@@ -364,7 +375,8 @@ export async function captureRealBrowserScreenshot(
       (process.platform === 'linux' && fsSync.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined);
 
     const baseArgs = ['--disable-dev-shm-usage', '--disable-gpu'];
-    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || process.env.NOOK_IN_DOCKER === 'true' || process.platform === 'linux') {
+    const isRootUser = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || isRootUser) {
       baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
     }
 

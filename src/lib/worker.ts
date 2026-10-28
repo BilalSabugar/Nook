@@ -333,6 +333,10 @@ export async function tickWorker(): Promise<boolean> {
  * Starts durable worker loop inside the server environment.
  */
 export function ensureWorkerStarted(): void {
+  // In production with a dedicated worker process, avoid spinning up duplicate embedded workers in the web tier
+  if (process.env.NOOK_WORKER_ROLE !== 'dedicated_worker' && process.env.NODE_ENV === 'production' && !process.env.NOOK_ENABLE_EMBEDDED_WORKER) {
+    return;
+  }
   if (isWorkerRunning) return;
   isWorkerRunning = true;
 

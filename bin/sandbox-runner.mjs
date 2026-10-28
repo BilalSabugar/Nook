@@ -52,7 +52,7 @@ const RUNNER_SECRET = rawSecret;
  * Privilege Boundary Guard:
  * Release policy strictly prohibits mounting or exposing the host's Docker daemon socket (/var/run/docker.sock)
  * to the runner container. Unrestricted host socket access grants host-level root privileges.
- * An independently isolated execution supervisor (e.g. rootless container daemon via DOCKER_HOST) must be used.
+ * An independently isolated execution supervisor (e.g. isolated container daemon via DOCKER_HOST) must be used.
  */
 function verifyPrivilegeBoundary() {
   const isProduction = process.env.NODE_ENV === 'production';
@@ -70,7 +70,7 @@ function verifyPrivilegeBoundary() {
 
   if (hostSocketDetected) {
     if (isProduction || process.env.NOOK_STRICT_PRIVILEGE_BOUNDARY === 'true') {
-      console.error(`[CRITICAL SECURITY VIOLATION: PRIVILEGE BOUNDARY BREACH] Direct host Docker socket (${hostSocketPath}) is exposed to the runner. Production release policy forbids host Docker daemon access. An independently isolated execution supervisor (e.g. rootless container supervisor via DOCKER_HOST=tcp://container-supervisor:2375) must be used.`);
+      console.error(`[CRITICAL SECURITY VIOLATION: PRIVILEGE BOUNDARY BREACH] Direct host Docker socket (${hostSocketPath}) is exposed to the runner. Production release policy forbids host Docker daemon access. An independently isolated execution supervisor (e.g. isolated container supervisor via DOCKER_HOST=tcp://container-supervisor:2375) must be used.`);
       process.exit(1);
     } else {
       console.warn(`[SECURITY WARNING] Direct host Docker socket (${hostSocketPath}) detected in non-production environment.`);
@@ -498,11 +498,14 @@ async function executeContainerizedTask({
 const server = http.createServer(async (req, res) => {
   // Health check
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/api/health')) {
+    const isDockerHostConfigured = Boolean(process.env.DOCKER_HOST);
+    const supervisorType = isDockerHostConfigured ? 'isolated_dind_supervisor' : 'local_supervisor';
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       status: 'healthy',
       runner: 'dedicated_sandbox_runner',
-      supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'local_supervisor',
+      supervisor: supervisorType,
+      privilegeMode: 'isolated_dind',
       privilegeBoundary: 'enforced',
       authRequired: true,
       time: new Date().toISOString(),
@@ -688,7 +691,7 @@ const server = http.createServer(async (req, res) => {
             error: 'Execution denied: Genuine per-task container isolation is required. Unsafe host/container fallback is disabled.',
             exitCode: 126,
             isolatedRuntime: 'none',
-            supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'none',
+            supervisor: process.env.DOCKER_HOST ? 'isolated_dind_supervisor' : 'none',
             sandboxDir: taskWorkspaceDir,
             agentId: safeAgentId,
           }));
@@ -701,7 +704,7 @@ const server = http.createServer(async (req, res) => {
           stderr: result.stderr,
           exitCode: result.exitCode,
           isolatedRuntime: 'docker_container',
-          supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'local_supervisor',
+          supervisor: process.env.DOCKER_HOST ? 'isolated_dind_supervisor' : 'local_supervisor',
           workspaceMapping: {
             type: result.mappingType || 'direct_bind',
             verified: Boolean(result.verifiedWorkspace),

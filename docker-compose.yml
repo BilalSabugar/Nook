@@ -111,7 +111,6 @@ services:
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
     networks:
-      - default
       - sandbox_internal
     healthcheck:
       test: ["CMD", "docker", "info"]

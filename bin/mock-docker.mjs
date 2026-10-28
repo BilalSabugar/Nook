@@ -5,11 +5,21 @@
  * Conforms to the `docker run` interface expected by sandbox-runner.mjs.
  */
 import { exec } from 'child_process';
+import path from 'path';
 
 const args = process.argv.slice(2);
 
 if (args.length === 0 || args[0] === 'version') {
   process.stdout.write('Docker version 27.0.0-mock, build abcdef0\n');
+  process.exit(0);
+}
+
+if (args[0] === 'volume' && args[1] === 'inspect') {
+  const volName = args[2] || 'nook_sandboxes';
+  process.stdout.write(JSON.stringify([{
+    Name: volName,
+    Mountpoint: path.resolve(process.cwd(), '.nook_sandboxes'),
+  }]) + '\n');
   process.exit(0);
 }
 
@@ -34,6 +44,13 @@ if (args[0] === 'run') {
   if (!cmdToRun) {
     process.stderr.write('mock-docker: No command specified\n');
     process.exit(1);
+  }
+
+  // Strip POSIX workspace verification prefix if present for mock runner on Windows
+  const cdPrefix = 'cd /workspace && ';
+  const cdIdx = cmdToRun.indexOf(cdPrefix);
+  if (cdIdx !== -1) {
+    cmdToRun = cmdToRun.substring(cdIdx + cdPrefix.length);
   }
 
   // Cross-platform compatibility for Windows shell tests
@@ -65,3 +82,4 @@ if (args[0] === 'run') {
   process.stdout.write(`mock-docker: command ${args[0]} acknowledged\n`);
   process.exit(0);
 }
+

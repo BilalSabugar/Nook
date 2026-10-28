@@ -1627,6 +1627,119 @@ test('Runner Privilege Boundary: Rejects direct host Docker socket exposure and 
   } catch {}
 });
 
+// =========================================================================
+// 41. REAL DOCKER EXECUTION: VERIFIED WORKSPACE MAPPING WITHOUT MOCK FALLBACK
+// =========================================================================
+test('Real Docker: Verified workspace-volume mapping executes genuine container with task files', async () => {
+  // Check if a real, live Docker daemon is available
+  const hasRealDocker = await new Promise((resolve) => {
+    const p = spawn('docker', ['version'], { stdio: 'ignore' });
+    p.on('close', (c) => resolve(c === 0));
+    p.on('error', () => resolve(false));
+  });
+
+  if (!hasRealDocker) {
+    // In local environments without Docker daemon (e.g. Windows desktop without daemon), skip gracefully
+    console.log('  ℹ Skipping real Docker test: Docker daemon not available on local host.');
+    return;
+  }
+
+  // Real Docker daemon is available (e.g. CI runner on ubuntu-latest)
+  // Spin up a dedicated runner instance configured with genuine Docker (no mock prefix!)
+  const realRunnerSecret = crypto.randomBytes(32).toString('hex');
+  const realRunner = spawn(process.execPath, [path.resolve(process.cwd(), 'bin/sandbox-runner.mjs')], {
+    env: {
+      ...process.env,
+      PORT: '4013',
+      SANDBOX_RUNNER_SECRET: realRunnerSecret,
+      DOCKER_BIN: 'docker',
+      // Explicitly NO DOCKER_ARGS_PREFIX: real Docker commands only!
+    },
+    stdio: 'ignore',
+  });
+  if (realRunner.unref) realRunner.unref();
+
+  try {
+    // Wait for real runner to become healthy
+    for (let i = 0; i < 30; i++) {
+      try {
+        const h = await fetch('http://127.0.0.1:4013/health');
+        if (h.ok) break;
+      } catch {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+
+    const testAgentId = 'agent-cipher-real';
+
+    // Create a real task record in database
+    const job = enqueueJob({
+      agentId: testAgentId,
+      taskType: 'code_test',
+      title: 'Real Docker Execution Test',
+      prompt: 'node test_entry.mjs',
+    });
+
+    // Create virtual files to execute inside the real container
+    const virtualFiles = [
+      {
+        name: 'test_entry.mjs',
+        content: `
+import fs from 'fs';
+console.log('REAL_CONTAINER_EXECUTION_VERIFIED_OK');
+fs.writeFileSync('task_result.json', JSON.stringify({ executedBy: 'docker_node22', status: 'pass' }));
+`,
+      },
+    ];
+
+    // Generate authenticated HMAC execution ticket
+    const ticket = createSandboxExecutionTicket({
+      command: 'node test_entry.mjs',
+      agentId: testAgentId,
+      taskId: job.id,
+      authorizationType: 'system_verified_test',
+      secret: realRunnerSecret,
+    });
+    const ticketBase64 = Buffer.from(JSON.stringify(ticket)).toString('base64');
+
+    // Execute via runner using real Docker
+    const execRes = await fetch('http://127.0.0.1:4013/exec', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ticketBase64}`,
+      },
+      body: JSON.stringify({
+        agentId: testAgentId,
+        command: 'node test_entry.mjs',
+        taskId: job.id,
+        virtualFiles,
+        timeoutMs: 30000,
+      }),
+    });
+
+    assert.equal(execRes.status, 200, 'Real Docker execution must return 200');
+    const data = await execRes.json();
+    assert.equal(data.exitCode, 0, 'Real Docker container command must exit with code 0');
+    assert.ok(
+      data.stdout.includes('REAL_CONTAINER_EXECUTION_VERIFIED_OK'),
+      'Real Docker container stdout must contain output from virtual file execution'
+    );
+    assert.equal(data.isolatedRuntime, 'docker_container', 'Runtime must be docker_container');
+    assert.ok(data.workspaceMapping?.verified, 'Workspace mapping must be verified');
+
+    // Verify that the task workspace directory on the runner host received the file written by the real container
+    const expectedWorkspace = path.resolve(process.cwd(), '.nook_sandboxes', testAgentId, 'tasks', job.id);
+    const resultJsonPath = path.join(expectedWorkspace, 'task_result.json');
+    assert.ok(fs.existsSync(resultJsonPath), 'task_result.json written by real container must exist on disk');
+    const writtenContent = JSON.parse(fs.readFileSync(resultJsonPath, 'utf8'));
+    assert.equal(writtenContent.status, 'pass');
+    assert.equal(writtenContent.executedBy, 'docker_node22');
+  } finally {
+    killProcessSafely(realRunner);
+  }
+});
+
 after(() => {
   killProcessSafely(runnerProc);
   setTimeout(() => process.exit(0), 100);

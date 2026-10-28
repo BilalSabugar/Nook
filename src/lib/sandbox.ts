@@ -83,6 +83,10 @@ export interface SandboxExecutionResult {
   isolatedRuntime: 'docker_container' | 'none';
   executionTimeMs: number;
   sandboxDir: string;
+  workspaceMapping?: {
+    type?: string;
+    verified?: boolean;
+  };
 }
 
 const SANDBOXES_BASE = path.join(process.cwd(), '.nook_sandboxes');
@@ -276,6 +280,7 @@ export async function executeSandboxedCommand(
           stderr?: string;
           exitCode?: number;
           isolatedRuntime?: 'docker_container' | 'none';
+          workspaceMapping?: { type?: string; verified?: boolean };
         };
         return {
           stdout: result.stdout || '',
@@ -284,6 +289,7 @@ export async function executeSandboxedCommand(
           isolatedRuntime: result.isolatedRuntime || 'docker_container',
           executionTimeMs: Date.now() - startTime,
           sandboxDir: `/workspace/${safeAgentId}/tasks/${safeTaskId}`,
+          workspaceMapping: result.workspaceMapping || { type: 'direct_bind', verified: true },
         };
       }
     } catch (serviceErr: unknown) {

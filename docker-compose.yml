@@ -83,6 +83,7 @@ services:
       - PORT=4000
       - NODE_ENV=production
       - DOCKER_HOST=tcp://container-supervisor:2375
+      - SANDBOX_VOLUME_NAME=nook_sandboxes
       - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required. Generate with: openssl rand -hex 32}
     deploy:
       resources:
@@ -121,6 +122,7 @@ volumes:
   nook_data:
     driver: local
   nook_sandboxes:
+    name: nook_sandboxes
     driver: local
 
 networks:

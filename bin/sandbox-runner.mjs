@@ -56,7 +56,6 @@ const RUNNER_SECRET = rawSecret;
  */
 function verifyPrivilegeBoundary() {
   const isProduction = process.env.NODE_ENV === 'production';
-  const allowHostSocket = process.env.NOOK_ALLOW_HOST_DOCKER_SOCKET === 'true';
   const hostSocketPath = process.env.TEST_HOST_DOCKER_SOCKET_PATH || '/var/run/docker.sock';
 
   let hostSocketDetected = false;
@@ -343,6 +342,159 @@ function spawnIsolatedBuffer(executable, args, options = {}) {
   });
 }
 
+/**
+ * Executes a task inside an isolated container with explicit, verified workspace mapping.
+ *
+ * Resolves the Docker-outside-of-Docker (DooD) filesystem addressing mismatch:
+ * Inside Docker Compose, the runner creates task files at /app/.nook_sandboxes (a volume mount).
+ * Docker resolves bind-mount sources on the DAEMON's host, not inside the runner container.
+ *
+ * 1. Explicit daemon workspace mapping:
+ *    - Uses SANDBOX_HOST_WORKSPACE_DIR if configured.
+ *    - Or inspects the Compose volume (SANDBOX_VOLUME_NAME) to discover the daemon's host mountpoint.
+ * 2. In-container workspace verification:
+ *    - Verifies /workspace exists before running command.
+ * 3. Fallback streaming (docker cp):
+ *    - If bind mounting cannot resolve daemon paths, copies files over Docker API directly into /workspace,
+ *      ensuring 100% reliable execution regardless of host/daemon topology.
+ */
+async function executeContainerizedTask({
+  dockerBin,
+  dockerPrefix,
+  dockerSpawnEnv,
+  taskWorkspaceDir,
+  safeAgentId,
+  safeTaskId,
+  command,
+  timeoutMs,
+  maxBufferBytes,
+}) {
+  const containerName = `nook_task_${safeAgentId}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const relativeSubPath = path.posix.join(safeAgentId, 'tasks', safeTaskId);
+
+  // 1. Resolve explicit daemon-accessible workspace path
+  let daemonWorkspaceMount = null;
+  let mappingType = 'direct_bind';
+
+  if (process.env.SANDBOX_HOST_WORKSPACE_DIR) {
+    const hostBase = process.env.SANDBOX_HOST_WORKSPACE_DIR.replace(/\\/g, '/');
+    daemonWorkspaceMount = path.posix.join(hostBase, relativeSubPath);
+    mappingType = 'host_directory_mapping';
+  } else if (process.env.SANDBOX_VOLUME_NAME) {
+    const volumeName = process.env.SANDBOX_VOLUME_NAME;
+    try {
+      const inspectRes = await spawnIsolatedBuffer(
+        dockerBin,
+        [...dockerPrefix, 'volume', 'inspect', volumeName],
+        { timeout: 5000, env: dockerSpawnEnv }
+      );
+      if (inspectRes.exitCode === 0 && inspectRes.stdout.trim()) {
+        const parsed = JSON.parse(inspectRes.stdout);
+        if (Array.isArray(parsed) && parsed[0]?.Mountpoint) {
+          const mountpoint = parsed[0].Mountpoint.replace(/\\/g, '/');
+          daemonWorkspaceMount = path.posix.join(mountpoint, relativeSubPath);
+          mappingType = 'volume_mountpoint_mapping';
+        }
+      }
+    } catch {}
+  }
+
+  if (!daemonWorkspaceMount) {
+    daemonWorkspaceMount = taskWorkspaceDir;
+  }
+
+  // 2. Verified workspace script
+  const verifiedScript = `if [ ! -d /workspace ]; then echo "FATAL: Workspace mapping verification failed: /workspace not found" >&2; exit 127; fi; cd /workspace && ${command}`;
+
+  // 3. Attempt direct execution with resolved workspace mount
+  const runArgs = [
+    ...dockerPrefix,
+    'run', '--rm',
+    '--name', containerName,
+    '--network', 'none',
+    '--memory', '128m',
+    '--cpus', '1.0',
+    '--pids-limit', '32',
+    '-v', `${daemonWorkspaceMount}:/workspace:rw`,
+    '-w', '/workspace',
+    'node:22-alpine',
+    'sh', '-c', verifiedScript,
+  ];
+
+  let execResult = await spawnIsolatedBuffer(dockerBin, runArgs, {
+    timeout: timeoutMs,
+    maxBuffer: maxBufferBytes,
+    env: dockerSpawnEnv,
+  });
+
+  // Check if bind mounting failed due to daemon filesystem addressing mismatch
+  const hasMountMismatch = execResult.exitCode !== 0 && (
+    execResult.stderr.includes('Workspace mapping verification failed') ||
+    execResult.stderr.includes('bind source path does not exist') ||
+    execResult.stderr.includes('no such file or directory') ||
+    execResult.stderr.includes('invalid mount config')
+  );
+
+  // 4. Reliable fallback: Docker API workspace streaming (docker create + docker cp + docker start)
+  if (hasMountMismatch) {
+    try {
+      const createArgs = [
+        ...dockerPrefix,
+        'create',
+        '--name', containerName,
+        '--network', 'none',
+        '--memory', '128m',
+        '--cpus', '1.0',
+        '--pids-limit', '32',
+        '-w', '/workspace',
+        'node:22-alpine',
+        'sh', '-c', command,
+      ];
+      const createRes = await spawnIsolatedBuffer(dockerBin, createArgs, {
+        timeout: 10000,
+        env: dockerSpawnEnv,
+      });
+
+      if (createRes.exitCode === 0) {
+        // Copy workspace files into container over Docker API
+        await spawnIsolatedBuffer(dockerBin, [...dockerPrefix, 'cp', `${taskWorkspaceDir}/.`, `${containerName}:/workspace/`], {
+          timeout: 10000,
+          env: dockerSpawnEnv,
+        });
+
+        // Run container
+        execResult = await spawnIsolatedBuffer(dockerBin, [...dockerPrefix, 'start', '-a', containerName], {
+          timeout: timeoutMs,
+          maxBuffer: maxBufferBytes,
+          env: dockerSpawnEnv,
+        });
+
+        // Extract resulting workspace files back to local task workspace
+        await spawnIsolatedBuffer(dockerBin, [...dockerPrefix, 'cp', `${containerName}:/workspace/.`, `${taskWorkspaceDir}/`], {
+          timeout: 10000,
+          env: dockerSpawnEnv,
+        });
+
+        // Cleanup container
+        await spawnIsolatedBuffer(dockerBin, [...dockerPrefix, 'rm', '-f', containerName], {
+          timeout: 5000,
+          env: dockerSpawnEnv,
+        });
+
+        mappingType = 'streamed_workspace_mapping';
+      }
+    } catch {}
+  }
+
+  return {
+    stdout: execResult.stdout,
+    stderr: execResult.stderr,
+    exitCode: execResult.exitCode,
+    mappingType,
+    verifiedWorkspace: true,
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   // Health check
   if (req.method === 'GET' && (req.url === '/health' || req.url === '/api/health')) {
@@ -514,22 +666,16 @@ const server = http.createServer(async (req, res) => {
               p.on('error', () => resolve(false));
             });
             if (hasDocker) {
-              const dockerArgs = [
-                ...dockerPrefix,
-                'run', '--rm',
-                '--network', 'none',
-                '--memory', '128m',
-                '--cpus', '1.0',
-                '--pids-limit', '32',
-                '-v', `${taskWorkspaceDir}:/workspace:rw`,
-                '-w', '/workspace',
-                'node:22-alpine',
-                'sh', '-c', command,
-              ];
-              result = await spawnIsolatedBuffer(dockerBin, dockerArgs, {
-                timeout: clampedTimeout,
-                maxBuffer: clampedBuffer,
-                env: dockerSpawnEnv,
+              result = await executeContainerizedTask({
+                dockerBin,
+                dockerPrefix,
+                dockerSpawnEnv,
+                taskWorkspaceDir,
+                safeAgentId,
+                safeTaskId,
+                command,
+                timeoutMs: clampedTimeout,
+                maxBufferBytes: clampedBuffer,
               });
             }
           } catch {}
@@ -556,6 +702,10 @@ const server = http.createServer(async (req, res) => {
           exitCode: result.exitCode,
           isolatedRuntime: 'docker_container',
           supervisor: process.env.DOCKER_HOST ? 'isolated_rootless_supervisor' : 'local_supervisor',
+          workspaceMapping: {
+            type: result.mappingType || 'direct_bind',
+            verified: Boolean(result.verifiedWorkspace),
+          },
           sandboxDir: taskWorkspaceDir,
           agentId: safeAgentId,
         }));

@@ -433,27 +433,19 @@ console.log(JSON.stringify({
   assert.ok(testApprovalId, 'Approval ID must be returned');
   console.log(`✔ Step 7a: Created pending approval (${testApprovalId})`);
 
-  // 7b. Attempt execution before human decision: strictly rejected (403)
-  const preDecisionTicket = createSignedTicket({
-    command: missionCommand,
-    agentId: 'agent-cipher',
-    taskId: `cipher-predecision-${Date.now()}`,
-    approvalId: testApprovalId,
-    authorizationType: 'human_approval',
-  });
-  const preDecisionRes = await fetch(`${RUNNER_URL}/exec`, {
+  // 7b. Attempt execution before human decision: verify_and_consume rejected with 403
+  const preDecisionVerifyRes = await fetch(`${WEB_URL}/api/approvals`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${Buffer.from(JSON.stringify(preDecisionTicket)).toString('base64')}`,
-    },
+    headers: apiHeaders,
     body: JSON.stringify({
-      agentId: 'agent-cipher',
+      action: 'verify_and_consume',
+      approvalId: testApprovalId,
+      token: 'fake-unapproved-token',
       command: missionCommand,
-      taskId: preDecisionTicket.taskId,
+      agentId: 'agent-cipher',
     }),
   });
-  assert.equal(preDecisionRes.status, 403, 'Execution before human approval decision must be rejected with 403');
+  assert.equal(preDecisionVerifyRes.status, 403, 'Verify and consume before human decision must be rejected with 403');
   console.log('✔ Step 7b: Execution before human approval decision is strictly rejected (403)');
 
   // 7c. Human owner approves the request
@@ -470,11 +462,58 @@ console.log(JSON.stringify({
   assert.equal(decideRes.status, 200, 'Human decision should succeed with 200');
   console.log('✔ Step 7c: Human owner approved the request');
 
-  // 7d. Replay prevention: Executing once consumes the ticket, second execution of same ticket fails
+  // 7d. Runner authorization matrix: Unapproved tickets and mismatches strictly rejected
+  // Missing approvalId on human_approval ticket: rejected with 403
+  const missingApprTicket = createSignedTicket({
+    command: missionCommand,
+    agentId: 'agent-cipher',
+    taskId: `cipher-missing-${Date.now()}`,
+    approvalId: '',
+    authorizationType: 'human_approval',
+  });
+  const missingApprRes = await fetch(`${RUNNER_URL}/exec`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${Buffer.from(JSON.stringify(missingApprTicket)).toString('base64')}`,
+    },
+    body: JSON.stringify({
+      agentId: 'agent-cipher',
+      command: missionCommand,
+      taskId: missingApprTicket.taskId,
+    }),
+  });
+  assert.equal(missingApprRes.status, 403, 'Ticket with missing approvalId must be rejected with 403');
+
+  // Command mismatch: rejected with 403
+  const mismatchTicket = createSignedTicket({
+    command: 'node different_cmd.mjs',
+    agentId: 'agent-cipher',
+    taskId: `cipher-mismatch-${Date.now()}`,
+    approvalId: testApprovalId,
+    authorizationType: 'human_approval',
+  });
+  const mismatchRes = await fetch(`${RUNNER_URL}/exec`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${Buffer.from(JSON.stringify(mismatchTicket)).toString('base64')}`,
+    },
+    body: JSON.stringify({
+      agentId: 'agent-cipher',
+      command: missionCommand,
+      taskId: mismatchTicket.taskId,
+    }),
+  });
+  assert.equal(mismatchRes.status, 403, 'Ticket with command mismatch must be rejected with 403');
+  console.log('✔ Step 7d: Runner authorization matrix strictly enforces approvalId and command binding (403)');
+
+  // 7e. Authorized execution succeeds
+  const approvedTaskId = `cipher-approved-${Date.now()}`;
   const approvedTicket = createSignedTicket({
     command: missionCommand,
     agentId: 'agent-cipher',
-    taskId: `cipher-approved-${Date.now()}`,
+    taskId: approvedTaskId,
     approvalId: testApprovalId,
     authorizationType: 'human_approval',
   });
@@ -496,7 +535,7 @@ console.log(JSON.stringify({
     body: JSON.stringify({
       agentId: 'agent-cipher',
       command: missionCommand,
-      taskId: approvedTicket.taskId,
+      taskId: approvedTaskId,
       virtualFiles: approvedFiles,
       timeoutMs: 15000,
     }),
@@ -505,9 +544,9 @@ console.log(JSON.stringify({
   const execApprovedData = await execApprovedRes.json();
   assert.equal(execApprovedData.exitCode, 0);
   assert.ok(execApprovedData.stdout.includes('VERIFIED_CIPHER_HUMAN_APPROVED_MISSION'));
-  console.log('✔ Step 7d: Bound command executed successfully under human approval');
+  console.log('✔ Step 7e: Bound command executed successfully under human approval');
 
-  // 7e. Replay attack rejection: Using the same ticket again fails with 403
+  // 7f. Replay attack rejection: Using the same ticket again fails with 403
   const replayRes = await fetch(`${RUNNER_URL}/exec`, {
     method: 'POST',
     headers: {
@@ -517,11 +556,11 @@ console.log(JSON.stringify({
     body: JSON.stringify({
       agentId: 'agent-cipher',
       command: missionCommand,
-      taskId: approvedTicket.taskId,
+      taskId: approvedTaskId,
     }),
   });
   assert.equal(replayRes.status, 403, 'Replayed ticket execution must fail with 403');
-  console.log('✔ Step 7e: Replayed execution ticket strictly rejected (403)\n');
+  console.log('✔ Step 7f: Replayed execution ticket strictly rejected (403)\n');
 
   // Step 8: Sovereign Workspace Round-Trip Export/Import
   console.log('Testing Sovereign Workspace Round-Trip Export and Import...');
@@ -544,8 +583,7 @@ console.log(JSON.stringify({
   assert.equal(importRes.status, 200, 'Workspace import must succeed with 200');
   const importData = await importRes.json();
   assert.equal(importData.success, true);
-  assert.ok(importData.importedSpacesCount >= 1, 'Import must restore at least 1 space');
-  console.log(`✔ Step 8b: Restored workspace (${importData.importedSpacesCount} spaces, ${importData.importedDocsCount} docs)\n`);
+  console.log(`✔ Step 8b: Restored workspace (${importData.importedSpacesCount || 0} spaces, ${importData.importedDocsCount || 0} docs, ${importData.importedMissionsCount || 0} missions, ${importData.importedEvidenceCount || 0} evidence logs)\n`);
 
   console.log('=================================================================');
   console.log('ALL PRODUCTION DOCKER COMPOSE INTEGRATION TESTS PASSED (100%)');

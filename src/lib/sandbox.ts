@@ -1,8 +1,8 @@
 import { spawn } from 'child_process';
 import path from 'path';
-import fs from 'fs/promises';
 import { logAuditEvent } from './db.ts';
 import { createSandboxExecutionTicket } from './sandbox-ticket.ts';
+import { WorkspaceSecurityError, ensureRealDirectoryWithin, removeSymlinksInTree, writeFileNoFollow } from './safe-workspace.mjs';
 
 /**
  * Spawns an executable directly with arguments array, bypassing host shell parsing.
@@ -216,27 +216,44 @@ export async function executeSandboxedCommand(
   const agentSandboxDir = path.resolve(SANDBOXES_BASE, safeAgentId);
   const safeTaskId = (options.taskId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
   const taskWorkspaceDir = path.resolve(agentSandboxDir, 'tasks', safeTaskId);
-  await fs.mkdir(taskWorkspaceDir, { recursive: true });
+  try {
+    await ensureRealDirectoryWithin(SANDBOXES_BASE, taskWorkspaceDir);
+    await removeSymlinksInTree(taskWorkspaceDir);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : 'workspace boundary violation';
+    logAuditEvent('SANDBOX_BLOCKED', `Workspace boundary violation: ${reason}`, 'blocked', safeAgentId);
+    return {
+      stdout: '',
+      stderr: `Workspace boundary violation: ${reason}`,
+      exitCode: 1,
+      isolatedRuntime: 'none',
+      executionTimeMs: Date.now() - startTime,
+      sandboxDir: `/workspace/${safeAgentId}`,
+    };
+  }
 
-  // 3. Write virtual files securely within task workspace directory
+  // 3. Write virtual files within the task workspace without following symlinks
   if (Array.isArray(options.virtualFiles)) {
     for (const f of options.virtualFiles) {
       const rawName = f.name || f.path;
       if (!rawName || typeof f.content !== 'string') continue;
 
-      // Prevent traversal in file creation
       const sanitizedName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-      const targetFilePath = path.resolve(taskWorkspaceDir, sanitizedName);
-
-      // Verify path does not escape task workspace
-      if (!targetFilePath.startsWith(taskWorkspaceDir + path.sep) && targetFilePath !== taskWorkspaceDir) {
-        continue;
-      }
-
       try {
-        await fs.writeFile(targetFilePath, f.content, 'utf8');
-      } catch {
-        // ignore disk write races
+        await writeFileNoFollow(taskWorkspaceDir, sanitizedName, f.content, 0o600);
+      } catch (err) {
+        if (err instanceof WorkspaceSecurityError) {
+          logAuditEvent('SANDBOX_BLOCKED', `Workspace write rejected: ${err.message}`, 'blocked', safeAgentId);
+          return {
+            stdout: '',
+            stderr: `Workspace boundary violation: ${err.message}`,
+            exitCode: 1,
+            isolatedRuntime: 'none',
+            executionTimeMs: Date.now() - startTime,
+            sandboxDir: `/workspace/${safeAgentId}`,
+          };
+        }
+        // other disk write races are non-fatal
       }
     }
   }

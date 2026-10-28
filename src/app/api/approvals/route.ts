@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { validateApiRequest, validateHumanApproverRequest, unauthorizedResponse } from '@/lib/auth';
 import {
   createApproval,
   listApprovals,
@@ -70,6 +70,12 @@ export async function POST(req: NextRequest) {
 
     // 2. Decide: User authorizes or declines
     if (action === 'decide') {
+      // Human-only: machine credentials (API key, worker) can never decide approvals
+      const human = validateHumanApproverRequest(req);
+      if (!human.authorized) {
+        logAuditEvent('APPROVAL_DECISION_DENIED', human.error || 'Not a human approver', 'denied');
+        return unauthorizedResponse(human.error, human.status || 403);
+      }
       const { approvalId, decision, reason } = body;
 
       if (!approvalId || !decision) {
@@ -90,6 +96,11 @@ export async function POST(req: NextRequest) {
 
     // 3. User interactive direct session execution: strictly restricted to authenticated human owner session
     if (action === 'create_and_approve') {
+      const human = validateHumanApproverRequest(req);
+      if (!human.authorized) {
+        logAuditEvent('APPROVAL_DECISION_DENIED', human.error || 'Not a human approver', 'denied');
+        return unauthorizedResponse(human.error, human.status || 403);
+      }
       const { agentId, type, title, description, targetSpaceId, payload, missionId } = body;
 
       // Strict security boundary: autonomous agents and missions CANNOT auto-approve privileged operations!
@@ -120,7 +131,7 @@ export async function POST(req: NextRequest) {
 
     // 4. Verify & Atomically Consume (called by server-side execution services)
     if (action === 'verify_and_consume') {
-      const { approvalId, token, command, agentId } = body;
+      const { approvalId, token, command, agentId, taskId } = body;
 
       if (!approvalId || !token) {
         return NextResponse.json({
@@ -129,7 +140,7 @@ export async function POST(req: NextRequest) {
         }, { status: 403 });
       }
 
-      const outcome = verifyAndConsumeApproval(approvalId, token, command, agentId);
+      const outcome = verifyAndConsumeApproval(approvalId, token, command, agentId, typeof taskId === 'string' ? taskId : undefined);
       if (!outcome.authorized) {
         return NextResponse.json({
           authorized: false,

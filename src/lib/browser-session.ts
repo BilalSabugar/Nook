@@ -4,6 +4,7 @@ import fsSync from 'fs';
 import zlib from 'zlib';
 import { safeFetch, validateOutboundUrl } from './ssrf.ts';
 import { logAuditEvent } from './db.ts';
+import { getGlobalEgressProxy } from './egress-proxy.ts';
 
 export interface InteractiveElement {
   id: string;
@@ -265,6 +266,16 @@ export async function getOrCreateLivePlaywrightPage(
       baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
     }
 
+    // Enforce network-level egress proxying on Chromium process itself
+    const egressProxy = await getGlobalEgressProxy().catch(() => null);
+    if (egressProxy) {
+      baseArgs.push(
+        `--proxy-server=${egressProxy.url}`,
+        '--proxy-bypass-list=<-loopback>',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
+      );
+    }
+
     try {
       browser = await chromium.launch({
         headless: true,
@@ -378,6 +389,16 @@ export async function captureRealBrowserScreenshot(
     const isRootUser = typeof process.getuid === 'function' && process.getuid() === 0;
     if (process.env.PLAYWRIGHT_NO_SANDBOX === 'true' || isRootUser) {
       baseArgs.push('--no-sandbox', '--disable-setuid-sandbox');
+    }
+
+    // Enforce network-level egress proxying on Chromium process itself
+    const egressProxy = await getGlobalEgressProxy().catch(() => null);
+    if (egressProxy) {
+      baseArgs.push(
+        `--proxy-server=${egressProxy.url}`,
+        '--proxy-bypass-list=<-loopback>',
+        '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
+      );
     }
 
     // 1. Try default bundled or installed chromium

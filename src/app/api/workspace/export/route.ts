@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import {
-  listSpacesWithDocuments,
-  listMissions,
-  listEvidence,
-  listApprovals,
-} from '@/lib/db';
+import { exportWorkspaceSnapshot } from '@/lib/db';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -15,7 +10,7 @@ const STATE_FILE = path.join(STORAGE_DIR, 'workspace-state.json');
 /**
  * GET /api/workspace/export
  * Exports complete, sovereign user workspace bundle:
- * Spaces, documents, revisions, missions, tasks, evidence logs, and conversations.
+ * Spaces, documents, revisions, missions, full tasks, evidence logs, and conversations.
  * Security requirement: Private API keys and master secrets are NEVER included.
  */
 export async function GET(req: NextRequest) {
@@ -31,24 +26,15 @@ export async function GET(req: NextRequest) {
       workspaceState = JSON.parse(raw);
     } catch {}
 
-    const spaces = listSpacesWithDocuments();
-    const missions = listMissions();
-    const evidence = listEvidence();
-    const approvals = listApprovals(false); // Token redacted
+    const snapshot = exportWorkspaceSnapshot();
 
     const exportBundle = {
-      nookVersion: '1.1.0',
-      exportedAt: new Date().toISOString(),
-      schemaVersion: 1,
+      ...snapshot,
       workspace: {
         agents: workspaceState.agents || [],
         messages: workspaceState.messages || {},
         computerStates: workspaceState.computerStates || {},
       },
-      spaces,
-      missions,
-      evidenceTimeline: evidence,
-      approvalsAudit: approvals,
     };
 
     return new NextResponse(JSON.stringify(exportBundle, null, 2), {

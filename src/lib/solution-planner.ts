@@ -1001,6 +1001,29 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
           const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
           rawResponseText = data.choices?.[0]?.message?.content || '';
         }
+      } else if (provider === 'anthropic' && apiKey) {
+        const model = modelOptions?.model || 'claude-3-5-sonnet-20241022';
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 4096,
+            temperature: 0.2,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+        if (!res.ok) {
+          const errBody = await res.text().catch(() => '');
+          lastError = `Anthropic API HTTP ${res.status}: ${errBody}`;
+        } else {
+          const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+          rawResponseText = data.content?.[0]?.text || '';
+        }
       } else if (provider === 'ollama') {
         const baseUrl = endpoint || 'http://localhost:11434';
         const model = modelOptions?.model || 'llama3.2:latest';

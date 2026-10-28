@@ -33,7 +33,7 @@
     "start": "node ./node_modules/next/dist/bin/next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/__tests__/*.test.mjs",
+    "test": "node --experimental-strip-types --test --test-concurrency=1 src/__tests__/*.test.mjs",
     "worker": "node --experimental-strip-types bin/worker.mjs",
     "sandbox-runner": "node bin/sandbox-runner.mjs"
   },

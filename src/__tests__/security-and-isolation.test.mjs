@@ -40,7 +40,23 @@ import {
   getAgentTaskById,
   getMissionById,
   getDatabase,
+  exportWorkspaceSnapshot,
+  importWorkspaceSnapshot,
+  applySchema,
+  markJobSideEffectStarted,
 } from '../lib/db.ts';
+import { DatabaseSync } from 'node:sqlite';
+import {
+  validateHumanApproverRequest,
+  verifyApproverCredentials,
+  APPROVER_SESSION_ID,
+} from '../lib/auth.ts';
+import { resolveHostSafely } from '../lib/egress-proxy.ts';
+import {
+  WorkspaceSecurityError,
+  ensureRealDirectoryWithin,
+  writeFileNoFollow,
+} from '../lib/safe-workspace.mjs';
 import {
   loadEncryptedSecrets,
   saveEncryptedSecrets,
@@ -1871,6 +1887,203 @@ test('Workspace Backup: Round-trip persistence restores missions and evidence ti
   assert.ok(evidenceRecord, 'Restored evidence record must be retrievable');
   assert.equal(evidenceRecord.summary, 'Verified evidence citation preserved');
   assert.equal(evidenceRecord.agent_id, 'agent-scout');
+});
+
+// =========================================================================
+// 45. APPROVAL STATE MACHINE: ONE EXECUTION PER APPROVAL
+// =========================================================================
+test('Approval State Machine: Consumed approval cannot authorize a second execution ticket', () => {
+  const approval = createApproval({
+    agentId: 'agent-cipher',
+    agentName: 'Cipher',
+    type: 'run_command',
+    title: 'Single-use Ticket Authorization Test',
+    description: 'Verify execution attempt cannot be reused',
+    payload: { command: 'node verify.mjs', taskId: 'task-single-use-1' },
+  });
+
+  decideApproval(approval.id, 'approve', 'Approved by reviewer');
+  const taskId = 'task-single-use-1';
+
+  // First ticket generation succeeds and binds the approval to the task
+  const ticket1 = createSandboxExecutionTicket({
+    command: 'node verify.mjs',
+    agentId: 'agent-cipher',
+    taskId,
+    approvalId: approval.id,
+    authorizationType: 'human_approval',
+  });
+  assert.ok(ticket1.ticketId);
+
+  // Second ticket generation using the same approval MUST fail closed immediately
+  assert.throws(
+    () => {
+      createSandboxExecutionTicket({
+        command: 'node verify.mjs',
+        agentId: 'agent-cipher',
+        taskId,
+        approvalId: approval.id,
+        authorizationType: 'human_approval',
+      });
+    },
+    /already used for an execution attempt/i,
+    'A consumed approval must never authorize a second execution ticket'
+  );
+});
+
+// =========================================================================
+// 46. HUMAN APPROVER VS MACHINE CREDENTIAL SEPARATION
+// =========================================================================
+test('Credential Separation: Machine API key cannot decide approvals; approver password required', () => {
+  process.env.NOOK_API_KEY = 'nook-machine-api-key-32bytes';
+  process.env.NOOK_APPROVER_PASSWORD = 'nook-human-approver-password-32bytes';
+
+  // 1. Machine API key request to decide approvals is rejected with 403
+  const machineReq = new Request('http://127.0.0.1:3000/api/approvals', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-nook-api-key': process.env.NOOK_API_KEY,
+    },
+    body: JSON.stringify({ action: 'decide', approvalId: 'any', decision: 'approve' }),
+  });
+  const machineCheck = validateHumanApproverRequest(machineReq);
+  assert.equal(machineCheck.authorized, false);
+  assert.equal(machineCheck.status, 403);
+  assert.ok(machineCheck.error?.includes('Machine credentials (API key) cannot issue human approval decisions'));
+
+  // 2. Approver credential validation succeeds and derives distinct session
+  assert.equal(verifyApproverCredentials('nook-human-approver-password-32bytes'), true);
+  assert.equal(verifyApproverCredentials(process.env.NOOK_API_KEY), false);
+
+  const approverToken = createSessionToken(APPROVER_SESSION_ID);
+  const approverReq = new Request('http://127.0.0.1:3000/api/approvals', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${approverToken}`,
+    },
+    body: JSON.stringify({ action: 'decide', approvalId: 'any', decision: 'approve' }),
+  });
+  const approverCheck = validateHumanApproverRequest(approverReq);
+  assert.equal(approverCheck.authorized, true);
+});
+
+// =========================================================================
+// 47. SOVEREIGN BACKUP/RESTORE: RECONSTRUCTS REVISIONS, TASKS, AND EVIDENCE
+// =========================================================================
+test('Sovereign Backup/Restore: Complete round-trip reconstructs revisions, full tasks, and evidence', () => {
+  // Create an isolated fresh in-memory database
+  const sourceDb = new DatabaseSync(':memory:');
+  applySchema(sourceDb);
+
+  // Populate source DB with spaces, documents, revisions, missions, tasks, evidence
+  sourceDb.prepare(`INSERT INTO spaces (id, name, icon, created_at, updated_at) VALUES ('sp-1', 'Research', 'book', '2026-01-01', '2026-01-01')`).run();
+  sourceDb.prepare(`INSERT INTO documents (id, space_id, title, content, author_agent_id, version, created_at, updated_at) VALUES ('doc-1', 'sp-1', 'Title v2', 'Content v2', 'agent-quill', 2, '2026-01-01', '2026-01-02')`).run();
+  sourceDb.prepare(`INSERT INTO document_revisions (id, document_id, version, title, content, author_agent_id, created_at) VALUES ('rev-1', 'doc-1', 1, 'Title v1', 'Content v1', 'agent-quill', '2026-01-01')`).run();
+  sourceDb.prepare(`INSERT INTO document_revisions (id, document_id, version, title, content, author_agent_id, created_at) VALUES ('rev-2', 'doc-1', 2, 'Title v2', 'Content v2', 'agent-quill', '2026-01-02')`).run();
+  sourceDb.prepare(`INSERT INTO missions (id, title, objective, status, priority, assigned_agents_json, milestones_json, created_at, updated_at) VALUES ('msn-1', 'Mission 1', 'Objective 1', 'active', 'high', '["agent-cipher"]', '[]', '2026-01-01', '2026-01-01')`).run();
+  sourceDb.prepare(`INSERT INTO agent_tasks (id, mission_id, title, goal, assigned_agent_id, status, created_at, updated_at) VALUES ('tsk-1', 'msn-1', 'Task 1', 'Goal 1', 'agent-cipher', 'pending', '2026-01-01', '2026-01-01')`).run();
+  sourceDb.prepare(`INSERT INTO evidence_records (id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status) VALUES ('ev-1', 'msn-1', 'tsk-1', 'agent-cipher', 'Cipher', '2026-01-01', 'shell_exec', 'Summary', '{}', 'success')`).run();
+
+  // Export from source
+  const bundle = exportWorkspaceSnapshot(sourceDb);
+  assert.equal(bundle.schemaVersion, 2);
+  assert.equal(bundle.documentRevisions.length, 2);
+  assert.equal(bundle.missions[0].tasks?.length, 1);
+  assert.equal(bundle.evidenceTimeline.length, 1);
+
+  // Restore into a completely fresh destination database
+  const targetDb = new DatabaseSync(':memory:');
+  applySchema(targetDb);
+  const result = importWorkspaceSnapshot(bundle, targetDb);
+  assert.equal(result.success, true);
+  assert.equal(result.importedRevisionsCount, 2);
+  assert.equal(result.importedTasksCount, 1);
+  assert.equal(result.importedEvidenceCount, 1);
+
+  // Verify target state matches
+  const targetRevs = targetDb.prepare(`SELECT * FROM document_revisions WHERE document_id = 'doc-1' ORDER BY version ASC`).all();
+  assert.equal(targetRevs.length, 2);
+  const targetTasks = targetDb.prepare(`SELECT * FROM agent_tasks WHERE mission_id = 'msn-1'`).all();
+  assert.equal(targetTasks.length, 1);
+  const targetMission = targetDb.prepare(`SELECT * FROM missions WHERE id = 'msn-1'`).get();
+  assert.equal(targetMission.status, 'paused', 'Restored unfinished active mission is safely paused on restore');
+});
+
+// =========================================================================
+// 48. WORKER EXACTLY-ONCE RECOVERY GUARANTEE
+// =========================================================================
+test('Worker Recovery: Non-idempotent action in-flight suppresses retry and rejects duplicate claim', () => {
+  const db = getDatabase();
+  const jobId = `job-side-effect-${Date.now()}`;
+  db.prepare(`
+    INSERT INTO background_jobs (id, agent_id, task_type, title, status, prompt, created_at, updated_at)
+    VALUES (?, 'cipher', 'code_test', 'Test Job', 'running', 'node -v', ?, ?)
+  `).run(jobId, new Date().toISOString(), new Date(Date.now() - 60000).toISOString());
+
+  // Claim side effect started
+  const claimed = markJobSideEffectStarted(jobId);
+  assert.equal(claimed, true);
+
+  // Duplicate claim while already in flight is rejected
+  const duplicateClaim = markJobSideEffectStarted(jobId);
+  assert.equal(duplicateClaim, false, 'Duplicate start of non-idempotent action must be rejected');
+
+  // Simulate worker crash timeout: 60s elapsed since last progress
+  db.prepare(`UPDATE background_jobs SET updated_at = ? WHERE id = ?`).run(
+    new Date(Date.now() - 60000).toISOString(),
+    jobId
+  );
+
+  // Stale recovery runs: job with side_effect_state='started' MUST be aborted, NOT requeued
+  recoverStaleJobsAndMissions();
+
+  const recovered = getJobById(jobId);
+  assert.equal(recovered?.status, 'failed');
+  assert.ok(recovered?.error?.includes('Retry suppressed to preserve exactly-once execution guarantee'));
+});
+
+// =========================================================================
+// 49. BROWSER NETWORK EGRESS RESTRICTIONS
+// =========================================================================
+test('Browser Egress: Network egress resolution strictly forbids loopback and cloud metadata', async () => {
+  const metadata = await resolveHostSafely('169.254.169.254');
+  assert.equal(metadata.safe, false);
+  assert.ok(metadata.reason?.includes('forbidden'));
+
+  const internalDomain = await resolveHostSafely('metadata.google.internal');
+  assert.equal(internalDomain.safe, false);
+
+  const internalLocal = await resolveHostSafely('router.local');
+  assert.equal(internalLocal.safe, false);
+});
+
+// =========================================================================
+// 50. SYMLINK FILESYSTEM BOUNDARY HARDENING
+// =========================================================================
+test('Filesystem Boundary: ensureRealDirectoryWithin and writeFileNoFollow refuse symlinks', async () => {
+  const testRoot = path.resolve(process.cwd(), '.nook_sandboxes', `fs_boundary_${Date.now()}`);
+  fs.mkdirSync(testRoot, { recursive: true });
+
+  try {
+    const verified = await ensureRealDirectoryWithin(testRoot, path.join(testRoot, 'sub', 'dir'));
+    assert.ok(verified.startsWith(testRoot));
+
+    await writeFileNoFollow(path.join(testRoot, 'sub', 'dir'), 'safe.txt', 'SAFE_CONTENT');
+    const content = fs.readFileSync(path.join(testRoot, 'sub', 'dir', 'safe.txt'), 'utf8');
+    assert.equal(content, 'SAFE_CONTENT');
+
+    // Attempt traversal via invalid name
+    await assert.rejects(
+      async () => {
+        await writeFileNoFollow(path.join(testRoot, 'sub', 'dir'), '../escape.txt', 'MALICIOUS');
+      },
+      WorkspaceSecurityError
+    );
+  } finally {
+    fs.rmSync(testRoot, { recursive: true, force: true });
+  }
 });
 
 after(async () => {

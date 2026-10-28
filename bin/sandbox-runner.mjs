@@ -17,10 +17,15 @@
 
 import http from 'http';
 import path from 'path';
-import fs from 'fs/promises';
 import fsSync from 'fs';
 import { spawn } from 'child_process';
 import crypto from 'crypto';
+import {
+  WorkspaceSecurityError,
+  ensureRealDirectoryWithin,
+  removeSymlinksInTree,
+  writeFileNoFollow,
+} from '../src/lib/safe-workspace.mjs';
 
 const PORT = Number(process.env.PORT || process.env.SANDBOX_PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -90,6 +95,11 @@ const SAFE_ENV_WHITELIST = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'COMSPEC'];
 
 // In-memory replay cache: ticketId -> expiresAt
 const consumedTickets = new Map();
+
+// Defence in depth: one approval may authorize exactly one execution, regardless of ticket id.
+// (The control plane enforces this durably in SQLite; this guards against a compromised/buggy issuer.)
+const consumedApprovals = new Map();
+const MAX_TRACKED_APPROVALS = 10000;
 
 // Periodic cleanup of expired replay prevention tokens
 const cleanupInterval = setInterval(() => {
@@ -210,6 +220,10 @@ function validateTicket(rawTicketHeader, command, agentId, taskId) {
     return { valid: false, status: 403, error: 'Execution ticket already consumed (replay attack detected).' };
   }
 
+  if (ticket.approvalId && consumedApprovals.has(ticket.approvalId)) {
+    return { valid: false, status: 403, error: 'Approval already used for an execution (single-use approval replay detected).' };
+  }
+
   // Cryptographic HMAC check over full authorization chain
   const workspaceField = ticket.workspacePath || '';
   const payload = `${ticket.ticketId}:${ticket.commandHash}:${ticket.agentId}:${ticket.taskId || ''}:${workspaceField}:${ticket.approvalId || 'none'}:${ticket.authorizationType || 'system_verified_test'}:${ticket.issuedAt}:${ticket.expiresAt}:${ticket.action}`;
@@ -262,6 +276,12 @@ function validateTicket(rawTicketHeader, command, agentId, taskId) {
 
   // Mark ticket consumed
   consumedTickets.set(ticket.ticketId, ticket.expiresAt);
+  if (ticket.approvalId) {
+    if (consumedApprovals.size >= MAX_TRACKED_APPROVALS) {
+      consumedApprovals.delete(consumedApprovals.keys().next().value);
+    }
+    consumedApprovals.set(ticket.approvalId, Date.now());
+  }
   return { valid: true, ticket };
 }
 
@@ -606,21 +626,29 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
-        await fs.mkdir(taskWorkspaceDir, { recursive: true, mode: 0o700 });
-        const tmpDir = path.resolve(agentSandboxDir, 'tmp');
-        await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+        let tmpDir;
+        try {
+          await ensureRealDirectoryWithin(SANDBOXES_BASE, taskWorkspaceDir);
+          tmpDir = path.resolve(agentSandboxDir, 'tmp');
+          await ensureRealDirectoryWithin(SANDBOXES_BASE, tmpDir);
+          // A previous task run may have planted links in this persistent directory.
+          await removeSymlinksInTree(taskWorkspaceDir);
 
-        // Write virtual files strictly within task workspace
-        if (Array.isArray(virtualFiles)) {
-          for (const f of virtualFiles) {
-            const rawName = f.name || f.path;
-            if (!rawName || typeof f.content !== 'string') continue;
-            const sanitizedName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
-            const targetFilePath = path.resolve(taskWorkspaceDir, sanitizedName);
-            if (targetFilePath.startsWith(taskWorkspaceDir + path.sep)) {
-              await fs.writeFile(targetFilePath, f.content, { encoding: 'utf8', mode: 0o600 });
+          if (Array.isArray(virtualFiles)) {
+            for (const f of virtualFiles) {
+              const rawName = f && (f.name || f.path);
+              if (!rawName || typeof f.content !== 'string') continue;
+              const sanitizedName = path.basename(rawName).replace(/[^a-zA-Z0-9._-]/g, '_');
+              await writeFileNoFollow(taskWorkspaceDir, sanitizedName, f.content, 0o600);
             }
           }
+        } catch (wsErr) {
+          if (wsErr instanceof WorkspaceSecurityError) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Security violation: ${wsErr.message}`, code: wsErr.code }));
+            return;
+          }
+          throw wsErr;
         }
 
         // 4. Scrub environment (zero host secrets, safe whitelist only)
@@ -682,6 +710,8 @@ const server = http.createServer(async (req, res) => {
               });
             }
           } catch {}
+          // Post-execution sweep: links created by the task must not survive into the next run.
+          await removeSymlinksInTree(taskWorkspaceDir).catch(() => {});
         }
 
         // Strict isolation enforcement: if container runtime is unavailable, deny execution!

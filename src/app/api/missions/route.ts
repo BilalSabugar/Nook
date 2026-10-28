@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { action, title, objective, priority, requiresCodeExecution, missionId } = body;
+    const { action, title, objective, priority, requiresCodeExecution, codeGenerationMode, modelOptions, missionId } = body;
 
     // 1. Aura plans a new mission
     if (action === 'plan' || !action) {
@@ -78,6 +78,8 @@ export async function POST(req: NextRequest) {
         objective,
         priority: priority || 'medium',
         requiresCodeExecution: Boolean(requiresCodeExecution),
+        codeGenerationMode: codeGenerationMode || 'auto',
+        modelOptions,
       });
 
       return NextResponse.json({

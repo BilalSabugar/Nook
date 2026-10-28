@@ -34,6 +34,7 @@ function computeCommandHash(cmd) {
 }
 
 const NOOK_API_KEY = process.env.NOOK_API_KEY || 'nook-production-test-api-key-32bytes';
+const NOOK_APPROVER_PASSWORD = process.env.NOOK_APPROVER_PASSWORD || '';
 
 function createSignedTicket({
   command,
@@ -67,6 +68,34 @@ function createSignedTicket({
     action: 'sandboxed_exec',
     signature,
   };
+}
+
+async function runnerExec({ agentId, command, taskId, virtualFiles = [], approvalId = null, authorizationType = 'system_verified_test' }) {
+  const ticket = createSignedTicket({ command, agentId, taskId, approvalId, authorizationType });
+  const res = await fetch(`${RUNNER_URL}/exec`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${Buffer.from(JSON.stringify(ticket)).toString('base64')}`,
+    },
+    body: JSON.stringify({ agentId, command, taskId, virtualFiles, timeoutMs: 15000 }),
+  });
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data };
+}
+
+async function humanApproverLogin() {
+  assert.ok(NOOK_APPROVER_PASSWORD.length >= 12, 'NOOK_APPROVER_PASSWORD must be provided to the E2E suite');
+  const res = await fetch(`${WEB_URL}/api/auth/session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ credential: NOOK_APPROVER_PASSWORD }),
+  });
+  assert.equal(res.status, 200, `Approver login must succeed, got ${res.status}`);
+  const cookies = res.headers.getSetCookie();
+  const session = cookies.map((c) => c.split(';')[0]).find((c) => c.startsWith('nook_session='));
+  assert.ok(session, 'Approver login must establish a session cookie');
+  return session;
 }
 
 async function waitForHealthy(url, name, maxWaitMs = 60000) {
@@ -336,14 +365,27 @@ for (const p of paths) {
   } catch {}
 }
 
-// 2. Try reaching supervisor Docker API
-let dockerControlPlaneReachable = false;
-try {
-  const req = http.get('http://container-supervisor:2375/version', { timeout: 1000 }, () => {
-    dockerControlPlaneReachable = true;
-  });
-  req.on('error', () => {});
-} catch {}
+// 2. Try reaching supervisor Docker API. Await the outcome: only a settled ERROR proves unreachability.
+const dockerProbe = await new Promise((resolve) => {
+  let done = false;
+  const finish = (outcome, code) => {
+    if (done) return;
+    done = true;
+    resolve({ settled: true, outcome, code: code || null });
+  };
+  try {
+    const req = http.get('http://container-supervisor:2375/version', { timeout: 3000 }, (res) => {
+      res.resume();
+      finish('response', res.statusCode);
+    });
+    req.on('timeout', () => { req.destroy(); finish('error', 'ETIMEDOUT'); });
+    req.on('error', (e) => finish('error', e.code || 'ERR'));
+  } catch (e) {
+    finish('error', e.code || 'THROWN');
+  }
+  setTimeout(() => finish('error', 'WATCHDOG'), 5000);
+});
+const dockerControlPlaneReachable = dockerProbe.outcome === 'response';
 
 // 3. Check for leaked host runner secrets
 const runnerSecretLeaked = Boolean(process.env.SANDBOX_RUNNER_SECRET);
@@ -351,6 +393,7 @@ const runnerSecretLeaked = Boolean(process.env.SANDBOX_RUNNER_SECRET);
 console.log(JSON.stringify({
   canaryFound,
   dockerControlPlaneReachable,
+  dockerProbe,
   runnerSecretLeaked,
   status: 'PROBE_COMPLETE'
 }));
@@ -386,9 +429,55 @@ console.log(JSON.stringify({
   const probeResult = JSON.parse(probeMatch[0]);
 
   assert.equal(probeResult.canaryFound, false, 'Adversarial task container MUST NOT be able to read another agent canary');
+  assert.equal(probeResult.dockerProbe?.settled, true, 'Docker control-plane probe must have settled (not report before the request finished)');
+  assert.equal(probeResult.dockerProbe?.outcome, 'error', 'Docker control-plane probe must end in a network error, never a response');
   assert.equal(probeResult.dockerControlPlaneReachable, false, 'Task container MUST NOT be able to reach supervisor Docker API');
   assert.equal(probeResult.runnerSecretLeaked, false, 'Host secrets MUST NOT be exposed in task container environment');
   console.log('✔ In-container adversarial isolation: Cannot read other agent canary, cannot reach Docker daemon, and has no host secrets\n');
+
+  // Step 5b: Symlink boundary. A task plants a symlink in its persistent workspace that points at
+  // another agent's private file; a later run must NOT follow it.
+  console.log('Testing Symlink Filesystem-Boundary Regression...');
+  const linkTaskId = `cipher-symlink-${Date.now()}`;
+  const plantRun = await runnerExec({
+    agentId: 'agent-cipher',
+    command: 'node plant_link.mjs',
+    taskId: linkTaskId,
+    virtualFiles: [
+      {
+        name: 'plant_link.mjs',
+        content: `import fs from 'fs';
+try { fs.symlinkSync('/app/.nook_sandboxes/agent-scout/tasks/${scoutTaskId}/scout_sentinel.txt', 'link.txt'); } catch {}
+console.log('LINK_PLANTED');`,
+      },
+    ],
+  });
+  assert.equal(plantRun.status, 200, 'Link planting run must execute');
+  const overwriteRun = await runnerExec({
+    agentId: 'agent-cipher',
+    command: 'node noop.mjs',
+    taskId: linkTaskId,
+    virtualFiles: [
+      { name: 'link.txt', content: 'SYMLINK_OVERWRITE_ATTACK' },
+      { name: 'noop.mjs', content: 'console.log("NOOP");' },
+    ],
+  });
+  assert.ok([200, 403].includes(overwriteRun.status), `Overwrite run must be safely handled, got ${overwriteRun.status}`);
+  const readBack = await runnerExec({
+    agentId: 'agent-scout',
+    command: 'node read_canary.mjs',
+    taskId: scoutTaskId,
+    virtualFiles: [
+      {
+        name: 'read_canary.mjs',
+        content: "import fs from 'fs'; console.log('CANARY=' + fs.readFileSync('scout_sentinel.txt','utf8'));",
+      },
+    ],
+  });
+  assert.equal(readBack.status, 200);
+  assert.ok(readBack.data.stdout.includes(`CANARY=${scoutCanaryToken}`), 'Scout canary must be intact after symlink attack');
+  assert.ok(!readBack.data.stdout.includes('SYMLINK_OVERWRITE_ATTACK'), 'Symlink must not redirect writes into another agent workspace');
+  console.log('✔ Symlink boundary: planted link was not followed; other agent file untouched\n');
 
   // Step 6: Supervisor Network Isolation
   console.log('Testing Supervisor Control Plane Network Isolation...');
@@ -407,6 +496,11 @@ console.log(JSON.stringify({
   const apiHeaders = {
     'Content-Type': 'application/json',
     'x-nook-api-key': NOOK_API_KEY,
+  };
+  const approverSessionCookie = await humanApproverLogin();
+  const humanHeaders = {
+    'Content-Type': 'application/json',
+    Cookie: approverSessionCookie,
   };
 
   // 7a. Register approval request on server
@@ -448,10 +542,18 @@ console.log(JSON.stringify({
   assert.equal(preDecisionVerifyRes.status, 403, 'Verify and consume before human decision must be rejected with 403');
   console.log('✔ Step 7b: Execution before human approval decision is strictly rejected (403)');
 
-  // 7c. Human owner approves the request
-  const decideRes = await fetch(`${WEB_URL}/api/approvals`, {
+  // 7c. Machine credential (API key) must NOT be able to decide; the human approver session can
+  const machineDecideRes = await fetch(`${WEB_URL}/api/approvals`, {
     method: 'POST',
     headers: apiHeaders,
+    body: JSON.stringify({ action: 'decide', approvalId: testApprovalId, decision: 'approve', reason: 'machine attempt' }),
+  });
+  assert.equal(machineDecideRes.status, 403, 'API key must be refused when deciding approvals');
+  console.log('✔ Step 7c-i: Machine credential cannot issue human approval decisions (403)');
+
+  const decideRes = await fetch(`${WEB_URL}/api/approvals`, {
+    method: 'POST',
+    headers: humanHeaders,
     body: JSON.stringify({
       action: 'decide',
       approvalId: testApprovalId,
@@ -460,7 +562,7 @@ console.log(JSON.stringify({
     }),
   });
   assert.equal(decideRes.status, 200, 'Human decision should succeed with 200');
-  console.log('✔ Step 7c: Human owner approved the request');
+  console.log('✔ Step 7c: Human approver session approved the request');
 
   // 7d. Runner authorization matrix: Unapproved tickets and mismatches strictly rejected
   // Missing approvalId on human_approval ticket: rejected with 403
@@ -560,7 +662,19 @@ console.log(JSON.stringify({
     }),
   });
   assert.equal(replayRes.status, 403, 'Replayed ticket execution must fail with 403');
-  console.log('✔ Step 7f: Replayed execution ticket strictly rejected (403)\n');
+  console.log('✔ Step 7f: Replayed execution ticket strictly rejected (403)');
+
+  // 7g. A FRESH ticket (new id) for the SAME approval must be rejected: approvals are single-use
+  const secondTicketRun = await runnerExec({
+    agentId: 'agent-cipher',
+    command: missionCommand,
+    taskId: `cipher-second-attempt-${Date.now()}`,
+    approvalId: testApprovalId,
+    authorizationType: 'human_approval',
+    virtualFiles: approvedFiles,
+  });
+  assert.equal(secondTicketRun.status, 403, 'A second ticket for an already used approval must be rejected');
+  console.log('✔ Step 7g: Single-use approval cannot authorize a second execution (403)\n');
 
   // Step 8: Sovereign Workspace Round-Trip Export/Import
   console.log('Testing Sovereign Workspace Round-Trip Export and Import...');
@@ -569,7 +683,7 @@ console.log(JSON.stringify({
   });
   assert.equal(exportRes.status, 200, 'Workspace export must succeed with 200');
   const bundle = await exportRes.json();
-  assert.equal(bundle.schemaVersion, 1, 'Schema version must be 1');
+  assert.equal(bundle.schemaVersion, 2, 'Schema version must be 2');
   assert.ok(Array.isArray(bundle.spaces), 'Export bundle must contain spaces array');
   assert.ok(Array.isArray(bundle.missions), 'Export bundle must contain missions array');
   assert.ok(Array.isArray(bundle.evidenceTimeline), 'Export bundle must contain evidenceTimeline array');

@@ -16,7 +16,21 @@ export function getDatabase(): DatabaseSync {
   }
 
   const db = new DatabaseSync(DB_PATH);
+  applySchema(db);
 
+  _dbInstance = db;
+  return db;
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
+}
+
+/** Creates / migrates the full Nook schema on any SQLite handle (used for the live DB and restore targets). */
+export function applySchema(db: DatabaseSync): void {
   // Enable WAL mode for high performance concurrency
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
@@ -182,8 +196,11 @@ export function getDatabase(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_leases_expires ON worker_leases(expires_at);
   `);
 
-  _dbInstance = db;
-  return db;
+  ensureColumn(db, 'approvals', 'consumed_task_id', 'TEXT');
+  ensureColumn(db, 'approvals', 'ticket_issued_at', 'TEXT');
+  ensureColumn(db, 'background_jobs', 'updated_at', 'TEXT');
+  ensureColumn(db, 'background_jobs', 'retry_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'background_jobs', 'side_effect_state', 'TEXT');
 }
 
 // ==========================================
@@ -516,7 +533,8 @@ export function verifyAndConsumeApproval(
   id: string,
   token: string,
   expectedCommand?: string,
-  expectedAgentId?: string
+  expectedAgentId?: string,
+  taskId?: string
 ): { authorized: boolean; error?: string; approval?: DbApprovalRecord } {
   const db = getDatabase();
   const record = getApprovalById(id);
@@ -555,12 +573,12 @@ export function verifyAndConsumeApproval(
     return { authorized: false, error: 'Authorization token has expired.' };
   }
 
-  // Atomic consumption transition
+  // Atomic consumption transition; binds the approval to exactly one task
   const result = db.prepare(`
     UPDATE approvals
-    SET status = 'consumed'
+    SET status = 'consumed', consumed_task_id = ?
     WHERE id = ? AND status = 'approved' AND single_use_token = ?
-  `).run(id, token);
+  `).run(taskId || null, id, token);
 
   if (result.changes === 0) {
     return { authorized: false, error: 'Approval token was already consumed or race condition detected.' };
@@ -570,6 +588,32 @@ export function verifyAndConsumeApproval(
 
   const consumed = getApprovalById(id);
   return { authorized: true, approval: consumed || undefined };
+}
+
+/**
+ * Atomically claims an approval for exactly ONE execution-ticket issuance.
+ * - 'approved'  -> consumed + bound to taskId + ticket issued (single statement)
+ * - 'consumed'  -> only if it was consumed for this very task and no ticket was issued yet
+ * Any further attempt (replay, other task, retry) is denied.
+ */
+export function claimApprovalForTicket(id: string, taskId: string): { ok: boolean; error?: string } {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const fromApproved = db.prepare(`
+    UPDATE approvals
+    SET status = 'consumed', consumed_task_id = ?, ticket_issued_at = ?
+    WHERE id = ? AND status = 'approved' AND ticket_issued_at IS NULL
+  `).run(taskId, now, id);
+  if (Number(fromApproved.changes) > 0) return { ok: true };
+
+  const fromConsumed = db.prepare(`
+    UPDATE approvals
+    SET ticket_issued_at = ?
+    WHERE id = ? AND status = 'consumed' AND consumed_task_id = ? AND ticket_issued_at IS NULL
+  `).run(now, id, taskId);
+  if (Number(fromConsumed.changes) > 0) return { ok: true };
+
+  return { ok: false, error: 'Approval already used for an execution attempt (single-use) or bound to a different task.' };
 }
 
 export function recordApprovalExecutionResult(id: string, result: { success: boolean; executedAt: string; output?: string; exitCode?: number }): void {
@@ -692,12 +736,33 @@ export function claimNextQueuedJob(): DbBackgroundJob | null {
   const now = new Date().toISOString();
   const res = db.prepare(`
     UPDATE background_jobs
-    SET status = 'running', started_at = ?
+    SET status = 'running', started_at = ?, updated_at = ?
     WHERE id = ? AND status = 'queued'
-  `).run(now, next.id);
+  `).run(now, now, next.id);
 
   if (res.changes === 0) return null;
   return getJobById(next.id);
+}
+
+export function markJobSideEffectStarted(jobId: string): boolean {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const res = db.prepare(`
+    UPDATE background_jobs
+    SET side_effect_state = 'started', updated_at = ?
+    WHERE id = ? AND status = 'running' AND side_effect_state IS NULL
+  `).run(now, jobId);
+  return Number(res.changes) > 0;
+}
+
+export function markJobSideEffectFinished(jobId: string): void {
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE background_jobs
+    SET side_effect_state = 'finished', updated_at = ?
+    WHERE id = ?
+  `).run(now, jobId);
 }
 
 export function updateJobProgress(
@@ -719,11 +784,12 @@ export function updateJobProgress(
     });
   }
 
+  const now = new Date().toISOString();
   db.prepare(`
     UPDATE background_jobs
-    SET progress = ?, steps_json = ?
+    SET progress = ?, steps_json = ?, updated_at = ?
     WHERE id = ? AND status = 'running'
-  `).run(progress, JSON.stringify(steps), id);
+  `).run(progress, JSON.stringify(steps), now, id);
 }
 
 export function completeJob(id: string, result: { summary: string; artifacts?: string[]; citations?: string[] }): void {
@@ -731,9 +797,9 @@ export function completeJob(id: string, result: { summary: string; artifacts?: s
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE background_jobs
-    SET status = 'completed', progress = 100, result_json = ?, completed_at = ?
+    SET status = 'completed', progress = 100, result_json = ?, completed_at = ?, updated_at = ?
     WHERE id = ? AND status = 'running'
-  `).run(JSON.stringify(result), now, id);
+  `).run(JSON.stringify(result), now, now, id);
 
   logAuditEvent('JOB_COMPLETED', `Job ${id} completed`, 'success');
 }
@@ -743,9 +809,9 @@ export function failJob(id: string, errorMessage: string): void {
   const now = new Date().toISOString();
   db.prepare(`
     UPDATE background_jobs
-    SET status = 'failed', error = ?, completed_at = ?
+    SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
     WHERE id = ?
-  `).run(errorMessage, now, id);
+  `).run(errorMessage, now, now, id);
 
   logAuditEvent('JOB_FAILED', `Job ${id} failed: ${errorMessage}`, 'error');
 }
@@ -1644,6 +1710,353 @@ export function commitMissionStateWithFencing(
     db.exec('ROLLBACK;');
     return { committed: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+// ==========================================
+// SOVEREIGN WORKSPACE EXPORT & IMPORT (v2)
+// ==========================================
+
+export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
+  nookVersion: string;
+  exportedAt: string;
+  schemaVersion: number;
+  spaces: Array<{
+    id: string;
+    name: string;
+    icon: string;
+    createdAt: string;
+    updatedAt: string;
+    pages: Array<{
+      id: string;
+      spaceId: string;
+      title: string;
+      content: string;
+      excerpt?: string;
+      icon?: string;
+      authorAgentId: string;
+      version: number;
+      tags: string[];
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  }>;
+  documentRevisions: DbDocumentRevision[];
+  missions: DbMission[];
+  evidenceTimeline: DbEvidenceRecord[];
+  approvalsAudit: DbApprovalRecord[];
+} {
+  const spaceRows = db.prepare(`SELECT * FROM spaces ORDER BY created_at ASC`).all() as unknown as SpaceRow[];
+  const docRows = db.prepare(`SELECT * FROM documents ORDER BY updated_at DESC`).all() as unknown as DocumentRow[];
+  const spaces = spaceRows.map((s) => ({
+    id: s.id,
+    name: s.name,
+    icon: s.icon || 'folder',
+    createdAt: s.created_at,
+    updatedAt: s.updated_at,
+    pages: docRows
+      .filter((d) => d.space_id === s.id)
+      .map((d) => ({
+        id: d.id,
+        spaceId: d.space_id,
+        title: d.title,
+        content: d.content,
+        excerpt: d.excerpt || undefined,
+        icon: d.icon || undefined,
+        authorAgentId: d.author_agent_id,
+        version: d.version,
+        tags: JSON.parse(d.tags_json || '[]'),
+        createdAt: d.created_at,
+        updatedAt: d.updated_at,
+      })),
+  }));
+  
+  const revRows = db.prepare(`SELECT * FROM document_revisions ORDER BY version ASC`).all() as unknown as RevisionRow[];
+  const documentRevisions: DbDocumentRevision[] = revRows.map((r) => ({
+    id: r.id,
+    documentId: r.document_id,
+    version: r.version,
+    title: r.title,
+    content: r.content,
+    authorAgentId: r.author_agent_id,
+    createdAt: r.created_at,
+    changeSummary: r.change_summary || undefined,
+  }));
+
+  const missionRows = db.prepare(`SELECT * FROM missions ORDER BY created_at ASC`).all() as unknown as MissionRow[];
+  const missions: DbMission[] = missionRows.map((row) => {
+    const rawTasks = db.prepare(`SELECT * FROM agent_tasks WHERE mission_id = ? ORDER BY created_at ASC`).all(row.id) as unknown as AgentTaskRow[];
+    const tasks: DbAgentTask[] = rawTasks.map((r) => ({
+      id: r.id,
+      missionId: r.mission_id,
+      title: r.title,
+      goal: r.goal,
+      assignedAgentId: r.assigned_agent_id,
+      status: r.status as DbAgentTask['status'],
+      dependencies: JSON.parse(r.dependencies_json || '[]'),
+      priority: r.priority as DbAgentTask['priority'],
+      inputs: JSON.parse(r.inputs_json || '{}'),
+      outputs: JSON.parse(r.outputs_json || '{}'),
+      observations: JSON.parse(r.observations_json || '[]'),
+      verification: r.verification_json ? JSON.parse(r.verification_json) : undefined,
+      approvalId: r.approval_id || undefined,
+      approvalToken: undefined, // NEVER export single-use tokens!
+      error: r.error || undefined,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      completedAt: r.completed_at || undefined,
+    }));
+
+    return {
+      id: row.id,
+      title: row.title,
+      objective: row.objective,
+      status: row.status as DbMission['status'],
+      priority: row.priority as DbMission['priority'],
+      assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
+      milestones: JSON.parse(row.milestones_json || '[]'),
+      budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at || undefined,
+      tasks,
+    };
+  });
+
+  const evRows = db.prepare(`SELECT * FROM evidence_records ORDER BY timestamp ASC`).all() as unknown as EvidenceRow[];
+  const evidenceTimeline: DbEvidenceRecord[] = evRows.map((r) => ({
+    id: r.id,
+    missionId: r.mission_id || undefined,
+    taskId: r.task_id || undefined,
+    agentId: r.agent_id,
+    agentName: r.agent_name,
+    timestamp: r.timestamp,
+    actionType: r.action_type,
+    summary: r.summary,
+    details: JSON.parse(r.details_json || '{}'),
+    status: r.status as DbEvidenceRecord['status'],
+  }));
+
+  const approvalsAudit = listApprovals(false);
+
+  return {
+    nookVersion: '1.2.0',
+    exportedAt: new Date().toISOString(),
+    schemaVersion: 2,
+    spaces,
+    documentRevisions,
+    missions,
+    evidenceTimeline,
+    approvalsAudit,
+  };
+}
+
+export function importWorkspaceSnapshot(
+  bundle: any,
+  db: DatabaseSync = getDatabase()
+): {
+  success: boolean;
+  importedSpacesCount: number;
+  importedDocsCount: number;
+  importedRevisionsCount: number;
+  importedMissionsCount: number;
+  importedTasksCount: number;
+  importedEvidenceCount: number;
+} {
+  if (!bundle || typeof bundle !== 'object' || !bundle.schemaVersion) {
+    throw new Error('Invalid workspace bundle: Missing schemaVersion');
+  }
+
+  let importedSpacesCount = 0;
+  let importedDocsCount = 0;
+  let importedRevisionsCount = 0;
+  let importedMissionsCount = 0;
+  let importedTasksCount = 0;
+  let importedEvidenceCount = 0;
+
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    // 1. Spaces & Documents
+    if (Array.isArray(bundle.spaces)) {
+      const insertSpace = db.prepare(`
+        INSERT OR IGNORE INTO spaces (id, name, icon, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const insertDoc = db.prepare(`
+        INSERT INTO documents (
+          id, space_id, title, content, excerpt, icon, author_agent_id, version, tags_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          space_id = excluded.space_id,
+          title = excluded.title,
+          content = excluded.content,
+          excerpt = excluded.excerpt,
+          icon = excluded.icon,
+          author_agent_id = excluded.author_agent_id,
+          version = excluded.version,
+          tags_json = excluded.tags_json,
+          updated_at = excluded.updated_at
+        WHERE excluded.version >= documents.version
+      `);
+
+      for (const space of bundle.spaces) {
+        if (!space?.id || !space?.name) continue;
+        insertSpace.run(
+          space.id,
+          space.name,
+          space.icon || 'folder',
+          space.createdAt || new Date().toISOString(),
+          space.updatedAt || new Date().toISOString()
+        );
+        importedSpacesCount++;
+
+        if (Array.isArray(space.pages)) {
+          for (const page of space.pages) {
+            if (!page?.id || !page?.title) continue;
+            insertDoc.run(
+              page.id,
+              space.id,
+              page.title,
+              page.content || '',
+              page.excerpt || null,
+              page.icon || null,
+              page.authorAgentId || 'import',
+              page.version || 1,
+              JSON.stringify(page.tags || []),
+              page.createdAt || new Date().toISOString(),
+              page.updatedAt || new Date().toISOString()
+            );
+            importedDocsCount++;
+          }
+        }
+      }
+    }
+
+    // 2. Document Revisions
+    if (Array.isArray(bundle.documentRevisions)) {
+      const insertRev = db.prepare(`
+        INSERT OR IGNORE INTO document_revisions (
+          id, document_id, version, title, content, author_agent_id, created_at, change_summary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const rev of bundle.documentRevisions) {
+        if (!rev?.id || !rev?.documentId) continue;
+        insertRev.run(
+          rev.id,
+          rev.documentId,
+          rev.version || 1,
+          rev.title || '',
+          rev.content || '',
+          rev.authorAgentId || 'import',
+          rev.createdAt || new Date().toISOString(),
+          rev.changeSummary || null
+        );
+        importedRevisionsCount++;
+      }
+    }
+
+    // 3. Missions & Tasks
+    if (Array.isArray(bundle.missions)) {
+      const insertMission = db.prepare(`
+        INSERT OR IGNORE INTO missions (
+          id, title, objective, status, priority, assigned_agents_json, milestones_json, budget_json, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      const insertTask = db.prepare(`
+        INSERT OR IGNORE INTO agent_tasks (
+          id, mission_id, title, goal, assigned_agent_id, status, dependencies_json,
+          priority, inputs_json, outputs_json, observations_json, verification_json,
+          approval_id, approval_token, error, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+      `);
+
+      for (const m of bundle.missions) {
+        if (!m?.id || !m?.title) continue;
+        // Restored unfinished missions are placed in 'paused' to prevent uncontrolled worker auto-execution
+        const safeStatus = m.status === 'active' || m.status === 'draft' ? 'paused' : (m.status || 'draft');
+        insertMission.run(
+          m.id,
+          m.title,
+          m.objective || '',
+          safeStatus,
+          m.priority || 'medium',
+          JSON.stringify(m.assignedAgents || []),
+          JSON.stringify(m.milestones || []),
+          m.budget ? JSON.stringify(m.budget) : null,
+          m.createdAt || new Date().toISOString(),
+          m.updatedAt || new Date().toISOString(),
+          m.completedAt || null
+        );
+        importedMissionsCount++;
+
+        if (Array.isArray(m.tasks)) {
+          for (const t of m.tasks) {
+            if (!t?.id || !t?.title) continue;
+            insertTask.run(
+              t.id,
+              m.id,
+              t.title,
+              t.goal || '',
+              t.assignedAgentId || 'agent-aura',
+              t.status || 'pending',
+              JSON.stringify(t.dependencies || []),
+              t.priority || 'medium',
+              JSON.stringify(t.inputs || {}),
+              JSON.stringify(t.outputs || {}),
+              JSON.stringify(t.observations || []),
+              t.verification ? JSON.stringify(t.verification) : null,
+              t.error || null,
+              t.createdAt || new Date().toISOString(),
+              t.updatedAt || new Date().toISOString(),
+              t.completedAt || null
+            );
+            importedTasksCount++;
+          }
+        }
+      }
+    }
+
+    // 4. Evidence Timeline
+    if (Array.isArray(bundle.evidenceTimeline)) {
+      const insertEvidence = db.prepare(`
+        INSERT OR IGNORE INTO evidence_records (
+          id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const ev of bundle.evidenceTimeline) {
+        if (!ev?.id || !ev?.agentId || !ev?.summary) continue;
+        insertEvidence.run(
+          ev.id,
+          ev.missionId || null,
+          ev.taskId || null,
+          ev.agentId,
+          ev.agentName || 'Agent',
+          ev.timestamp || new Date().toISOString(),
+          ev.actionType || 'model_call',
+          ev.summary,
+          typeof ev.details === 'string' ? ev.details : JSON.stringify(ev.details || {}),
+          ev.status || 'success'
+        );
+        importedEvidenceCount++;
+      }
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+
+  logAuditEvent('WORKSPACE_SNAPSHOT_IMPORTED', `Restored ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedRevisionsCount} revisions, ${importedMissionsCount} missions, ${importedTasksCount} tasks, ${importedEvidenceCount} evidence logs`, 'success');
+
+  return {
+    success: true,
+    importedSpacesCount,
+    importedDocsCount,
+    importedRevisionsCount,
+    importedMissionsCount,
+    importedTasksCount,
+    importedEvidenceCount,
+  };
 }
 
 

@@ -56,11 +56,49 @@ export function createSessionToken(
     throw new Error('Cannot issue session token: Server authentication setup is incomplete.');
   }
 
-  const secret = getMasterSecret();
+  const secret = sessionId === APPROVER_SESSION_ID ? getApproverSecret() : getMasterSecret();
+  if (!secret) {
+    throw new Error('Cannot issue approver session: NOOK_APPROVER_PASSWORD is not configured.');
+  }
   const expiresAt = Date.now() + ttlMs;
   const payload = `${sessionId}.${expiresAt}`;
   const signature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
   return `${payload}.${signature}`;
+}
+
+export const APPROVER_SESSION_ID = 'nook-approver';
+
+/**
+ * Human-approver credential, deliberately NOT derivable from any machine credential.
+ * Must be >= 12 chars and differ from NOOK_API_KEY / NOOK_PASSWORD / NOOK_SECRET_TOKEN.
+ */
+export function getApproverPassword(): string | null {
+  const approver = (process.env.NOOK_APPROVER_PASSWORD || '').trim();
+  if (approver.length < 12) return null;
+  const machine = [process.env.NOOK_API_KEY, process.env.NOOK_PASSWORD, process.env.NOOK_SECRET_TOKEN]
+    .map((v) => (v || '').trim())
+    .filter(Boolean);
+  if (machine.includes(approver)) return null;
+  return approver;
+}
+
+export function isApproverConfigured(): boolean {
+  return getApproverPassword() !== null;
+}
+
+/** Key separation: approver sessions are signed with a key only the approver password can derive. */
+function getApproverSecret(): string | null {
+  const approver = getApproverPassword();
+  if (!approver) return null;
+  return crypto.createHmac('sha256', approver).update('nook-approver-session-secret-v1').digest('hex');
+}
+
+export function verifyApproverCredentials(candidate: string): boolean {
+  const approver = getApproverPassword();
+  if (!approver || !candidate || typeof candidate !== 'string') return false;
+  const a = crypto.createHash('sha256').update(candidate.trim()).digest();
+  const b = crypto.createHash('sha256').update(approver).digest();
+  return crypto.timingSafeEqual(a, b);
 }
 
 /**
@@ -86,7 +124,14 @@ export function verifySessionToken(token: string): { valid: boolean; sessionId?:
     return { valid: false, error: 'Session token has expired' };
   }
 
-  const secret = getMasterSecret();
+  let secret: string;
+  if (sessionId === APPROVER_SESSION_ID) {
+    const approverSecret = getApproverSecret();
+    if (!approverSecret) return { valid: false, error: 'Approver sessions are not enabled' };
+    secret = approverSecret;
+  } else {
+    secret = getMasterSecret();
+  }
   const payload = `${sessionId}.${expiresAtStr}`;
   const expectedSignature = crypto.createHmac('sha256', secret).update(payload).digest('hex');
 
@@ -103,6 +148,24 @@ export function verifySessionToken(token: string): { valid: boolean; sessionId?:
   }
 
   return { valid: true, sessionId };
+}
+
+/**
+ * Resolves the client IP without trusting spoofable headers.
+ * NOOK_TRUSTED_PROXY_COUNT (default 0) = number of trusted reverse proxies in front of Nook.
+ * With 0 the X-Forwarded-For header is ignored entirely; with N the Nth entry from the right is used
+ * (the address the outermost trusted proxy observed), so client-supplied left-hand entries are inert.
+ */
+export function resolveClientIp(headers: Headers): string {
+  const trusted = Math.max(0, Math.min(10, parseInt(process.env.NOOK_TRUSTED_PROXY_COUNT || '0', 10) || 0));
+  if (trusted === 0) return 'direct';
+  const chain = (headers.get('x-forwarded-for') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (chain.length < trusted) return 'direct';
+  const candidate = chain[chain.length - trusted];
+  return /^[0-9a-fA-F:.]{3,45}$/.test(candidate) ? candidate : 'direct';
 }
 
 // In-memory sliding window rate limiter
@@ -127,7 +190,8 @@ function checkRateLimit(key: string): boolean {
     return true;
   }
 
-  if (record.count >= MAX_REQUESTS_PER_WINDOW) {
+  const max = key === 'direct' ? MAX_REQUESTS_PER_WINDOW * 10 : MAX_REQUESTS_PER_WINDOW;
+  if (record.count >= max) {
     return false;
   }
 
@@ -137,50 +201,108 @@ function checkRateLimit(key: string): boolean {
 
 // Login attempt rate limiting to prevent brute-force attacks
 const LOGIN_ATTEMPT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_FAILED_LOGIN_ATTEMPTS = 5; // Max 5 failed attempts per 5 minutes
+const MAX_FAILED_LOGIN_ATTEMPTS = 5; // Max 5 failed attempts per 5 minutes per client
+const GLOBAL_LOGIN_BUCKET = '__global__';
+const MAX_GLOBAL_FAILED_LOGIN_ATTEMPTS = 50; // Ceiling across ALL clients, immune to IP rotation
 const loginAttemptBuckets = new Map<string, { failedCount: number; windowStart: number; blockedUntil?: number }>();
 
-export function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfterSeconds?: number } {
+function checkBucket(key: string, max: number): { allowed: boolean; retryAfterSeconds?: number } {
   const now = Date.now();
-  const record = loginAttemptBuckets.get(ip);
+  const record = loginAttemptBuckets.get(key);
   if (!record) {
     return { allowed: true };
   }
 
   if (record.blockedUntil && now < record.blockedUntil) {
-    const retryAfterSeconds = Math.ceil((record.blockedUntil - now) / 1000);
-    return { allowed: false, retryAfterSeconds };
+    return { allowed: false, retryAfterSeconds: Math.ceil((record.blockedUntil - now) / 1000) };
   }
 
   if (now - record.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
-    loginAttemptBuckets.delete(ip);
+    loginAttemptBuckets.delete(key);
     return { allowed: true };
   }
 
-  if (record.failedCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
+  if (record.failedCount >= max) {
     record.blockedUntil = now + LOGIN_ATTEMPT_WINDOW_MS;
-    const retryAfterSeconds = Math.ceil(LOGIN_ATTEMPT_WINDOW_MS / 1000);
-    return { allowed: false, retryAfterSeconds };
+    return { allowed: false, retryAfterSeconds: Math.ceil(LOGIN_ATTEMPT_WINDOW_MS / 1000) };
   }
 
   return { allowed: true };
 }
 
-export function recordFailedLogin(ip: string): void {
+function recordBucketFailure(key: string, max: number): void {
   const now = Date.now();
-  const record = loginAttemptBuckets.get(ip);
+  const record = loginAttemptBuckets.get(key);
   if (!record || now - record.windowStart > LOGIN_ATTEMPT_WINDOW_MS) {
-    loginAttemptBuckets.set(ip, { failedCount: 1, windowStart: now });
+    loginAttemptBuckets.set(key, { failedCount: 1, windowStart: now });
   } else {
     record.failedCount += 1;
-    if (record.failedCount >= MAX_FAILED_LOGIN_ATTEMPTS) {
+    if (record.failedCount >= max) {
       record.blockedUntil = now + LOGIN_ATTEMPT_WINDOW_MS;
+    }
+  }
+  if (loginAttemptBuckets.size > 5000) {
+    for (const [k, v] of loginAttemptBuckets.entries()) {
+      if (now - v.windowStart > LOGIN_ATTEMPT_WINDOW_MS && !(v.blockedUntil && now < v.blockedUntil)) {
+        loginAttemptBuckets.delete(k);
+      }
     }
   }
 }
 
+export function checkLoginRateLimit(ip: string): { allowed: boolean; retryAfterSeconds?: number } {
+  const perClient = checkBucket(ip, MAX_FAILED_LOGIN_ATTEMPTS);
+  if (!perClient.allowed) return perClient;
+  return checkBucket(GLOBAL_LOGIN_BUCKET, MAX_GLOBAL_FAILED_LOGIN_ATTEMPTS);
+}
+
+export function recordFailedLogin(ip: string): void {
+  recordBucketFailure(ip, MAX_FAILED_LOGIN_ATTEMPTS);
+  recordBucketFailure(GLOBAL_LOGIN_BUCKET, MAX_GLOBAL_FAILED_LOGIN_ATTEMPTS);
+}
+
 export function recordSuccessfulLogin(ip: string): void {
   loginAttemptBuckets.delete(ip);
+}
+
+/** Test helper: clears all throttling state. */
+export function resetLoginThrottleForTests(): void {
+  loginAttemptBuckets.clear();
+}
+
+export interface HumanApproverResult {
+  authorized: boolean;
+  status?: number;
+  error?: string;
+}
+
+/**
+ * Human-decision gate for approvals. Machine credentials (API key header, bearer token minted from them)
+ * can NEVER satisfy it. Requires an interactive session established with NOOK_APPROVER_PASSWORD.
+ * Non-production only: when no approver password is configured, a human owner session cookie/token is
+ * accepted (still never the raw API key).
+ */
+export function validateHumanApproverRequest(req: Request): HumanApproverResult & { auth?: AuthValidationResult } {
+  const auth = validateApiRequest(req);
+  if (!auth.authorized) {
+    return { authorized: false, status: auth.status, error: auth.error, auth };
+  }
+  if (auth.authMethod === 'api_key') {
+    return { authorized: false, status: 403, error: 'Forbidden: Machine credentials (API key) cannot issue human approval decisions.', auth };
+  }
+  if (isApproverConfigured()) {
+    if (auth.sessionId !== APPROVER_SESSION_ID) {
+      return { authorized: false, status: 403, error: 'Forbidden: A human approver session is required to decide approvals. Sign in with the approver password.', auth };
+    }
+    return { authorized: true, auth };
+  }
+  if (process.env.NODE_ENV === 'production') {
+    return { authorized: false, status: 503, error: 'Approver not configured: set NOOK_APPROVER_PASSWORD (>=12 chars, distinct from machine credentials) to enable human approvals.', auth };
+  }
+  if (auth.sessionId !== 'nook-owner') {
+    return { authorized: false, status: 403, error: 'Forbidden: Owner session required.', auth };
+  }
+  return { authorized: true, auth };
 }
 
 /**
@@ -192,7 +314,7 @@ export function recordSuccessfulLogin(ip: string): void {
  */
 export function validateApiRequest(req: Request): AuthValidationResult {
   // 1. Rate limiting check
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+  const ip = resolveClientIp(req.headers);
   if (!checkRateLimit(ip)) {
     return {
       authorized: false,

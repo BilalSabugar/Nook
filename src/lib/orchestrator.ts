@@ -481,14 +481,26 @@ ${citationsList}
     let testContent = String(task.inputs.testContent || '');
     let rawCmd = String(task.inputs.command || `node --test ${testFile}`);
 
-    if (task.inputs.codeGenerationMode === 'model') {
+    const genMode = task.inputs.codeGenerationMode || 'auto';
+    const modelOpts = (task.inputs.modelOptions as any) || {};
+    const hasConfiguredProvider = Boolean(
+      modelOpts.apiKey ||
+      modelOpts.endpoint ||
+      process.env.GEMINI_API_KEY ||
+      process.env.OPENAI_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.OLLAMA_BASE_URL
+    );
+
+    if (genMode === 'model' || (genMode === 'auto' && hasConfiguredProvider)) {
       try {
         const modelPlan = await synthesizeSolutionWithModel(task.goal || task.title, {
-          mode: 'model',
-          requireModel: true,
-          provider: (task.inputs.modelOptions as any)?.provider,
-          apiKey: (task.inputs.modelOptions as any)?.apiKey,
-          endpoint: (task.inputs.modelOptions as any)?.endpoint,
+          mode: genMode === 'model' ? 'model' : 'auto',
+          requireModel: genMode === 'model',
+          provider: modelOpts.provider,
+          apiKey: modelOpts.apiKey,
+          endpoint: modelOpts.endpoint,
+          model: modelOpts.model,
         });
         solutionContent = modelPlan.solution;
         testContent = modelPlan.testCode;
@@ -591,7 +603,7 @@ ${citationsList}
 
     // At this point, appr.status is 'approved'!
     // Consume approval with single-use token
-    const consumption = verifyAndConsumeApproval(approvalId, appr.singleUseToken, rawCmd, 'agent-cipher');
+    const consumption = verifyAndConsumeApproval(approvalId, appr.singleUseToken, rawCmd, 'agent-cipher', task.id);
     if (!consumption.authorized) {
       return updateAgentTask(task.id, {
         status: 'failed',

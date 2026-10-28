@@ -7,6 +7,9 @@ import {
   checkLoginRateLimit,
   recordFailedLogin,
   recordSuccessfulLogin,
+  resolveClientIp,
+  verifyApproverCredentials,
+  APPROVER_SESSION_ID,
 } from '@/lib/auth';
 
 /**
@@ -63,7 +66,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || '127.0.0.1';
+    const ip = resolveClientIp(req.headers);
     const rateLimit = checkLoginRateLimit(ip);
     if (!rateLimit.allowed) {
       return NextResponse.json(
@@ -94,7 +97,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const isAuthorized = verifyOwnerCredentials(credential);
+    // Approver credential (distinct from every machine credential) yields the human-approver identity.
+    const isApprover = verifyApproverCredentials(credential);
+    const isAuthorized = isApprover || verifyOwnerCredentials(credential);
     if (!isAuthorized) {
       recordFailedLogin(ip);
       return NextResponse.json(
@@ -108,12 +113,14 @@ export async function POST(req: NextRequest) {
 
     recordSuccessfulLogin(ip);
 
-    const sessionToken = createSessionToken('nook-owner');
+    const sessionId = isApprover ? APPROVER_SESSION_ID : 'nook-owner';
+    const sessionToken = createSessionToken(sessionId);
     const response = NextResponse.json({
       success: true,
       authenticated: true,
-      sessionId: 'nook-owner',
-      message: 'Owner session authenticated successfully. Secure session cookie established.',
+      sessionId,
+      canApprove: isApprover,
+      message: 'Session authenticated successfully. Secure session cookie established.',
     });
 
     // Establish secure HttpOnly cookie without exposing token in response JSON body

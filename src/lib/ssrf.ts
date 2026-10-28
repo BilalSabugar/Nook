@@ -12,7 +12,7 @@ export interface SsrfValidationResult {
 /**
  * Checks if an IPv4 address is within private, loopback, link-local, carrier-grade NAT, or cloud metadata ranges.
  */
-function isForbiddenIpv4(ip: string): boolean {
+export function isForbiddenIpv4(ip: string): boolean {
   const parts = ip.split('.').map(p => parseInt(p, 10));
   if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
     return true; // malformed IPv4 is forbidden
@@ -55,7 +55,7 @@ function isForbiddenIpv4(ip: string): boolean {
 /**
  * Checks if an IPv6 address is loopback, unique-local, link-local, or IPv4-mapped private.
  */
-function isForbiddenIpv6(ip: string): boolean {
+export function isForbiddenIpv6(ip: string): boolean {
   const normalized = ip.toLowerCase().trim();
 
   // Loopback (::1)

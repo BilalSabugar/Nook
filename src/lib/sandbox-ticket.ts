@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { getApprovalById, getJobById, getAgentTaskById } from './db.ts';
+import { getApprovalById, getJobById, getAgentTaskById, claimApprovalForTicket } from './db.ts';
 
 export interface SandboxExecutionTicket {
   ticketId: string;
@@ -107,6 +107,11 @@ function verifyServerAuthorization(options: {
     }
     if (appr.payload?.taskId && options.taskId && appr.payload.taskId !== options.taskId) {
       throw new Error(`Server authorization denied: Approval task ID mismatch (expected "${options.taskId}", found "${appr.payload.taskId}").`);
+    }
+    // Single-use enforcement: the claim is atomic and succeeds exactly once per approval.
+    const claim = claimApprovalForTicket(options.approvalId, options.taskId);
+    if (!claim.ok) {
+      throw new Error(`Server authorization denied: ${claim.error}`);
     }
   } else if (options.authorizationType === 'system_verified_test') {
     if (!options.taskId) {

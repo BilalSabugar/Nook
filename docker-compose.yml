@@ -19,6 +19,10 @@ services:
       - NOOK_PASSWORD=${NOOK_PASSWORD:-}
       - NOOK_API_KEY=${NOOK_API_KEY:-}
       - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
+      # Human approver credential: web tier ONLY. Never given to the worker or runner.
+      - "NOOK_APPROVER_PASSWORD=${NOOK_APPROVER_PASSWORD:?NOOK_APPROVER_PASSWORD (>=12 chars, distinct from NOOK_API_KEY/NOOK_PASSWORD) is required for human approvals}"
+      # Number of trusted reverse proxies in front of Nook (0 = ignore X-Forwarded-For)
+      - NOOK_TRUSTED_PROXY_COUNT=${NOOK_TRUSTED_PROXY_COUNT:-0}
       - "SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required}"
     depends_on:
       sandbox-runner:

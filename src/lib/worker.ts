@@ -8,6 +8,8 @@ import {
   logAuditEvent,
   listMissions,
   getDatabase,
+  markJobSideEffectStarted,
+  markJobSideEffectFinished,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';
 import { safeFetch } from './ssrf.ts';
@@ -39,11 +41,23 @@ export function recoverStaleJobsAndMissions(): { recoveredJobs: number; recovere
     const staleJobs = db.prepare(`
       SELECT * FROM background_jobs
       WHERE status = 'running'
-    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; retry_count?: number; agent_id: string }>;
+    `).all() as Array<{ id: string; status: string; created_at: string; updated_at?: string; retry_count?: number; agent_id: string; side_effect_state?: string }>;
 
     for (const j of staleJobs) {
       const updatedAtMs = new Date(j.updated_at || j.created_at).getTime();
       if (now - updatedAtMs > 45000) {
+        // If an external side-effect was already started before crash, retry is suppressed to guarantee at-most-once execution!
+        if (j.side_effect_state === 'started') {
+          db.prepare(`
+            UPDATE background_jobs
+            SET status = 'failed', error = 'Job timed out after starting non-idempotent action. Retry suppressed to preserve exactly-once execution guarantee.', updated_at = ?
+            WHERE id = ?
+          `).run(new Date().toISOString(), j.id);
+          recoveredJobs++;
+          logAuditEvent('WORKER_JOB_ABORTED', `Job ${j.id} failed without retry: side-effect action was in-flight when worker terminated`, 'failed', j.agent_id);
+          continue;
+        }
+
         const retryCount = (j.retry_count || 0) + 1;
         if (retryCount <= 3) {
           db.prepare(`
@@ -239,14 +253,25 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
         tool: 'sandbox_exec',
       });
 
-      const sandboxRes = await executeSandboxedCommand({
-        agentId: job.agentId || 'cipher',
-        command: testCmd,
-        taskId: job.id,
-        authorizationType: 'system_verified_test',
-        timeoutMs: 10000,
-        allowHostFallback: process.env.NODE_ENV !== 'production',
-      });
+      // Atomically claim side-effect start to enforce at-most-once execution
+      if (!markJobSideEffectStarted(job.id)) {
+        failJob(job.id, 'Duplicate execution attempt rejected: job side effect already claimed or terminated.');
+        return;
+      }
+
+      let sandboxRes;
+      try {
+        sandboxRes = await executeSandboxedCommand({
+          agentId: job.agentId || 'cipher',
+          command: testCmd,
+          taskId: job.id,
+          authorizationType: 'system_verified_test',
+          timeoutMs: 10000,
+          allowHostFallback: process.env.NODE_ENV !== 'production',
+        });
+      } finally {
+        markJobSideEffectFinished(job.id);
+      }
 
       current = getJobById(job.id);
       if (!current || current.status === 'cancelled') return;

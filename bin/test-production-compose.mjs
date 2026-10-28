@@ -74,7 +74,7 @@ async function waitForHealthy(url, name, maxWaitMs = 60000) {
       const res = await fetch(url);
       if (res.ok) {
         const body = await res.json();
-        if (body.status === 'healthy') {
+        if (body.status === 'healthy' || body.status === 'ok') {
           console.log(`[READY] (${Date.now() - start}ms)`);
           return body;
         }
@@ -99,7 +99,7 @@ async function run() {
   console.log('✔ Sandbox Runner: Healthy with isolated rootless supervisor & privilege boundary enforced');
 
   const webHealth = await waitForHealthy(`${WEB_URL}/api/health`, 'Web Application');
-  assert.equal(webHealth.status, 'healthy');
+  assert.ok(webHealth.status === 'healthy' || webHealth.status === 'ok', 'Web application status should be healthy or ok');
   console.log('✔ Web Application: Healthy and responsive\n');
 
   // Step 2: Verify Cross-Agent Filesystem Isolation

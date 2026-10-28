@@ -46,6 +46,10 @@ jobs:
     name: Production Docker Compose Integration
     runs-on: ubuntu-latest
     needs: build
+    env:
+      SANDBOX_RUNNER_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SANDBOX_SERVICE_URL: http://127.0.0.1:4000
+      WEB_SERVICE_URL: http://127.0.0.1:3000
 
     steps:
       - name: Checkout repository
@@ -62,26 +66,19 @@ jobs:
           docker pull node:22-alpine
           docker pull docker:27-dind-rootless
 
-      - name: Build and Start Production Stack with Docker Compose
-        env:
-          SANDBOX_RUNNER_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-        run: |
-          docker compose up -d --build
+      - name: Build Production Containers
+        run: docker compose build
+
+      - name: Start Production Stack with Docker Compose
+        run: docker compose up -d
 
       - name: Run Production Integration & Cross-Agent Isolation Verification
-        env:
-          SANDBOX_RUNNER_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-          SANDBOX_SERVICE_URL: http://127.0.0.1:4000
-          WEB_SERVICE_URL: http://127.0.0.1:3000
-        run: |
-          node bin/test-production-compose.mjs
+        run: node bin/test-production-compose.mjs
 
       - name: Display Container Logs on Failure
         if: failure()
-        run: |
-          docker compose logs
+        run: docker compose logs
 
       - name: Teardown Services
         if: always()
-        run: |
-          docker compose down -v
+        run: docker compose down -v

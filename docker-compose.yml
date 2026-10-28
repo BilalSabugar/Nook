@@ -19,16 +19,16 @@ services:
       - NOOK_PASSWORD=${NOOK_PASSWORD:-}
       - NOOK_API_KEY=${NOOK_API_KEY:-}
       - NOOK_SECRET_KEY=${NOOK_SECRET_KEY:-}
-      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required. Generate with: openssl rand -hex 32}
+      - "SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required}"
     depends_on:
       sandbox-runner:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     volumes:
       - nook_data:/app/.nook_storage
       - nook_sandboxes:/app/.nook_sandboxes
@@ -50,7 +50,7 @@ services:
       - NODE_ENV=production
       - NOOK_WORKER_ROLE=dedicated_worker
       - SANDBOX_SERVICE_URL=http://sandbox-runner:4000
-      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required. Generate with: openssl rand -hex 32}
+      - "SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required}"
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -75,16 +75,16 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:4000/health"]
-      interval: 20s
+      interval: 5s
       timeout: 3s
-      retries: 3
+      retries: 10
       start_period: 5s
     environment:
       - PORT=4000
       - NODE_ENV=production
       - DOCKER_HOST=tcp://container-supervisor:2375
       - SANDBOX_VOLUME_NAME=nook_sandboxes
-      - SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required. Generate with: openssl rand -hex 32}
+      - "SANDBOX_RUNNER_SECRET=${SANDBOX_RUNNER_SECRET:?SANDBOX_RUNNER_SECRET environment variable is required}"
     deploy:
       resources:
         limits:
@@ -108,16 +108,17 @@ services:
     privileged: true
     environment:
       - DOCKER_TLS_CERTDIR=
+      - DOCKER_HOST=tcp://127.0.0.1:2375
     volumes:
       - nook_sandboxes:/app/.nook_sandboxes
     networks:
       - sandbox_internal
     healthcheck:
-      test: ["CMD", "docker", "info"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+      test: ["CMD-SHELL", "docker info || docker -H tcp://127.0.0.1:2375 info"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
 volumes:
   nook_data:

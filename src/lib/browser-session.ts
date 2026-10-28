@@ -664,7 +664,80 @@ export async function navigateBrowser(
 }
 
 /**
+ * Refreshes session state (title, currentUrl, content, visibleSnippet, interactiveElements, screenshot)
+ * directly from an active live Playwright page.
+ */
+export async function updateSessionFromLivePage(
+  agentId: string,
+  page: any,
+  session: ObservableBrowserSession
+): Promise<void> {
+  session.currentUrl = page.url() || session.currentUrl;
+  session.title = (await page.title()) || 'Untitled Page';
+  const html = await page.content();
+  // Extract visible text snippet
+  session.domPreview = html
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+    .replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2000);
+
+  // Extract live interactive elements from DOM
+  const liveElements = await page.evaluate(() => {
+    const results: Array<{ id: string; type: 'link' | 'button' | 'input'; text: string; selector: string; href?: string }> = [];
+    let count = 1;
+    document.querySelectorAll('input, button, a').forEach((el) => {
+      const tag = el.tagName.toLowerCase();
+      const idAttr = el.getAttribute('id');
+      const nameAttr = el.getAttribute('name');
+      let selector = tag;
+      if (idAttr) selector = `#${idAttr}`;
+      else if (nameAttr) selector = `${tag}[name="${nameAttr}"]`;
+
+      let text = (el as HTMLElement).innerText || '';
+      if (!text && el instanceof HTMLInputElement) {
+        text = el.placeholder || el.value || nameAttr || 'Input';
+      }
+      text = text.trim().slice(0, 80);
+
+      results.push({
+        id: `elem-${count++}`,
+        type: tag === 'a' ? 'link' : tag === 'button' ? 'button' : 'input',
+        text: text || `${tag} element`,
+        selector,
+        href: el.getAttribute('href') || undefined,
+      });
+    });
+    return results;
+  });
+
+  if (Array.isArray(liveElements) && liveElements.length > 0) {
+    session.interactiveElements = liveElements;
+  }
+
+  // Capture updated authentic screenshot
+  ensureStorageDirectories();
+  const screenshotFileName = `${session.agentId}-snap-${Date.now()}.png`;
+  const filePath = path.join(SCREENSHOTS_DIR, screenshotFileName);
+  try {
+    const shotBuffer = await page.screenshot({ type: 'png' });
+    fsSync.writeFileSync(filePath, Buffer.from(shotBuffer), { mode: 0o600 });
+    session.screenshotPath = `/api/sandbox/browse/screenshot?file=${screenshotFileName}`;
+    session.screenshotMetadata = {
+      isSyntheticPlaceholder: false,
+      captureType: 'playwright_browser_capture',
+      capturedAt: new Date().toISOString(),
+      engine: 'playwright_chromium',
+    };
+  } catch {}
+}
+
+/**
  * Interactively clicks an indexed element on the current page.
+ * Uses real Playwright click, waits for resulting load/navigation, and updates resulting page state.
  */
 export async function clickInteractiveElement(
   agentId: string,
@@ -691,23 +764,30 @@ export async function clickInteractiveElement(
     try {
       const locator = live.page.locator(element.selector).first();
       await locator.click({ timeout: 5000 });
-      await live.page.waitForLoadState('domcontentloaded').catch(() => {});
-      session.title = await live.page.title() || session.title;
-      session.currentUrl = live.page.url() || session.currentUrl;
-      session.consoleLogs.push(`[Playwright Live Action] Real clicked ${element.selector} -> now on ${session.currentUrl}`);
+      await live.page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+      // Refresh entire session from the resulting page state
+      await updateSessionFromLivePage(agentId, live.page, session);
+      session.consoleLogs.push(`[Playwright Live Action] Real clicked ${element.selector} -> now on ${session.currentUrl} ("${session.title}")`);
     } catch (err: unknown) {
-      session.consoleLogs.push(`[Playwright Click Notice] ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      session.consoleLogs.push(`[Playwright Click Error] ${msg}`);
+      await persistSessionToDisk(session);
+      return {
+        success: false,
+        session,
+        error: `Playwright click failed on ${element.selector}: ${msg}`,
+      };
+    }
+  } else {
+    // If element is a link and no live page exists, navigate directly
+    if (element.type === 'link' && element.href) {
+      const updated = await navigateBrowser(agentId, element.href);
+      return { success: true, session: updated };
     }
   }
 
   session.consoleLogs.push(`[Interactive Action] Clicked element "${element.text}" (${element.selector})`);
   session.lastAction = `click(${element.id})`;
-
-  if (element.type === 'link' && element.href) {
-    const updated = await navigateBrowser(agentId, element.href);
-    return { success: true, session: updated };
-  }
-
   session.updatedAt = new Date().toISOString();
   await persistSessionToDisk(session);
   return { success: true, session };
@@ -715,6 +795,7 @@ export async function clickInteractiveElement(
 
 /**
  * Types text into an interactive input element on the active page.
+ * Uses real Playwright locator.fill(), verifies element input value, and updates page state.
  */
 export async function typeInteractiveElement(
   agentId: string,
@@ -741,11 +822,22 @@ export async function typeInteractiveElement(
   if (live && !live.page.isClosed()) {
     try {
       const locator = live.page.locator(element.selector).first();
-      await locator.fill(text);
+      await locator.fill(text, { timeout: 5000 });
       const actualVal = await locator.inputValue().catch(() => text);
+      if (actualVal !== text) {
+        throw new Error(`Input value verification failed: expected "${text}", got "${actualVal}"`);
+      }
       session.consoleLogs.push(`[Playwright Live Action] Real typed "${actualVal}" into ${element.selector}`);
+      await updateSessionFromLivePage(agentId, live.page, session);
     } catch (err: unknown) {
-      session.consoleLogs.push(`[Playwright Type Notice] ${err instanceof Error ? err.message : String(err)}`);
+      const msg = err instanceof Error ? err.message : String(err);
+      session.consoleLogs.push(`[Playwright Type Error] ${msg}`);
+      await persistSessionToDisk(session);
+      return {
+        success: false,
+        session,
+        error: `Playwright typing failed on ${element.selector}: ${msg}`,
+      };
     }
   }
 

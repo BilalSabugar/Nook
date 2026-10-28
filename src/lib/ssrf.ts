@@ -104,6 +104,13 @@ export async function validateOutboundUrl(rawUrl: string): Promise<SsrfValidatio
 
   const hostname = parsedUrl.hostname.toLowerCase();
 
+  // Test harness override for local integration tests (strictly disabled in production)
+  if (process.env.ALLOW_TEST_LOOPBACK === 'true' && process.env.NODE_ENV !== 'production') {
+    if (hostname === '127.0.0.1' || hostname === 'localhost') {
+      return { allowed: true, resolvedIps: ['127.0.0.1'] };
+    }
+  }
+
   // 2. Reject obvious localhost, metadata hostnames, and IP shorthands
   if (
     hostname === 'localhost' ||

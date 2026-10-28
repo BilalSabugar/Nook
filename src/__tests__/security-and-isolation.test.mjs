@@ -55,7 +55,9 @@ import {
   captureSessionScreenshot,
   renderBrowserScreenshotPng,
   captureRealBrowserScreenshot,
+  closeBrowserSession,
 } from '../lib/browser-session.ts';
+import http from 'http';
 import {
   createSandboxExecutionTicket,
   verifySandboxExecutionTicket,
@@ -1183,35 +1185,90 @@ test('Model Coding Engine: Generates verifiable solutions with independent accep
 });
 
 // =========================================================================
-// 32. REAL PERSISTENT BROWSER INTERACTIONS (CLICK, TYPE, RESTORE)
+// 32. REAL PERSISTENT BROWSER INTERACTIONS (CLICK, TYPE, SUBMIT, STATE REFRESH)
 // =========================================================================
-test('Browser: Real persistent session supports typing, clicking, and disk session restoration', async () => {
+test('Browser: Real Playwright browser session supports live typing, form submission, and page state verification', async () => {
+  const origLoopback = process.env.ALLOW_TEST_LOOPBACK;
+  process.env.ALLOW_TEST_LOOPBACK = 'true';
+
+  // 1. Start authentic HTTP test server with interactive form and search results page
+  const testServer = http.createServer((req, res) => {
+    const parsed = new URL(req.url, 'http://127.0.0.1:4044');
+    if (parsed.pathname === '/search-portal') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Quantum Portal</title></head>
+          <body>
+            <h1>Quantum Research Portal</h1>
+            <form id="search-form" action="/search-results" method="GET">
+              <input type="text" id="query-input" name="q" placeholder="Enter research query" />
+              <button type="submit" id="submit-btn">Search Database</button>
+            </form>
+          </body>
+        </html>
+      `);
+    } else if (parsed.pathname === '/search-results') {
+      const q = parsed.searchParams.get('q') || '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Quantum Results</title></head>
+          <body>
+            <h1>Search Results Page</h1>
+            <div id="results">Active query received: <span id="term">${q}</span></div>
+          </body>
+        </html>
+      `);
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
+    }
+  });
+
+  await new Promise((resolve) => testServer.listen(4044, '127.0.0.1', resolve));
+
   const agentId = 'agent-scout-interactive';
-  const session = getOrCreateBrowserSession(agentId);
 
-  // Set up synthetic interactive form elements
-  session.interactiveElements = [
-    { id: 'elem-1', type: 'input', text: 'Search query', selector: 'input[name="q"]' },
-    { id: 'elem-2', type: 'button', text: 'Submit Search', selector: 'button[type="submit"]' },
-    { id: 'elem-3', type: 'link', text: 'Documentation', selector: 'a[href="https://example.com/docs"]', href: 'https://example.com/docs' },
-  ];
+  try {
+    // 2. Navigate real browser to the form portal
+    const navSession = await navigateBrowser(agentId, 'http://127.0.0.1:4044/search-portal');
+    assert.equal(navSession.title, 'Quantum Portal');
+    assert.ok(navSession.interactiveElements.length >= 2, 'Must extract interactive elements from live page');
 
-  // Test interactive typing
-  const typeRes = await typeInteractiveElement(agentId, 'elem-1', 'quantum cryptography protocols');
-  assert.equal(typeRes.success, true);
-  assert.ok(typeRes.session.lastAction.includes('type(elem-1, "quantum cryptography protocols")'));
+    const inputElem = navSession.interactiveElements.find((e) => e.selector.includes('query-input') || e.selector.includes('name="q"'));
+    const btnElem = navSession.interactiveElements.find((e) => e.selector.includes('submit-btn') || e.type === 'button');
+    assert.ok(inputElem, 'Input element must exist in live session');
+    assert.ok(btnElem, 'Submit button must exist in live session');
 
-  // Test interactive clicking on button
-  const clickRes = await clickInteractiveElement(agentId, 'elem-2');
-  assert.equal(clickRes.success, true);
-  assert.ok(clickRes.session.lastAction.includes('click(elem-2)'));
+    // 3. Genuine Playwright typing: fills real DOM input and validates value
+    const typeRes = await typeInteractiveElement(agentId, inputElem.id, 'quantum key distribution');
+    assert.equal(typeRes.success, true, 'Typing into live webpage input must succeed');
+    assert.ok(typeRes.session.consoleLogs.some((l) => l.includes('Real typed "quantum key distribution"')));
 
-  // Test persistent session restoration from disk
-  const restored = await restoreBrowserSession(agentId);
-  assert.ok(restored);
-  assert.equal(restored.agentId, agentId);
-  assert.ok(restored.interactiveElements.length >= 3);
-  assert.equal(restored.lastAction, 'click(elem-2)');
+    // 4. Genuine Playwright clicking: clicks submit button, awaits navigation, and verifies resulting page state
+    const clickRes = await clickInteractiveElement(agentId, btnElem.id);
+    assert.equal(clickRes.success, true, 'Clicking submit button must succeed and transition page state');
+    assert.equal(clickRes.session.title, 'Quantum Results', 'Page title must reflect resulting page state');
+    assert.ok(clickRes.session.currentUrl.includes('/search-results?q=quantum'), 'URL must reflect form submission');
+    assert.ok(clickRes.session.domPreview.includes('Active query received: quantum key distribution'), 'Visible snippet must reflect new page DOM');
+
+    // 5. Test persistent session restoration from disk
+    const restored = await restoreBrowserSession(agentId);
+    assert.ok(restored);
+    assert.equal(restored.agentId, agentId);
+    assert.equal(restored.title, 'Quantum Results');
+  } finally {
+    await closeBrowserSession(agentId);
+    await new Promise((resolve) => testServer.close(resolve));
+    if (origLoopback === undefined) {
+      delete process.env.ALLOW_TEST_LOOPBACK;
+    } else {
+      process.env.ALLOW_TEST_LOOPBACK = origLoopback;
+    }
+  }
 });
 
 // =========================================================================

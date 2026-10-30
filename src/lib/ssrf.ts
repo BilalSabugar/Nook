@@ -9,6 +9,104 @@ export interface SsrfValidationResult {
   resolvedIps?: string[];
 }
 
+export interface OllamaEndpointValidationResult {
+  allowed: boolean;
+  normalizedBaseUrl?: string;
+  normalizedOrigin?: string;
+  reason?: string;
+}
+
+const DEFAULT_APPROVED_OLLAMA_ORIGINS = new Set([
+  'http://localhost:11434',
+  'http://127.0.0.1:11434',
+  'http://[::1]:11434',
+  'http://host.docker.internal:11434',
+]);
+
+/**
+ * Validates that an Ollama model endpoint URL strictly matches an approved server-configured
+ * origin, contains no embedded credentials or subpaths/queries, and cannot be used for SSRF
+ * against cloud metadata, RFC1918 networks, or arbitrary local ports (such as Docker 2375 or Redis 6379).
+ */
+export function validateApprovedOllamaEndpoint(rawEndpoint?: string): OllamaEndpointValidationResult {
+  const candidate = (rawEndpoint || process.env.OLLAMA_BASE_URL || 'http://localhost:11434').trim();
+  if (!candidate) {
+    return { allowed: false, reason: 'Empty Ollama endpoint URL.' };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return { allowed: false, reason: 'Malformed Ollama endpoint URL.' };
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { allowed: false, reason: `Unsupported protocol "${parsed.protocol}". Only http: and https: are permitted.` };
+  }
+
+  if (parsed.username || parsed.password) {
+    return { allowed: false, reason: 'Credentials (username/password) are forbidden in Ollama endpoint URLs.' };
+  }
+
+  if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    return {
+      allowed: false,
+      reason: 'Ollama endpoint must be a clean base origin without custom paths, query strings, or fragments.',
+    };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  // Always forbid cloud metadata endpoints regardless of env configuration
+  if (
+    hostname === '169.254.169.254' ||
+    hostname.startsWith('169.254.') ||
+    hostname === 'metadata.google.internal' ||
+    hostname === 'instance-data'
+  ) {
+    return { allowed: false, reason: `Cloud metadata host "${hostname}" is strictly forbidden.` };
+  }
+
+  const allowedOrigins = new Set<string>(DEFAULT_APPROVED_OLLAMA_ORIGINS);
+
+  const addConfiguredOrigin = (rawConfigUrl: string) => {
+    try {
+      const u = new URL(rawConfigUrl.trim());
+      if ((u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password) {
+        const h = u.hostname.toLowerCase();
+        if (h !== '169.254.169.254' && !h.startsWith('169.254.') && h !== 'metadata.google.internal') {
+          allowedOrigins.add(`${u.protocol}//${u.host.toLowerCase()}`);
+        }
+      }
+    } catch {
+      // ignore invalid env entry
+    }
+  };
+
+  if (process.env.OLLAMA_BASE_URL) {
+    addConfiguredOrigin(process.env.OLLAMA_BASE_URL);
+  }
+  if (process.env.NOOK_ALLOWED_OLLAMA_ORIGINS) {
+    for (const part of process.env.NOOK_ALLOWED_OLLAMA_ORIGINS.split(',')) {
+      if (part.trim()) addConfiguredOrigin(part.trim());
+    }
+  }
+
+  const normalizedOrigin = `${parsed.protocol}//${parsed.host.toLowerCase()}`;
+  if (!allowedOrigins.has(normalizedOrigin)) {
+    return {
+      allowed: false,
+      reason: `Endpoint origin "${normalizedOrigin}" is not in the approved Ollama origin allowlist (${Array.from(allowedOrigins).join(', ')}).`,
+    };
+  }
+
+  return {
+    allowed: true,
+    normalizedBaseUrl: normalizedOrigin,
+    normalizedOrigin,
+  };
+}
+
 /**
  * Checks if an IPv4 address is within private, loopback, link-local, carrier-grade NAT, or cloud metadata ranges.
  */

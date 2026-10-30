@@ -168,8 +168,9 @@ cd Nook
 # 2. Clean install dependencies
 npm ci
 
-# 3. Run validation checks
-npm test               # Runs 69 unit & integration security tests
+# 3. Run validation & preflight checks
+npm run doctor         # Runs preflight security, secret entropy, and environment readiness checks
+npm test               # Runs unit & integration security tests
 npm run typecheck      # Verifies TypeScript types with zero errors
 npm run lint           # Runs ESLint checks
 npm run build          # Builds production bundle

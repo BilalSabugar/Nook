@@ -10,11 +10,13 @@ import {
   getDatabase,
   markJobSideEffectStarted,
   markJobSideEffectFinished,
+  recordWorkerHeartbeat,
 } from './db.ts';
 import type { DbBackgroundJob } from './db.ts';
 import { safeFetch } from './ssrf.ts';
 import { tickMission } from './orchestrator.ts';
 import { executeSandboxedCommand } from './sandbox.ts';
+import { validateCodeTestCommandBoundary } from './sandbox-ticket.ts';
 
 let isWorkerRunning = false;
 let workerInterval: NodeJS.Timeout | null = null;
@@ -261,6 +263,18 @@ export async function executeJob(job: DbBackgroundJob): Promise<void> {
       if (!current || current.status === 'cancelled') return;
 
       const testCmd = job.prompt.trim() || 'node --version';
+      const boundaryCheck = validateCodeTestCommandBoundary(testCmd);
+      if (!boundaryCheck.allowed) {
+        logAuditEvent(
+          'WORKER_CODE_TEST_BOUNDARY_BLOCKED',
+          `Blocked unapproved command in code_test job ${job.id}: ${boundaryCheck.reason}`,
+          'blocked',
+          job.agentId
+        );
+        failJob(job.id, boundaryCheck.reason || 'Arbitrary shell execution is not permitted in unapproved code_test background jobs.');
+        return;
+      }
+
       updateJobProgress(job.id, 40, {
         step: `Executing sandbox command: "${testCmd}"`,
         tool: 'sandbox_exec',
@@ -347,6 +361,7 @@ export async function tickActiveMissions(): Promise<boolean> {
  */
 export async function tickWorker(): Promise<boolean> {
   const now = Date.now();
+  recordWorkerHeartbeat(WORKER_INSTANCE_ID);
 
   // Periodic crash recovery check every 30 seconds
   if (now - lastCrashRecoveryCheck > 30000) {
@@ -371,12 +386,18 @@ export async function tickWorker(): Promise<boolean> {
  * Starts durable worker loop inside the server environment.
  */
 export function ensureWorkerStarted(): void {
-  // In production with a dedicated worker process, avoid spinning up duplicate embedded workers in the web tier
-  if (process.env.NOOK_WORKER_ROLE !== 'dedicated_worker' && process.env.NODE_ENV === 'production' && !process.env.NOOK_ENABLE_EMBEDDED_WORKER) {
+  // Respect explicit disable flag or dedicated worker role separation in production
+  if (
+    process.env.NOOK_DISABLE_WEB_WORKER === 'true' ||
+    (process.env.NOOK_WORKER_ROLE !== 'dedicated_worker' &&
+      process.env.NODE_ENV === 'production' &&
+      !process.env.NOOK_ENABLE_EMBEDDED_WORKER)
+  ) {
     return;
   }
   if (isWorkerRunning) return;
   isWorkerRunning = true;
+  recordWorkerHeartbeat(WORKER_INSTANCE_ID);
 
   // Run initial crash recovery on startup
   recoverStaleJobsAndMissions();

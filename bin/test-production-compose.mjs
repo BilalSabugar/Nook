@@ -501,6 +501,7 @@ console.log('LINK_PLANTED');`,
   const humanHeaders = {
     'Content-Type': 'application/json',
     Cookie: approverSessionCookie,
+    Origin: WEB_URL,
   };
 
   // 7a. Register approval request on server

@@ -7,10 +7,11 @@ services:
     image: nook:latest
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "${NOOK_BIND_ADDRESS:-127.0.0.1}:3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
+      - NOOK_DISABLE_WEB_WORKER=true
       - SANDBOX_SERVICE_URL=http://sandbox-runner:4000
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -105,6 +106,13 @@ services:
       - default
       - sandbox_internal
 
+  # SECURITY NOTE (NOOK-P2-08):
+  # container-supervisor runs Docker-in-Docker (docker:27-dind) with `privileged: true`
+  # strictly attached to the internal-only `sandbox_internal` network (no host ports exposed)
+  # so that `nook-app` and `nook-worker` never mount `/var/run/docker.sock`.
+  # Note that `privileged: true` grants root-equivalent host kernel capabilities to this
+  # supervisor container. For hostile multi-tenant or high-assurance production environments,
+  # deploy the supervisor inside a dedicated VM or use a rootless/gVisor/Kata runtime.
   container-supervisor:
     image: docker:27-dind
     container_name: nook-container-supervisor

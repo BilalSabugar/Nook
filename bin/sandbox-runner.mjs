@@ -33,9 +33,16 @@ const SANDBOXES_BASE = path.resolve(process.cwd(), '.nook_sandboxes');
 const INSECURE_DEFAULT_SECRETS = new Set([
   'nook_internal_runner_auth_secret_v1',
   'test-audit-runner-secret-key-32bytes',
+  '0123456789abcdef0123456789abcdef0123456789abcdef',
+  'nook-production-api-key-change-this-32bytes',
+  'nook-human-approver-secret-password-32bytes',
+  'default_secret_do_not_use_in_prod',
   'default',
   'secret',
   'change-me',
+  'changeme',
+  'password',
+  '12345678',
 ]);
 
 const rawSecret = process.env.SANDBOX_RUNNER_SECRET?.trim();
@@ -43,12 +50,12 @@ if (!rawSecret) {
   console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET environment variable is missing. The runner refuses to start without an explicit secret.');
   process.exit(1);
 }
-if (INSECURE_DEFAULT_SECRETS.has(rawSecret)) {
-  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET matches a known public default. The runner refuses to start in an untrusted state.');
+if (INSECURE_DEFAULT_SECRETS.has(rawSecret) || INSECURE_DEFAULT_SECRETS.has(rawSecret.toLowerCase())) {
+  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET matches a known public default or example value. The runner refuses to start in an untrusted state.');
   process.exit(1);
 }
-if (rawSecret.length < 16) {
-  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET is too short (< 16 characters). Must be a high-entropy secret.');
+if (rawSecret.length < 16 || new Set(rawSecret).size < 6) {
+  console.error('[FATAL SECURITY FAULT] SANDBOX_RUNNER_SECRET is too short (< 16 characters) or lacks character variety. Must be a high-entropy secret.');
   process.exit(1);
 }
 const RUNNER_SECRET = rawSecret;

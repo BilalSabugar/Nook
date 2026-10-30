@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server.js';
 import crypto from 'node:crypto';
-import { REGISTERED_MCP_TOOLS } from '../../../lib/mcp-registry.ts';
-import type { MCPToolDefinition } from '../../../lib/mcp-registry.ts';
+import { REGISTERED_MCP_TOOLS, getRegisteredMcpTool } from '../../../lib/mcp-registry.ts';
+import type { McpRegisteredTool } from '../../../lib/mcp-registry.ts';
 import { validateApiRequest, unauthorizedResponse } from '../../../lib/auth.ts';
 import { safeFetch } from '../../../lib/ssrf.ts';
-import { logAuditEvent, listSpacesWithDocuments, saveDocumentWithRevision } from '../../../lib/db.ts';
+import { logAuditEvent, listSpacesWithDocuments, onDocumentUpdated } from '../../../lib/db.ts';
 import { executePluginTool, getAllPluginTools } from '../../../lib/plugins.ts';
 import { INITIAL_SPACES } from '../../../lib/store.ts';
 
@@ -145,7 +145,7 @@ function evaluateSafeMath(expr: string): number {
   return evalStack[0];
 }
 
-export type { MCPToolDefinition };
+export type { McpRegisteredTool, McpRegisteredTool as MCPToolDefinition };
 export { REGISTERED_MCP_TOOLS };
 
 // ==============================================================
@@ -339,29 +339,122 @@ interface SseSession {
   id: string;
   controller: ReadableStreamDefaultController<Uint8Array>;
   createdAt: number;
+  lastActiveAt: number;
 }
 
-const g = globalThis as unknown as { _mcpSseSessions?: Map<string, SseSession> };
+type McpNotificationListener = (notification: { jsonrpc: '2.0'; method: string; params: Record<string, any> }, sessionId?: string) => void;
+
+const g = globalThis as unknown as {
+  _mcpSseSessions?: Map<string, SseSession>;
+  _mcpResourceSubscriptions?: Map<string, Set<string>>;
+  _mcpNotificationListeners?: Set<McpNotificationListener>;
+  _mcpDocListenerRegistered?: boolean;
+};
 if (!g._mcpSseSessions) {
   g._mcpSseSessions = new Map<string, SseSession>();
 }
+if (!g._mcpResourceSubscriptions) {
+  g._mcpResourceSubscriptions = new Map<string, Set<string>>();
+}
+if (!g._mcpNotificationListeners) {
+  g._mcpNotificationListeners = new Set<McpNotificationListener>();
+}
 const sseSessions = g._mcpSseSessions;
+const resourceSubscriptions = g._mcpResourceSubscriptions;
+const notificationListeners = g._mcpNotificationListeners;
+
+function cleanupSessionSubscriptions(sessionId: string): void {
+  for (const [uri, subs] of resourceSubscriptions.entries()) {
+    subs.delete(sessionId);
+    if (subs.size === 0) {
+      resourceSubscriptions.delete(uri);
+    }
+  }
+}
+
+export function subscribeMcpResource(uri: string, sessionId: string = '__default_session__'): void {
+  let subs = resourceSubscriptions.get(uri);
+  if (!subs) {
+    subs = new Set<string>();
+    resourceSubscriptions.set(uri, subs);
+  }
+  subs.add(sessionId);
+}
+
+export function unsubscribeMcpResource(uri: string, sessionId: string = '__default_session__'): void {
+  const subs = resourceSubscriptions.get(uri);
+  if (!subs) return;
+  subs.delete(sessionId);
+  if (subs.size === 0) {
+    resourceSubscriptions.delete(uri);
+  }
+}
+
+export function getMcpResourceSubscribers(uri: string): string[] {
+  return Array.from(resourceSubscriptions.get(uri) || []);
+}
+
+export function onMcpNotification(listener: McpNotificationListener): () => void {
+  notificationListeners.add(listener);
+  return () => {
+    notificationListeners.delete(listener);
+  };
+}
+
+export function notifyMcpResourceUpdated(uri: string): number {
+  const subs = resourceSubscriptions.get(uri);
+  if (!subs || subs.size === 0) return 0;
+
+  const notification = {
+    jsonrpc: '2.0' as const,
+    method: 'notifications/resources/updated',
+    params: { uri },
+  };
+
+  let delivered = 0;
+  for (const sessionId of Array.from(subs)) {
+    if (sessionId !== '__default_session__' && sseSessions.has(sessionId)) {
+      if (sendMcpSessionMessage(sessionId, notification)) {
+        delivered++;
+      }
+    } else if (sessionId === '__default_session__') {
+      delivered++;
+    }
+    for (const listener of notificationListeners) {
+      try {
+        listener(notification, sessionId);
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
+  return delivered;
+}
+
+if (!g._mcpDocListenerRegistered) {
+  g._mcpDocListenerRegistered = true;
+  onDocumentUpdated((uri) => {
+    notifyMcpResourceUpdated(uri);
+  });
+}
 
 export function sendMcpSessionMessage(sessionId: string, message: any): boolean {
   const session = sseSessions.get(sessionId);
   if (!session) return false;
   try {
+    session.lastActiveAt = Date.now();
     const encoder = new TextEncoder();
     const payload = JSON.stringify(message);
     session.controller.enqueue(encoder.encode(`event: message\r\ndata: ${payload}\r\n\r\n`));
     return true;
   } catch {
     sseSessions.delete(sessionId);
+    cleanupSessionSubscriptions(sessionId);
     return false;
   }
 }
 
-export async function handleJsonRpcRequest(body: any): Promise<any> {
+export async function handleJsonRpcRequest(body: any, context?: { sessionId?: string } | string): Promise<any> {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return {
       jsonrpc: '2.0',
@@ -490,12 +583,12 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
       };
     }
 
-    const toolDef = REGISTERED_MCP_TOOLS.find((t) => t.name === name);
+    const toolDef: McpRegisteredTool | undefined = getRegisteredMcpTool(name);
     const pluginTools = getAllPluginTools();
     const pluginMatch = pluginTools.find((pt) => pt.tool.name === name);
 
-    if (!toolDef && !pluginMatch && name !== 'read_space_document' && name !== 'save_to_space' && name !== 'execute_command' && name !== 'browse_url') {
-      logAuditEvent('MCP_UNKNOWN_TOOL', `Attempted call to unknown MCP tool: "${name}"`, 'error');
+    if (!toolDef && !pluginMatch) {
+      logAuditEvent('MCP_UNKNOWN_TOOL', `Attempted call to unknown or unadvertised MCP tool: "${name}"`, 'error');
       return {
         jsonrpc: '2.0',
         id: responseId,
@@ -723,108 +816,14 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
       };
     }
 
-    // Standard Nook tools: read_space_document, save_to_space, browse_url, execute_command
-    if (name === 'read_space_document') {
-      const docId = String(args?.documentId || args?.id || '');
-      const doc = getLivingDocument(docId);
-      if (!doc) {
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: `Document not found: "${docId}"` }],
-            isError: true,
-          },
-        };
-      }
-      return {
-        jsonrpc: '2.0',
-        id: responseId,
-        result: {
-          content: [{ type: 'text', text: doc.content }],
-          isError: false,
-        },
-      };
-    }
-
-    if (name === 'save_to_space') {
-      const title = String(args?.title || 'Untitled Document');
-      const content = String(args?.content || '');
-      const spaceId = String(args?.spaceId || 'space-general');
-      const docId = String(args?.id || `doc-${Date.now()}`);
-
-      try {
-        saveDocumentWithRevision({
-          id: docId,
-          spaceId,
-          title,
-          content,
-          authorAgentId: 'mcp-client',
-        });
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: `Document "${title}" saved to Space ${spaceId} (ID: ${docId}).` }],
-            isError: false,
-          },
-        };
-      } catch (err: any) {
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: `Failed to save document: ${err.message}` }],
-            isError: true,
-          },
-        };
-      }
-    }
-
-    if (name === 'browse_url') {
-      const url = String(args?.url || '');
-      if (!url) {
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: 'URL parameter is required.' }],
-            isError: true,
-          },
-        };
-      }
-      try {
-        const fetchRes = await safeFetch(url, { timeoutMs: 8000 });
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: fetchRes.ok ? fetchRes.bodyText.slice(0, 5000) : `HTTP ${fetchRes.status}: ${fetchRes.statusText}` }],
-            isError: !fetchRes.ok,
-          },
-        };
-      } catch (err: any) {
-        return {
-          jsonrpc: '2.0',
-          id: responseId,
-          result: {
-            content: [{ type: 'text', text: `Browse failed: ${err.message}` }],
-            isError: true,
-          },
-        };
-      }
-    }
-
-    if (name === 'execute_command') {
-      return {
-        jsonrpc: '2.0',
-        id: responseId,
-        result: {
-          content: [{ type: 'text', text: 'Approval required: privileged shell execution requires an authorized human approval token.' }],
-          isError: true,
-        },
-      };
-    }
+    return {
+      jsonrpc: '2.0',
+      id: responseId,
+      error: {
+        code: -32601,
+        message: `Unknown or unsupported MCP tool: "${name}". Valid tools are: ${REGISTERED_MCP_TOOLS.map((t) => t.name).join(', ')}`,
+      },
+    };
   }
 
   // 7. resources/list
@@ -897,6 +896,20 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
 
   // 10. resources/subscribe & resources/unsubscribe (MCP Spec 2024-11-05)
   if (method === 'resources/subscribe' || method === 'resources/unsubscribe') {
+    const uri = String(params?.uri || '').trim();
+    if (!uri || !uri.startsWith('nook://')) {
+      return {
+        jsonrpc: '2.0',
+        id: responseId,
+        error: { code: -32602, message: 'Valid nook:// resource URI parameter is required for subscription operations' },
+      };
+    }
+    const subSessionId = (typeof context === 'string' ? context : context?.sessionId) || '__default_session__';
+    if (method === 'resources/subscribe') {
+      subscribeMcpResource(uri, subSessionId);
+    } else {
+      unsubscribeMcpResource(uri, subSessionId);
+    }
     return {
       jsonrpc: '2.0',
       id: responseId,
@@ -1040,10 +1053,12 @@ export async function GET(req: NextRequest) {
 
     const stream = new ReadableStream({
       start(controller) {
+        const now = Date.now();
         sseSessions.set(sessionId, {
           id: sessionId,
           controller,
-          createdAt: Date.now(),
+          createdAt: now,
+          lastActiveAt: now,
         });
 
         const encoder = new TextEncoder();
@@ -1058,6 +1073,7 @@ export async function GET(req: NextRequest) {
           } catch {
             if (keepAliveTimer) clearInterval(keepAliveTimer);
             sseSessions.delete(sessionId);
+            cleanupSessionSubscriptions(sessionId);
           }
         }, 15000);
         if (keepAliveTimer && typeof keepAliveTimer.unref === 'function') {
@@ -1067,6 +1083,7 @@ export async function GET(req: NextRequest) {
       cancel() {
         if (keepAliveTimer) clearInterval(keepAliveTimer);
         sseSessions.delete(sessionId);
+        cleanupSessionSubscriptions(sessionId);
       },
     });
 
@@ -1132,10 +1149,23 @@ export async function POST(req: NextRequest) {
   }
 
   const url = new URL(req.url);
-  const sessionId = req.headers.get('mcp-session-id') || url.searchParams.get('sessionId') || '';
+  const sessionId = (req.headers.get('mcp-session-id') || url.searchParams.get('sessionId') || '').trim();
+
+  // If caller explicitly targets an SSE sessionId that does not exist or has expired, fail with 404
+  if (sessionId && !sseSessions.has(sessionId)) {
+    return NextResponse.json(
+      {
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32001, message: `Unknown or expired MCP SSE session: "${sessionId}"` },
+      },
+      { status: 404, headers: corsHeaders }
+    );
+  }
 
   try {
     const body = await req.json();
+    const rpcContext = sessionId ? { sessionId } : undefined;
 
     // Handle JSON-RPC batch requests
     if (Array.isArray(body)) {
@@ -1146,7 +1176,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const results = await Promise.all(body.map((item) => handleJsonRpcRequest(item)));
+      const results = await Promise.all(body.map((item) => handleJsonRpcRequest(item, rpcContext)));
       const filtered = results.filter((r) => r !== null);
       if (filtered.length === 0) {
         return new NextResponse(null, { status: 204, headers: corsHeaders });
@@ -1162,7 +1192,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(filtered, { headers: corsHeaders });
     }
 
-    const response = await handleJsonRpcRequest(body);
+    const response = await handleJsonRpcRequest(body, rpcContext);
     if (response === null) {
       return new NextResponse(null, { status: 204, headers: corsHeaders });
     }

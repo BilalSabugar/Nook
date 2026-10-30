@@ -3,16 +3,10 @@ import fs from 'fs/promises';
 import path from 'path';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 import { loadEncryptedSecrets, saveEncryptedSecrets, maskSecret, StoredSecrets } from '@/lib/secrets';
+import { validateApprovedOllamaEndpoint } from '@/lib/ssrf';
 
 const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const SETTINGS_FILE = path.join(STORAGE_DIR, 'settings.json');
-
-// Allowed Ollama endpoints to prevent SSRF to arbitrary cloud endpoints
-const ALLOWED_OLLAMA_PREFIXES = [
-  'http://localhost:',
-  'http://127.0.0.1:',
-  'http://[::1]:',
-];
 
 export const SUPPORTED_MODELS: Record<string, string[]> = {
   gemini: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'],
@@ -168,9 +162,16 @@ export async function POST(req: NextRequest) {
       }
 
       if (targetProvider === 'ollama') {
-        const url = ollamaEndpoint || process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+        const rawUrl = ollamaEndpoint || process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+        const endpointCheck = validateApprovedOllamaEndpoint(rawUrl);
+        if (!endpointCheck.allowed || !endpointCheck.normalizedBaseUrl) {
+          return NextResponse.json({
+            error: `Restricted Ollama endpoint: ${endpointCheck.reason || 'Arbitrary remote or internal endpoints are prohibited.'}`,
+          }, { status: 400 });
+        }
+        const url = endpointCheck.normalizedBaseUrl;
         try {
-          const testRes = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(4000) });
+          const testRes = await fetch(`${url}/api/tags`, { redirect: 'error', signal: AbortSignal.timeout(4000) });
           if (!testRes.ok) {
             return NextResponse.json({ error: `Ollama returned HTTP ${testRes.status}` }, { status: 502 });
           }
@@ -195,14 +196,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Invalid provider: ${provider}` }, { status: 400 });
     }
 
-    // Validate Ollama endpoint to block arbitrary remote targets
+    // Validate Ollama endpoint strictly against approved origins (blocks credentials, subpaths, and unauthorized ports/hosts)
+    let normalizedOllamaEndpoint = 'http://localhost:11434';
     if (ollamaEndpoint) {
-      const isAllowed = ALLOWED_OLLAMA_PREFIXES.some(prefix => ollamaEndpoint.startsWith(prefix));
-      if (!isAllowed) {
+      const endpointCheck = validateApprovedOllamaEndpoint(ollamaEndpoint);
+      if (!endpointCheck.allowed || !endpointCheck.normalizedBaseUrl) {
         return NextResponse.json({
-          error: 'Restricted: Ollama endpoint must be an approved local service (e.g. http://localhost:11434). Arbitrary remote endpoints are prohibited.',
+          error: `Restricted: Ollama endpoint must be an approved local service (e.g. http://localhost:11434). ${endpointCheck.reason || ''}`,
         }, { status: 400 });
       }
+      normalizedOllamaEndpoint = endpointCheck.normalizedBaseUrl;
     }
 
     await fs.mkdir(STORAGE_DIR, { recursive: true });
@@ -212,7 +215,7 @@ export async function POST(req: NextRequest) {
       provider: provider || 'simulation',
       model: model || 'gemini-1.5-flash',
       temperature: typeof temperature === 'number' ? Math.max(0, Math.min(1, temperature)) : 0.7,
-      ollamaEndpoint: ollamaEndpoint || 'http://localhost:11434',
+      ollamaEndpoint: normalizedOllamaEndpoint,
     };
     await fs.writeFile(SETTINGS_FILE, JSON.stringify(settingsUpdate, null, 2), 'utf8');
 

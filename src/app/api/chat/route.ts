@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 import { loadEncryptedSecrets, SUPPORTED_MODELS } from '@/lib/secrets';
 import { logAuditEvent } from '@/lib/db';
+import { validateApprovedOllamaEndpoint } from '@/lib/ssrf';
 
 const NOOK_FUNCTION_TOOLS = [
   {
     name: 'web_search',
-    description: 'Searches live technical documentation, encyclopedic articles, and real-time releases.',
+    description: 'Searches Wikipedia OpenSearch encyclopedic articles and technical reference summaries with verified source URLs.',
     readOnlyHint: true,
     destructiveHint: false,
     idempotentHint: true,
@@ -360,10 +361,19 @@ export async function POST(req: NextRequest) {
     // 4. Local Ollama Provider
     // ----------------------------------------------------
     if (provider === 'ollama') {
+      const endpointCheck = validateApprovedOllamaEndpoint(ollamaUrl);
+      if (!endpointCheck.allowed || !endpointCheck.normalizedBaseUrl) {
+        return NextResponse.json(
+          { error: `SSRF Policy Violation: Unapproved Ollama endpoint '${ollamaUrl}'. ${endpointCheck.reason}` },
+          { status: 400 }
+        );
+      }
+      const safeOllamaUrl = endpointCheck.normalizedBaseUrl;
       const model = settings?.model || 'llama3.2';
       try {
-        const ollamaRes = await fetch(`${ollamaUrl}/api/chat`, {
+        const ollamaRes = await fetch(`${safeOllamaUrl}/api/chat`, {
           method: 'POST',
+          redirect: 'error',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model,

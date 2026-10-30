@@ -30,10 +30,62 @@ export interface CreateTicketOptions {
 const INSECURE_DEFAULT_SECRETS = new Set([
   'nook_internal_runner_auth_secret_v1',
   'test-audit-runner-secret-key-32bytes',
+  '0123456789abcdef0123456789abcdef0123456789abcdef',
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  'nook-production-api-key-change-this-32bytes',
+  'nook-human-approver-secret-password-32bytes',
+  'nook-owner-change-me-32-chars-minimum',
+  'nook-approver-distinct-human-secret-32c',
+  'nook-api-key-change-me-32-chars-minimum',
+  'default_secret_do_not_use_in_prod',
   'default',
   'secret',
   'change-me',
+  'changeme',
+  'password',
+  '12345678',
 ]);
+
+/**
+ * Validates that a command executed under the `system_verified_test` exception
+ * is strictly bounded to non-chained test runner invocations and cannot execute
+ * arbitrary shell commands without human approval.
+ */
+export function validateCodeTestCommandBoundary(command: string): { allowed: boolean; reason?: string } {
+  if (!command || typeof command !== 'string') {
+    return { allowed: false, reason: 'Command must be a non-empty string.' };
+  }
+  const trimmed = command.trim();
+  if (!trimmed || trimmed.length > 240) {
+    return { allowed: false, reason: 'Command is empty or exceeds maximum length (240 chars) for system_verified_test.' };
+  }
+
+  // Strictly block shell chaining, pipes, redirection, command substitution, and path traversal
+  if (/[;&|`$<>\\\r\n]|\.\./.test(trimmed)) {
+    return {
+      allowed: false,
+      reason: 'Command contains shell metacharacters, chaining, redirection, or path traversal outside the system_verified_test boundary. Human approval is required.',
+    };
+  }
+
+  // Allow bounded node test runner / version / script invocations
+  const isNodeTest = /^node\s+--test(\s+[A-Za-z0-9_./-]+\.(mjs|js|cjs))?$/.test(trimmed);
+  const isNodeVersion = /^node\s+(--version|-v)$/.test(trimmed);
+  const isNodeScript = /^node\s+[A-Za-z0-9_./-]+\.(mjs|js|cjs)$/.test(trimmed);
+  const isNodeInlineSafe =
+    /^node\s+-e\s+"(process\.exit\([01]\)|console\.log\([A-Za-z0-9_+'" -]{1,40}\))"$/.test(trimmed);
+  const isNpmTest = /^npm\s+(test|run\s+test(:[A-Za-z0-9_:-]+)?)$/.test(trimmed);
+  const isSafeDiagnosticEcho = /^(echo|Write-Output)\s+"[A-Za-z0-9_ -]{1,64}"$/.test(trimmed);
+
+  if (isNodeTest || isNodeVersion || isNodeScript || isNodeInlineSafe || isNpmTest || isSafeDiagnosticEcho) {
+    return { allowed: true };
+  }
+
+  return {
+    allowed: false,
+    reason: `Command "${trimmed}" is outside the bounded system_verified_test allowlist (only node --test, bounded test scripts, or npm test are permitted without human approval).`,
+  };
+}
 
 // Ephemeral runtime secret generated per-process instance when none configured in dev/test
 let _ephemeralRunnerSecret: string | null = null;
@@ -42,14 +94,14 @@ export function getSandboxRunnerSecret(): string {
   const envSecret = process.env.SANDBOX_RUNNER_SECRET?.trim();
 
   if (envSecret) {
-    if (INSECURE_DEFAULT_SECRETS.has(envSecret)) {
+    if (INSECURE_DEFAULT_SECRETS.has(envSecret) || INSECURE_DEFAULT_SECRETS.has(envSecret.toLowerCase())) {
       throw new Error(
-        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is set to an insecure, publicly known default value. A unique high-entropy secret is strictly required.'
+        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is set to an insecure, publicly known default or example value. A unique high-entropy secret is strictly required.'
       );
     }
-    if (envSecret.length < 16) {
+    if (envSecret.length < 16 || new Set(envSecret).size < 6) {
       throw new Error(
-        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is too short (< 16 characters). High-entropy cryptographic secret required.'
+        'SECURITY FAULT: SANDBOX_RUNNER_SECRET is too short (< 16 characters) or lacks character variety. High-entropy cryptographic secret required.'
       );
     }
     return envSecret;
@@ -116,6 +168,10 @@ function verifyServerAuthorization(options: {
   } else if (options.authorizationType === 'system_verified_test') {
     if (!options.taskId) {
       throw new Error('Server authorization denied: System verified test ticket requires bound taskId.');
+    }
+    const boundaryCheck = validateCodeTestCommandBoundary(options.command);
+    if (!boundaryCheck.allowed) {
+      throw new Error(`Server authorization denied: ${boundaryCheck.reason}`);
     }
     const job = getJobById(options.taskId);
     const agentTask = getAgentTaskById(options.taskId);

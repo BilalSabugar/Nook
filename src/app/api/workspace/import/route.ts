@@ -1,72 +1,165 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { importWorkspaceSnapshot, validateWorkspaceSnapshot } from '@/lib/db';
-import fs from 'fs/promises';
+import { NextRequest, NextResponse } from 'next/server.js';
+import { validateApiRequest, unauthorizedResponse } from '../../../../lib/auth.ts';
+import {
+  importWorkspaceSnapshot,
+  validateWorkspaceSnapshot,
+  verifyDatabaseIntegrity,
+  logAuditEvent,
+  getDatabase,
+  SAFE_SNAPSHOT_ID_PATTERN,
+  SAFE_SNAPSHOT_FILENAME_PATTERN,
+} from '../../../../lib/db.ts';
+import {
+  WorkspaceSecurityError,
+  ensureRealDirectoryWithin,
+  writeFileNoFollow,
+} from '../../../../lib/safe-workspace.mjs';
+import type { DatabaseSync } from 'node:sqlite';
+import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
-const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
-const STATE_FILE = path.join(STORAGE_DIR, 'workspace-state.json');
+const DEFAULT_STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
+
+function assertNoSymlinksInTree(targetPath: string): void {
+  if (!fs.existsSync(targetPath)) return;
+  const st = fs.lstatSync(targetPath);
+  if (st.isSymbolicLink()) {
+    throw new WorkspaceSecurityError(`Symlink rejected in workspace storage path: ${targetPath}`);
+  }
+  if (st.isDirectory()) {
+    for (const entry of fs.readdirSync(targetPath)) {
+      assertNoSymlinksInTree(path.join(targetPath, entry));
+    }
+  }
+}
 
 /**
- * POST /api/workspace/import
- * Imports a previously exported sovereign Nook workspace bundle (v1 or v2).
- * Reconstructs complete spaces, documents, revisions, missions, tasks, and evidence.
+ * Coordinates atomic snapshot validation, staged filesystem restoration, and transactional
+ * SQLite import. Guarantees that:
+ * 1. All validation (schema, checksum, provenance signature, path/filename safety, symlink checks)
+ *    completes BEFORE any live filesystem or SQLite mutation.
+ * 2. Every imported agentId and filename is strictly confined within `<storageDir>/sandboxes/<agentId>/workspace`
+ *    using `ensureRealDirectoryWithin` and `writeFileNoFollow`.
+ * 3. Any failure in staging, SQLite commit, or post-stage hook rolls back both SQLite and the filesystem
+ *    so prior state remains 100% unchanged.
  */
-export async function POST(req: NextRequest) {
-  const auth = validateApiRequest(req);
-  if (!auth.authorized) {
-    return unauthorizedResponse(auth.error);
+export async function restoreWorkspaceBundleAtomically(
+  bundle: any,
+  options?: {
+    storageDir?: string;
+    db?: DatabaseSync;
+    conflictStrategy?: 'merge' | 'replace' | 'abort';
+    requireSignature?: boolean;
+    signingSecret?: string;
+    /** Optional fault injection hook for testing atomic rollback between staging and commit. */
+    beforeCommitHook?: () => void;
+  }
+) {
+  const storageDir = options?.storageDir ? path.resolve(/*turbopackIgnore: true*/ options.storageDir) : DEFAULT_STORAGE_DIR;
+  const db = options?.db || getDatabase();
+  const conflictStrategy = options?.conflictStrategy || bundle?.conflictStrategy || 'merge';
+
+  // 1. Preflight validation (zero side effects on disk or DB)
+  const preflight = validateWorkspaceSnapshot(bundle, {
+    requireSignature: options?.requireSignature ?? Boolean(bundle?.requireSignature),
+    signingSecret: options?.signingSecret,
+  });
+
+  if (!preflight.valid) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error: `Snapshot preflight validation failed: ${preflight.errors.join('; ')}`,
+        validation: preflight,
+      },
+    };
   }
 
+  // Ensure storage root exists and contains no symlinks in target paths
+  if (!fs.existsSync(/*turbopackIgnore: true*/ storageDir)) {
+    fs.mkdirSync(/*turbopackIgnore: true*/ storageDir, { recursive: true });
+  }
+  const stateFile = path.join(storageDir, 'workspace-state.json');
+  const sandboxesRoot = path.join(storageDir, 'sandboxes');
+
+  assertNoSymlinksInTree(stateFile);
+  assertNoSymlinksInTree(sandboxesRoot);
+
+  // If conflictStrategy === 'abort', verify no target sandbox files already exist on disk before staging
+  if (conflictStrategy === 'abort' && bundle.workspace?.computerStates) {
+    for (const [agentId, state] of Object.entries(bundle.workspace.computerStates)) {
+      const files = (state as { files?: Array<{ name?: string }> })?.files || [];
+      for (const file of files) {
+        if (file?.name) {
+          const existingFile = path.join(sandboxesRoot, agentId, 'workspace', file.name);
+          if (fs.existsSync(existingFile)) {
+            return {
+              ok: false as const,
+              status: 409,
+              body: {
+                error: `ConflictError: Sandbox file "${agentId}/${file.name}" already exists (conflictStrategy=abort)`,
+                validation: preflight,
+              },
+            };
+          }
+        }
+      }
+    }
+  }
+
+  const opId = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  const stagingDir = path.join(storageDir, `.import_staging_${opId}`);
+  const backupDir = path.join(storageDir, `.import_backup_${opId}`);
+
   try {
-    const bundle = await req.json();
+    // 2. Stage all filesystem writes inside an isolated staging directory first
+    await ensureRealDirectoryWithin(storageDir, stagingDir);
 
-    if (!bundle || typeof bundle !== 'object' || !bundle.schemaVersion) {
-      return NextResponse.json({
-        error: 'Invalid workspace bundle. Missing schemaVersion.',
-      }, { status: 400 });
-    }
+    if (bundle.workspace && typeof bundle.workspace === 'object') {
+      const stagedStatePayload = JSON.stringify(
+        {
+          ...bundle.workspace,
+          importedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      );
+      await writeFileNoFollow(stagingDir, 'workspace-state.json', stagedStatePayload);
 
-    const isDryRun = req.nextUrl.searchParams.get('dryRun') === 'true' || Boolean(bundle.dryRun);
-    if (isDryRun) {
-      const validation = validateWorkspaceSnapshot(bundle);
-      return NextResponse.json({
-        success: validation.valid,
-        dryRun: true,
-        validation,
-      }, { status: validation.valid ? 200 : 400 });
-    }
+      if (bundle.workspace.computerStates && typeof bundle.workspace.computerStates === 'object') {
+        const stagedSandboxesRoot = path.join(stagingDir, 'sandboxes');
+        await ensureRealDirectoryWithin(stagingDir, stagedSandboxesRoot);
 
-    await fs.mkdir(STORAGE_DIR, { recursive: true });
+        for (const [agentId, computerState] of Object.entries(bundle.workspace.computerStates)) {
+          if (
+            !SAFE_SNAPSHOT_ID_PATTERN.test(agentId) ||
+            agentId === '.' ||
+            agentId === '..' ||
+            agentId.includes('/') ||
+            agentId.includes('\\')
+          ) {
+            throw new WorkspaceSecurityError(`Rejected unsafe agentId in computerStates: "${agentId}"`);
+          }
 
-    // 1. Import Workspace State file (UI agents, messages, computer states, spaces, settings)
-    if (bundle.workspace || bundle.spaces) {
-      const stateToSave = {
-        agents: bundle.workspace?.agents || [],
-        messages: bundle.workspace?.messages || {},
-        computerStates: bundle.workspace?.computerStates || {},
-        spaces: bundle.spaces || [],
-        settings: bundle.workspace?.settings || bundle.settings || undefined,
-        savedAt: new Date().toISOString(),
-      };
+          const stagedAgentWorkspace = path.join(stagedSandboxesRoot, agentId, 'workspace');
+          await ensureRealDirectoryWithin(stagedSandboxesRoot, stagedAgentWorkspace);
 
-      const tempFile = `${STATE_FILE}.${Date.now()}.tmp`;
-      await fs.writeFile(tempFile, JSON.stringify(stateToSave, null, 2), 'utf8');
-      await fs.rename(tempFile, STATE_FILE);
-
-      // Restore sandbox files to disk
-      if (bundle.workspace?.computerStates && typeof bundle.workspace.computerStates === 'object') {
-        for (const [agentId, compState] of Object.entries<any>(bundle.workspace.computerStates)) {
-          if (compState?.files && Array.isArray(compState.files)) {
-            const agentDiskDir = path.join(STORAGE_DIR, 'sandboxes', agentId, 'workspace');
-            await fs.mkdir(agentDiskDir, { recursive: true });
-
-            for (const file of compState.files) {
-              if (file?.name && typeof file?.content === 'string') {
-                const safeName = path.basename(file.name).replace(/[^a-zA-Z0-9._-]/g, '_');
-                if (safeName) {
-                  await fs.writeFile(path.join(agentDiskDir, safeName), file.content, 'utf8');
-                }
+          const cState = computerState as { files?: Array<{ name: string; content: string }> };
+          if (Array.isArray(cState.files)) {
+            for (const file of cState.files) {
+              if (
+                !file ||
+                typeof file.name !== 'string' ||
+                !SAFE_SNAPSHOT_FILENAME_PATTERN.test(file.name) ||
+                file.name === '.' ||
+                file.name === '..'
+              ) {
+                throw new WorkspaceSecurityError(`Rejected unsafe file name in computerStates["${agentId}"]: "${file?.name}"`);
+              }
+              if (typeof file.content === 'string') {
+                await writeFileNoFollow(stagedAgentWorkspace, file.name, file.content);
               }
             }
           }
@@ -74,21 +167,163 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 2. Durable Database Restore via transaction
-    const result = importWorkspaceSnapshot(bundle);
+    // 3. Create filesystem backup of live state before committing SQLite & swapping files
+    fs.mkdirSync(backupDir, { recursive: true });
+    const hadStateFile = fs.existsSync(stateFile);
+    if (hadStateFile) {
+      fs.cpSync(stateFile, path.join(backupDir, 'workspace-state.json'));
+    }
+    const hadSandboxes = fs.existsSync(sandboxesRoot);
+    if (hadSandboxes) {
+      fs.cpSync(sandboxesRoot, path.join(backupDir, 'sandboxes'), { recursive: true });
+    }
 
-    return NextResponse.json({
-      success: true,
-      importedSpacesCount: result.importedSpacesCount,
-      importedDocsCount: result.importedDocsCount,
-      importedRevisionsCount: result.importedRevisionsCount,
-      importedMissionsCount: result.importedMissionsCount,
-      importedTasksCount: result.importedTasksCount,
-      importedEvidenceCount: result.importedEvidenceCount,
-      importedApprovalsCount: result.importedApprovalsCount,
-      importedAt: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Import error' }, { status: 500 });
+    try {
+      // 4. Execute transactional SQLite import (rolls back SQLite automatically if it throws)
+      const importStats = importWorkspaceSnapshot(bundle, db, {
+        conflictStrategy,
+        requireSignature: options?.requireSignature ?? Boolean(bundle?.requireSignature),
+        signingSecret: options?.signingSecret,
+      });
+
+      if (typeof options?.beforeCommitHook === 'function') {
+        options.beforeCommitHook();
+      }
+
+      // 5. Apply staged filesystem changes into live storageDir using safe confinement
+      if (bundle.workspace && typeof bundle.workspace === 'object') {
+        const stagedStateFile = path.join(stagingDir, 'workspace-state.json');
+        if (fs.existsSync(stagedStateFile)) {
+          const content = fs.readFileSync(stagedStateFile, 'utf8');
+          await writeFileNoFollow(storageDir, 'workspace-state.json', content);
+        }
+
+        if (conflictStrategy === 'replace' && fs.existsSync(sandboxesRoot)) {
+          fs.rmSync(sandboxesRoot, { recursive: true, force: true });
+        }
+
+        if (bundle.workspace.computerStates && typeof bundle.workspace.computerStates === 'object') {
+          await ensureRealDirectoryWithin(storageDir, sandboxesRoot);
+          for (const [agentId, computerState] of Object.entries(bundle.workspace.computerStates)) {
+            const liveAgentWorkspace = path.join(sandboxesRoot, agentId, 'workspace');
+            await ensureRealDirectoryWithin(sandboxesRoot, liveAgentWorkspace);
+            const cState = computerState as { files?: Array<{ name: string; content: string }> };
+            if (Array.isArray(cState.files)) {
+              for (const file of cState.files) {
+                if (file?.name && typeof file.content === 'string') {
+                  await writeFileNoFollow(liveAgentWorkspace, file.name, file.content);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 6. Verify physical database & foreign-key integrity post-restore
+      const integrity = verifyDatabaseIntegrity(db);
+      if (!integrity.healthy) {
+        throw new Error(`Database integrity check failed post-import: ${integrity.integrityCheck}`);
+      }
+
+      return {
+        ok: true as const,
+        status: 200,
+        body: {
+          status: 'success',
+          message: 'Workspace snapshot restored atomically across SQLite and sandbox filesystem.',
+          conflictStrategy,
+          ...importStats,
+          integrity,
+        },
+      };
+    } catch (commitErr: unknown) {
+      // Roll back live filesystem from backup
+      if (hadStateFile && fs.existsSync(path.join(backupDir, 'workspace-state.json'))) {
+        fs.cpSync(path.join(backupDir, 'workspace-state.json'), stateFile, { force: true });
+      } else if (!hadStateFile && fs.existsSync(stateFile)) {
+        fs.rmSync(stateFile, { force: true });
+      }
+
+      if (fs.existsSync(sandboxesRoot)) {
+        fs.rmSync(sandboxesRoot, { recursive: true, force: true });
+      }
+      if (hadSandboxes && fs.existsSync(path.join(backupDir, 'sandboxes'))) {
+        fs.cpSync(path.join(backupDir, 'sandboxes'), sandboxesRoot, { recursive: true });
+      }
+
+      throw commitErr;
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to import workspace snapshot';
+    const isConflict = message.includes('ConflictError:');
+    return {
+      ok: false as const,
+      status: isConflict ? 409 : 400,
+      body: {
+        error: message,
+        validation: preflight,
+      },
+    };
+  } finally {
+    if (fs.existsSync(stagingDir)) {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+    }
+    if (fs.existsSync(backupDir)) {
+      fs.rmSync(backupDir, { recursive: true, force: true });
+    }
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const auth = validateApiRequest(req);
+  if (!auth.authorized) {
+    return unauthorizedResponse(auth.error, auth.status);
+  }
+
+  try {
+    const bundle = await req.json();
+
+    if (!bundle || (bundle.schemaVersion !== 1 && bundle.schemaVersion !== 2)) {
+      return NextResponse.json(
+        { error: 'Invalid or unsupported Nook workspace bundle. Expected schemaVersion 1 or 2.' },
+        { status: 400 }
+      );
+    }
+
+    // Dry-run preflight validation support (?dryRun=true or bundle.dryRun === true)
+    const isDryRun = req.nextUrl.searchParams.get('dryRun') === 'true' || bundle.dryRun === true;
+    if (isDryRun) {
+      const validation = validateWorkspaceSnapshot(bundle, {
+        requireSignature: Boolean(bundle.requireSignature),
+      });
+      return NextResponse.json(
+        {
+          status: validation.valid ? 'valid' : 'invalid',
+          dryRun: true,
+          validation,
+        },
+        { status: validation.valid ? 200 : 400 }
+      );
+    }
+
+    const result = await restoreWorkspaceBundleAtomically(bundle);
+    if (!result.ok) {
+      logAuditEvent('WORKSPACE_IMPORT_REJECTED', result.body.error, 'failed');
+      return NextResponse.json(result.body, { status: result.status });
+    }
+
+    logAuditEvent(
+      'WORKSPACE_IMPORT',
+      `Imported workspace bundle from ${bundle.exportedAt || 'unknown date'} (Spaces: ${result.body.importedSpacesCount}, Docs: ${result.body.importedDocsCount}, Revisions: ${result.body.importedRevisionsCount}, Missions: ${result.body.importedMissionsCount})`,
+      'success'
+    );
+
+    return NextResponse.json(result.body);
+  } catch (err: unknown) {
+    const error = err as Error;
+    return NextResponse.json(
+      { error: error.message || 'Failed to import workspace snapshot' },
+      { status: 500 }
+    );
   }
 }

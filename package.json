@@ -35,7 +35,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test --test-concurrency=1 src/__tests__/*.test.mjs",
     "worker": "node --experimental-strip-types bin/worker.mjs",
-    "sandbox-runner": "node bin/sandbox-runner.mjs"
+    "sandbox-runner": "node bin/sandbox-runner.mjs",
+    "doctor": "node bin/doctor.mjs"
   },
   "engines": {
     "node": ">=22.6.0"
@@ -45,6 +46,7 @@
     "clsx": "^2.1.1",
     "lucide-react": "^1.16.0",
     "next": "^16.4.3",
+    "playwright": "^1.64.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tailwind-merge": "^3.0.2"
@@ -59,7 +61,6 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.3",
-    "playwright": "^1.64.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

@@ -748,6 +748,84 @@ test('MCP Interoperability: Complete 2024-11-05 Protocol Suite (CORS, roots, sub
   const msgText = new TextDecoder().decode(msgChunk.value);
   assert.ok(msgText.includes('event: message'), 'Message must be emitted over active SSE stream');
   assert.ok(msgText.includes('"id":777') || msgText.includes('"id": 777'));
+
+  // 10. R5 (NOOK-P1-05): Single authoritative MCP tool registry rejects unadvertised tools
+  for (const unadvertisedTool of ['read_space_document', 'save_to_space', 'browse_url', 'execute_command']) {
+    const unadvRes = await handleJsonRpcRequest({
+      method: 'tools/call',
+      params: { name: unadvertisedTool, arguments: {} },
+      id: 800,
+    });
+    assert.ok(unadvRes.error, `Unadvertised tool "${unadvertisedTool}" must not execute via tools/call`);
+    assert.equal(unadvRes.error.code, -32601, `Unadvertised tool "${unadvertisedTool}" must return -32601 Method not found`);
+  }
+
+  // 11. R10 (NOOK-P2-04): Real MCP resource subscription tracking & update notification delivery
+  const { saveDocumentWithRevision, saveSpace } = await import('../lib/db.ts');
+  const { getMcpResourceSubscribers, onMcpNotification } = await import('../app/api/mcp/route.ts');
+  const subSpaceId = 'space-mcp-sub-test';
+  const subDocId = 'doc-mcp-sub-test';
+  const subUri = `nook://spaces/${subSpaceId}/documents/${subDocId}`;
+  saveSpace({ id: subSpaceId, name: 'MCP Subscription Test Space', icon: 'book' });
+  saveDocumentWithRevision({
+    id: subDocId,
+    spaceId: subSpaceId,
+    title: 'Subscribed Doc v1',
+    content: 'Initial content',
+  });
+
+  // Subscribe active SSE session to subUri
+  const subLiveRes = await handleJsonRpcRequest(
+    {
+      method: 'resources/subscribe',
+      params: { uri: subUri },
+      id: 801,
+    },
+    activeSessionId
+  );
+  assert.deepEqual(subLiveRes.result, {});
+  assert.ok(getMcpResourceSubscribers(subUri).includes(activeSessionId), 'Active session must be registered in subscriber set');
+
+  const receivedNotifications = [];
+  const offNotify = onMcpNotification((n) => receivedNotifications.push(n));
+  try {
+    // Mutate document -> should automatically emit notifications/resources/updated to both listener and SSE stream
+    saveDocumentWithRevision({
+      id: subDocId,
+      spaceId: subSpaceId,
+      title: 'Subscribed Doc v2',
+      content: 'Updated content triggering MCP notification',
+    });
+
+    assert.ok(
+      receivedNotifications.some(
+        (n) => n.method === 'notifications/resources/updated' && n.params?.uri === subUri
+      ),
+      'Document update must trigger notifications/resources/updated for subscribed URI'
+    );
+
+    const notifyChunk = await streamReader.read();
+    const notifyText = new TextDecoder().decode(notifyChunk.value);
+    assert.ok(notifyText.includes('notifications/resources/updated'), 'SSE stream must receive resource update notification');
+    assert.ok(notifyText.includes(subUri), 'SSE notification must include updated resource URI');
+  } finally {
+    offNotify();
+    await streamReader.cancel().catch(() => {});
+  }
+
+  // 12. R10 (NOOK-P2-05): Unknown or expired SSE sessionId returns HTTP 404
+  const unknownSessionReq = new NextRequest('http://localhost:3000/api/mcp?sessionId=non-existent-session-999', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify({ method: 'ping', id: 802 }),
+  });
+  const unknownSessionRes = await POST(unknownSessionReq);
+  assert.equal(unknownSessionRes.status, 404, 'POST to unknown SSE sessionId must fail with HTTP 404');
+  const unknownSessionBody = await unknownSessionRes.json();
+  assert.ok(unknownSessionBody.error, '404 response must include JSON-RPC error payload');
 });
 
 

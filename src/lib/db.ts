@@ -1074,7 +1074,7 @@ export function saveDocumentWithRevision(doc: {
 
   logAuditEvent('DOCUMENT_SAVED', `Document '${doc.title}' (${doc.id}) saved at v${newVersion}`, 'success', authorAgentId);
 
-  return {
+  const savedDoc: DbDocument = {
     id: doc.id,
     spaceId: doc.spaceId,
     title: doc.title,
@@ -1087,6 +1087,30 @@ export function saveDocumentWithRevision(doc: {
     createdAt: now,
     updatedAt: now,
   };
+
+  notifyDocumentListeners(`nook://spaces/${doc.spaceId}/documents/${doc.id}`, savedDoc);
+
+  return savedDoc;
+}
+
+type DocumentUpdateListener = (uri: string, doc: DbDocument) => void;
+const _documentUpdateListeners = new Set<DocumentUpdateListener>();
+
+export function onDocumentUpdated(listener: DocumentUpdateListener): () => void {
+  _documentUpdateListeners.add(listener);
+  return () => {
+    _documentUpdateListeners.delete(listener);
+  };
+}
+
+function notifyDocumentListeners(uri: string, doc: DbDocument): void {
+  for (const listener of _documentUpdateListeners) {
+    try {
+      listener(uri, doc);
+    } catch {
+      // ignore listener errors
+    }
+  }
 }
 
 export function listDocumentRevisions(documentId: string): DbDocumentRevision[] {
@@ -1208,6 +1232,9 @@ export function createMission(mission: {
 
   const assignedAgents = mission.assignedAgents || ['agent-aura', 'agent-scout', 'agent-quill', 'agent-cipher'];
   const milestones = mission.milestones || [];
+  const cleanTitle = scrubSensitiveData(mission.title);
+  const cleanObjective = scrubSensitiveData(mission.objective);
+  const cleanBudget = scrubSensitiveData(mission.budget || { maxToolCalls: 20, usedToolCalls: 0 });
 
   db.prepare(`
     INSERT INTO missions (
@@ -1215,27 +1242,27 @@ export function createMission(mission: {
     ) VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?)
   `).run(
     id,
-    mission.title,
-    mission.objective,
+    cleanTitle,
+    cleanObjective,
     mission.priority || 'medium',
     JSON.stringify(assignedAgents),
     JSON.stringify(milestones),
-    JSON.stringify(mission.budget || { maxToolCalls: 20, usedToolCalls: 0 }),
+    JSON.stringify(cleanBudget),
     now,
     now
   );
 
-  logAuditEvent('MISSION_CREATED', `Mission '${mission.title}' (${id}) created`, 'success', 'agent-aura');
+  logAuditEvent('MISSION_CREATED', `Mission '${cleanTitle}' (${id}) created`, 'success', 'agent-aura');
 
   return {
     id,
-    title: mission.title,
-    objective: mission.objective,
+    title: cleanTitle,
+    objective: cleanObjective,
     status: 'draft',
     priority: mission.priority || 'medium',
     assignedAgents,
     milestones,
-    budget: mission.budget,
+    budget: cleanBudget,
     createdAt: now,
     updatedAt: now,
   };
@@ -1301,6 +1328,47 @@ export function updateMissionStatus(
 }
 
 /**
+ * Redacts embedded API keys, bearer tokens, and configured runtime secrets inside arbitrary text.
+ */
+export function redactSecretsInText(input: string): string {
+  if (!input || typeof input !== 'string') return input;
+  let out = input;
+
+  // 1. Redact provider API key patterns (both standalone and embedded in text/headers/URLs)
+  // Negative lookbehind (?<![A-Za-z0-9_-]) ensures words like "task-..." or "tsk-..." never match "sk-..."
+  out = out.replace(/(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{16,}/g, '[REDACTED_GEMINI_KEY]');
+  out = out.replace(/(?<![A-Za-z0-9_-])sk-ant-[0-9A-Za-z_-]{12,}/g, '[REDACTED_ANTHROPIC_KEY]');
+  out = out.replace(/(?<![A-Za-z0-9_-])sk-(?:proj-|live-|test-)?[0-9A-Za-z_-]{16,}/g, '[REDACTED_OPENAI_KEY]');
+  out = out.replace(/(?<![A-Za-z0-9_-])gh[pousr]_[0-9A-Za-z]{16,}/g, '[REDACTED_GITHUB_TOKEN]');
+  out = out.replace(/(?<![A-Za-z0-9_-])xox[baprs]-[0-9A-Za-z-]{12,}/g, '[REDACTED_SLACK_TOKEN]');
+  out = out.replace(/\bBearer\s+[0-9A-Za-z._~+/-]{12,}=*/gi, 'Bearer [REDACTED_TOKEN]');
+  out = out.replace(
+    /\b((?:api[_-]?key|secret|token|password|authorization)\s*[:=]\s*['"]?)[0-9A-Za-z._~+/-]{12,}(['"]?)/gi,
+    '$1[REDACTED_SECRET]$2'
+  );
+
+  // 2. Redact any currently configured runtime environment secrets if accidentally embedded
+  const runtimeSecrets = [
+    process.env.NOOK_API_KEY,
+    process.env.NOOK_PASSWORD,
+    process.env.NOOK_SECRET_TOKEN,
+    process.env.NOOK_APPROVER_PASSWORD,
+    process.env.SANDBOX_RUNNER_SECRET,
+    process.env.GEMINI_API_KEY,
+    process.env.OPENAI_API_KEY,
+    process.env.ANTHROPIC_API_KEY,
+  ];
+  for (const sec of runtimeSecrets) {
+    const trimmed = (sec || '').trim();
+    if (trimmed.length >= 12 && out.includes(trimmed)) {
+      out = out.split(trimmed).join('[REDACTED_RUNTIME_SECRET]');
+    }
+  }
+
+  return out;
+}
+
+/**
  * Recursively strips all API keys, authorization tokens, passwords, and private credentials
  * from any object, array, or string payload. Guarantees secrets never enter regular
  * SQLite tables (agent_tasks, missions, evidence_records) or workspace export bundles.
@@ -1309,11 +1377,7 @@ export function scrubSensitiveData<T>(data: T): T {
   if (data === null || data === undefined) return data;
 
   if (typeof data === 'string') {
-    // Redact recognizable secret formats in raw strings
-    if (/^AIza[0-9A-Za-z-_]{35}$/.test(data)) return '[REDACTED_GEMINI_KEY]' as unknown as T;
-    if (/^sk-[a-zA-Z0-9-_]{20,}$/.test(data)) return '[REDACTED_OPENAI_KEY]' as unknown as T;
-    if (/^sk-ant-[a-zA-Z0-9-_]{20,}$/.test(data)) return '[REDACTED_ANTHROPIC_KEY]' as unknown as T;
-    return data;
+    return redactSecretsInText(data) as unknown as T;
   }
 
   if (typeof data !== 'object') {
@@ -1848,6 +1912,64 @@ export function commitMissionStateWithFencing(
   }
 }
 
+const WORKER_HEARTBEAT_RESOURCE = '__system_worker_heartbeat__';
+
+/**
+ * Records a worker heartbeat in the durable SQLite `worker_leases` table so `/api/health`
+ * can independently verify whether an active background worker loop has ticked recently.
+ */
+export function recordWorkerHeartbeat(workerId: string = `worker-${process.pid}`, ttlMs: number = 30000): void {
+  try {
+    const db = getDatabase();
+    const now = Date.now();
+    const acquiredAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + ttlMs).toISOString();
+    db.prepare(`
+      INSERT INTO worker_leases (resource_id, owner_id, fencing_token, acquired_at, expires_at)
+      VALUES (?, ?, 1, ?, ?)
+      ON CONFLICT(resource_id) DO UPDATE SET
+        owner_id = excluded.owner_id,
+        fencing_token = worker_leases.fencing_token + 1,
+        acquired_at = excluded.acquired_at,
+        expires_at = excluded.expires_at
+    `).run(WORKER_HEARTBEAT_RESOURCE, workerId, acquiredAt, expiresAt);
+  } catch {
+    // ignore transient DB lock during heartbeat
+  }
+}
+
+export function getWorkerHeartbeatStatus(maxAgeMs: number = 45000): {
+  active: boolean;
+  status: 'ok' | 'stale' | 'not_started';
+  workerId?: string;
+  lastHeartbeatAt?: string;
+  expiresAt?: string;
+  ageMs?: number;
+} {
+  try {
+    const db = getDatabase();
+    const row = db
+      .prepare(`SELECT * FROM worker_leases WHERE resource_id = ?`)
+      .get(WORKER_HEARTBEAT_RESOURCE) as unknown as WorkerLeaseRow | undefined;
+    if (!row || !row.owner_id) {
+      return { active: false, status: 'not_started' };
+    }
+    const acquiredMs = Date.parse(row.acquired_at);
+    const ageMs = isNaN(acquiredMs) ? Infinity : Math.max(0, Date.now() - acquiredMs);
+    const active = ageMs <= maxAgeMs;
+    return {
+      active,
+      status: active ? 'ok' : 'stale',
+      workerId: row.owner_id,
+      lastHeartbeatAt: row.acquired_at,
+      expiresAt: row.expires_at,
+      ageMs: isFinite(ageMs) ? ageMs : undefined,
+    };
+  } catch {
+    return { active: false, status: 'not_started' };
+  }
+}
+
 // ==========================================
 // SOVEREIGN WORKSPACE EXPORT & IMPORT (v2)
 // ==========================================
@@ -1863,13 +1985,18 @@ export interface SnapshotManifest {
   totalTasks: number;
   totalEvidence: number;
   totalApprovals: number;
+  /** Integrity checksum (SHA-256 over canonical bundle) for detecting accidental corruption. */
   checksum: string;
+  integrityChecksum: string;
+  /** Optional HMAC-SHA256 provenance signature when signed with server secret. */
+  signature?: string;
 }
 
 export interface SnapshotValidationResult {
   valid: boolean;
   schemaVersion: number;
   manifest?: SnapshotManifest;
+  signatureStatus: 'verified' | 'unsigned' | 'invalid';
   errors: string[];
   warnings: string[];
   summary: {
@@ -1912,6 +2039,24 @@ export function computeSnapshotChecksum(bundle: Record<string, any>): string {
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
+function getSnapshotSigningSecret(): string | null {
+  const sec = (
+    process.env.NOOK_SNAPSHOT_SIGNING_SECRET ||
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    ''
+  ).trim();
+  return sec.length >= 8 ? sec : null;
+}
+
+export function computeSnapshotSignature(checksum: string, secret?: string | null): string | undefined {
+  const signingKey = secret ?? getSnapshotSigningSecret();
+  if (!signingKey || !checksum) return undefined;
+  const hmac = crypto.createHmac('sha256', signingKey).update(`nook-snapshot-v2:${checksum}`).digest('hex');
+  return `hmac-sha256:${hmac}`;
+}
+
 export function verifyDatabaseIntegrity(db: DatabaseSync = getDatabase()): DatabaseIntegrityResult {
   const checkRow = db.prepare('PRAGMA integrity_check;').get() as { integrity_check?: string } | undefined;
   const integrityCheck = checkRow?.integrity_check || 'ok';
@@ -1924,7 +2069,16 @@ export function verifyDatabaseIntegrity(db: DatabaseSync = getDatabase()): Datab
   };
 }
 
-export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult {
+export const SAFE_SNAPSHOT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const SAFE_SNAPSHOT_FILENAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+export const MAX_SNAPSHOT_DOCUMENTS = 2000;
+export const MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT = 100;
+export const MAX_SNAPSHOT_SANDBOX_FILE_BYTES = 512 * 1024; // 512KB per file
+
+export function validateWorkspaceSnapshot(
+  bundle: any,
+  options?: { requireSignature?: boolean; signingSecret?: string }
+): SnapshotValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -1932,6 +2086,7 @@ export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult
     return {
       valid: false,
       schemaVersion: 0,
+      signatureStatus: 'unsigned',
       errors: ['Invalid bundle: snapshot payload must be a non-null object'],
       warnings: [],
       summary: { spacesCount: 0, docsCount: 0, revisionsCount: 0, missionsCount: 0, tasksCount: 0, evidenceCount: 0, approvalsCount: 0 },
@@ -1943,12 +2098,82 @@ export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult
     errors.push(`Unsupported or missing schemaVersion: expected 1 or 2, got ${bundle.schemaVersion}`);
   }
 
-  // Checksum verification if manifest is provided
-  if (bundle.manifest?.checksum) {
-    const expected = bundle.manifest.checksum;
+  // Checksum verification if manifest is provided (integrity check against accidental corruption)
+  const expectedChecksum = bundle.manifest?.integrityChecksum || bundle.manifest?.checksum;
+  if (expectedChecksum) {
     const computed = `sha256:${computeSnapshotChecksum(bundle)}`;
-    if (expected !== computed) {
-      errors.push(`Snapshot integrity checksum mismatch: expected ${expected}, got ${computed} (bundle may be corrupted or tampered)`);
+    if (expectedChecksum !== computed) {
+      errors.push(`Snapshot integrity checksum mismatch: expected ${expectedChecksum}, got ${computed} (bundle may be corrupted or modified)`);
+    }
+  }
+
+  // Optional provenance HMAC signature verification
+  let signatureStatus: 'verified' | 'unsigned' | 'invalid' = 'unsigned';
+  if (bundle.manifest?.signature) {
+    const baseChecksum = expectedChecksum || `sha256:${computeSnapshotChecksum(bundle)}`;
+    const expectedSig = computeSnapshotSignature(baseChecksum, options?.signingSecret);
+    if (expectedSig && bundle.manifest.signature === expectedSig) {
+      signatureStatus = 'verified';
+    } else {
+      signatureStatus = 'invalid';
+      errors.push('Snapshot provenance signature verification failed: HMAC signature does not match server signing key');
+    }
+  } else if (options?.requireSignature) {
+    signatureStatus = 'invalid';
+    errors.push('Snapshot provenance signature is required by policy, but bundle is unsigned');
+  }
+
+  // Validate workspace.computerStates agent IDs and sandbox files (NOOK-P1-01)
+  if (bundle.workspace !== undefined) {
+    if (!bundle.workspace || typeof bundle.workspace !== 'object' || Array.isArray(bundle.workspace)) {
+      errors.push('Field "workspace" must be an object');
+    } else if (bundle.workspace.computerStates !== undefined) {
+      const cs = bundle.workspace.computerStates;
+      if (!cs || typeof cs !== 'object' || Array.isArray(cs)) {
+        errors.push('Field "workspace.computerStates" must be an object map of agentId -> state');
+      } else {
+        for (const [agentId, rawState] of Object.entries(cs)) {
+          if (
+            !SAFE_SNAPSHOT_ID_PATTERN.test(agentId) ||
+            agentId === '.' ||
+            agentId === '..' ||
+            agentId.includes('/') ||
+            agentId.includes('\\')
+          ) {
+            errors.push(`Invalid or unsafe agentId in workspace.computerStates: "${agentId}" (must match ^[A-Za-z0-9_-]{1,64}$)`);
+            continue;
+          }
+          const stateObj = rawState as { files?: unknown };
+          if (stateObj && stateObj.files !== undefined) {
+            if (!Array.isArray(stateObj.files)) {
+              errors.push(`workspace.computerStates["${agentId}"].files must be an array`);
+            } else if (stateObj.files.length > MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT) {
+              errors.push(`workspace.computerStates["${agentId}"].files exceeds limit of ${MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT} files`);
+            } else {
+              for (let k = 0; k < stateObj.files.length; k++) {
+                const file = stateObj.files[k] as { name?: unknown; content?: unknown };
+                if (!file || typeof file !== 'object') {
+                  errors.push(`Invalid file entry at workspace.computerStates["${agentId}"].files[${k}]`);
+                  continue;
+                }
+                const fileName = typeof file.name === 'string' ? file.name : '';
+                if (
+                  !SAFE_SNAPSHOT_FILENAME_PATTERN.test(fileName) ||
+                  fileName === '.' ||
+                  fileName === '..' ||
+                  fileName.includes('/') ||
+                  fileName.includes('\\')
+                ) {
+                  errors.push(`Unsafe or invalid filename "${fileName}" in workspace.computerStates["${agentId}"]`);
+                }
+                if (typeof file.content === 'string' && Buffer.byteLength(file.content, 'utf8') > MAX_SNAPSHOT_SANDBOX_FILE_BYTES) {
+                  errors.push(`File "${fileName}" in workspace.computerStates["${agentId}"] exceeds maximum size of ${MAX_SNAPSHOT_SANDBOX_FILE_BYTES} bytes`);
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1970,6 +2195,10 @@ export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult
             errors.push(`Space "${s?.id || i}" has invalid pages: expected array`);
           } else {
             docsCount += s.pages.length;
+            if (docsCount > MAX_SNAPSHOT_DOCUMENTS) {
+              errors.push(`Total documents in snapshot exceeds maximum limit of ${MAX_SNAPSHOT_DOCUMENTS}`);
+              break;
+            }
             for (let j = 0; j < s.pages.length; j++) {
               const p = s.pages[j];
               if (!p || typeof p !== 'object' || !p.id || !p.title) {
@@ -2102,6 +2331,7 @@ export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult
     valid: errors.length === 0,
     schemaVersion: schemaVersion || 2,
     manifest: bundle.manifest,
+    signatureStatus,
     errors,
     warnings,
     summary: {
@@ -2189,8 +2419,8 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     const tasks: DbAgentTask[] = rawTasks.map((r) => ({
       id: r.id,
       missionId: r.mission_id,
-      title: r.title,
-      goal: r.goal,
+      title: scrubSensitiveData(r.title),
+      goal: scrubSensitiveData(r.goal),
       assignedAgentId: r.assigned_agent_id,
       status: r.status as DbAgentTask['status'],
       dependencies: JSON.parse(r.dependencies_json || '[]'),
@@ -2201,7 +2431,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
       verification: r.verification_json ? scrubSensitiveData(JSON.parse(r.verification_json)) : undefined,
       approvalId: r.approval_id || undefined,
       approvalToken: undefined, // NEVER export single-use tokens!
-      error: r.error || undefined,
+      error: r.error ? scrubSensitiveData(r.error) : undefined,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       completedAt: r.completed_at || undefined,
@@ -2209,8 +2439,8 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
 
     return {
       id: row.id,
-      title: row.title,
-      objective: row.objective,
+      title: scrubSensitiveData(row.title),
+      objective: scrubSensitiveData(row.objective),
       status: row.status as DbMission['status'],
       priority: row.priority as DbMission['priority'],
       assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
@@ -2232,7 +2462,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     agentName: r.agent_name,
     timestamp: r.timestamp,
     actionType: r.action_type,
-    summary: r.summary,
+    summary: scrubSensitiveData(r.summary),
     details: scrubSensitiveData(JSON.parse(r.details_json || '{}')),
     status: r.status as DbEvidenceRecord['status'],
   }));
@@ -2244,7 +2474,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
   const exportedAt = new Date().toISOString();
 
   const coreBundle = scrubSensitiveData({
-    nookVersion: '1.2.0',
+    nookVersion: '1.0.0',
     exportedAt,
     schemaVersion: 2,
     spaces,
@@ -2255,9 +2485,10 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
   });
 
   const checksum = `sha256:${computeSnapshotChecksum(coreBundle)}`;
+  const signature = computeSnapshotSignature(checksum);
   const manifest: SnapshotManifest = {
     schemaVersion: 2,
-    nookVersion: '1.2.0',
+    nookVersion: '1.0.0',
     exportedAt,
     totalSpaces: spaces.length,
     totalDocs,
@@ -2267,6 +2498,8 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     totalEvidence: evidenceTimeline.length,
     totalApprovals: approvalsAudit.length,
     checksum,
+    integrityChecksum: checksum,
+    ...(signature ? { signature } : {}),
   };
 
   return {
@@ -2275,9 +2508,16 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
   };
 }
 
+export interface ImportSnapshotOptions {
+  conflictStrategy?: 'merge' | 'replace' | 'abort';
+  requireSignature?: boolean;
+  signingSecret?: string;
+}
+
 export function importWorkspaceSnapshot(
   bundle: any,
-  db: DatabaseSync = getDatabase()
+  db: DatabaseSync = getDatabase(),
+  options?: ImportSnapshotOptions
 ): {
   success: boolean;
   validation: SnapshotValidationResult;
@@ -2289,9 +2529,17 @@ export function importWorkspaceSnapshot(
   importedEvidenceCount: number;
   importedApprovalsCount: number;
 } {
-  const validation = validateWorkspaceSnapshot(bundle);
+  const validation = validateWorkspaceSnapshot(bundle, {
+    requireSignature: options?.requireSignature,
+    signingSecret: options?.signingSecret,
+  });
   if (!validation.valid) {
     throw new Error(`Invalid workspace bundle: ${validation.errors.join('; ')}`);
+  }
+
+  const conflictStrategy = options?.conflictStrategy || bundle?.conflictStrategy || 'merge';
+  if (!['merge', 'replace', 'abort'].includes(conflictStrategy)) {
+    throw new Error(`Invalid conflictStrategy: expected 'merge', 'replace', or 'abort', got '${conflictStrategy}'`);
   }
 
   let importedSpacesCount = 0;
@@ -2304,6 +2552,51 @@ export function importWorkspaceSnapshot(
 
   db.exec('BEGIN TRANSACTION;');
   try {
+    if (conflictStrategy === 'abort') {
+      // Check for any pre-existing colliding IDs before writing a single row
+      if (Array.isArray(bundle.spaces)) {
+        const checkSpace = db.prepare('SELECT id FROM spaces WHERE id = ?');
+        const checkDoc = db.prepare('SELECT id FROM documents WHERE id = ?');
+        for (const s of bundle.spaces) {
+          if (s?.id && checkSpace.get(s.id)) {
+            throw new Error(`ConflictError: Space "${s.id}" already exists (conflictStrategy=abort)`);
+          }
+          if (Array.isArray(s?.pages)) {
+            for (const p of s.pages) {
+              if (p?.id && checkDoc.get(p.id)) {
+                throw new Error(`ConflictError: Document "${p.id}" already exists (conflictStrategy=abort)`);
+              }
+            }
+          }
+        }
+      }
+      if (Array.isArray(bundle.missions)) {
+        const checkMission = db.prepare('SELECT id FROM missions WHERE id = ?');
+        const checkTask = db.prepare('SELECT id FROM agent_tasks WHERE id = ?');
+        for (const m of bundle.missions) {
+          if (m?.id && checkMission.get(m.id)) {
+            throw new Error(`ConflictError: Mission "${m.id}" already exists (conflictStrategy=abort)`);
+          }
+          if (Array.isArray(m?.tasks)) {
+            for (const t of m.tasks) {
+              if (t?.id && checkTask.get(t.id)) {
+                throw new Error(`ConflictError: Task "${t.id}" already exists (conflictStrategy=abort)`);
+              }
+            }
+          }
+        }
+      }
+    } else if (conflictStrategy === 'replace') {
+      db.exec(`
+        DELETE FROM document_revisions;
+        DELETE FROM documents;
+        DELETE FROM spaces;
+        DELETE FROM evidence_records;
+        DELETE FROM agent_tasks;
+        DELETE FROM missions;
+        DELETE FROM approvals;
+      `);
+    }
     // 1. Spaces & Documents
     if (Array.isArray(bundle.spaces)) {
       const insertSpace = db.prepare(`

@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { NextRequest, NextResponse } from 'next/server.js';
+import { validateApiRequest, unauthorizedResponse } from '../../../lib/auth.ts';
 import {
   listMissions,
   getMissionById,
@@ -9,8 +9,9 @@ import {
   acquireWorkerLease,
   releaseWorkerLease,
   scrubSensitiveData,
-} from '@/lib/db';
-import { planMission, tickMission } from '@/lib/orchestrator';
+} from '../../../lib/db.ts';
+import { planMission, tickMission } from '../../../lib/orchestrator.ts';
+import { validateApprovedOllamaEndpoint } from '../../../lib/ssrf.ts';
 
 /**
  * GET /api/missions
@@ -69,16 +70,32 @@ export async function POST(req: NextRequest) {
     const { action, title, objective, priority, requiresCodeExecution, codeGenerationMode, modelOptions, missionId } = body;
 
     // 1. Aura plans a new mission
-    if (action === 'plan' || !action) {
+    if (action === 'plan' || action === 'create' || !action) {
       if (!objective) {
         return NextResponse.json({ error: 'Mission objective is required' }, { status: 400 });
+      }
+
+      // Validate any caller-supplied model endpoint against the approved Ollama origin allowlist (NOOK-P1-03)
+      let validatedEndpoint: string | undefined;
+      const suppliedEndpoint = modelOptions?.endpoint ?? body?.ollamaUrl ?? body?.endpoint;
+      if (suppliedEndpoint !== undefined && suppliedEndpoint !== null && String(suppliedEndpoint).trim() !== '') {
+        const endpointCheck = validateApprovedOllamaEndpoint(String(suppliedEndpoint));
+        if (!endpointCheck.allowed) {
+          return NextResponse.json(
+            {
+              error: `Blocked unapproved Ollama endpoint (SSRF Policy Violation): '${suppliedEndpoint}'. ${endpointCheck.reason}`,
+            },
+            { status: 400 }
+          );
+        }
+        validatedEndpoint = endpointCheck.normalizedBaseUrl;
       }
 
       // Strip any API keys or credentials from modelOptions before planning
       const safeModelOptions = modelOptions ? {
         provider: modelOptions.provider,
         model: modelOptions.model,
-        endpoint: modelOptions.endpoint,
+        ...(validatedEndpoint ? { endpoint: validatedEndpoint } : {}),
       } : undefined;
 
       const mission = planMission({

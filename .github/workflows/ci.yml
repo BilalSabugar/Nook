@@ -28,7 +28,7 @@ jobs:
         run: npx playwright install chromium --with-deps
 
       - name: Verify dependency security audit
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --audit-level=high
 
       - name: Verify ESLint code quality
         run: npm run lint
@@ -50,11 +50,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     env:
-      SANDBOX_RUNNER_SECRET: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
       SANDBOX_SERVICE_URL: http://127.0.0.1:4000
       WEB_SERVICE_URL: http://127.0.0.1:3000
-      NOOK_API_KEY: nook-production-test-api-key-32bytes
-      NOOK_APPROVER_PASSWORD: nook-human-approver-secret-password-32bytes
 
     steps:
       - name: Checkout repository
@@ -64,6 +61,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Generate ephemeral cryptographic secrets for CI verification
+        run: |
+          echo "SANDBOX_RUNNER_SECRET=$(openssl rand -hex 32)" >> $GITHUB_ENV
+          echo "NOOK_API_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
+          echo "NOOK_APPROVER_PASSWORD=$(openssl rand -hex 32)" >> $GITHUB_ENV
+          echo "NOOK_SECRET_KEY=$(openssl rand -hex 32)" >> $GITHUB_ENV
 
       - name: Pre-pull Base Container Images
         run: |

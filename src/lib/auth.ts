@@ -5,6 +5,48 @@ import path from 'path';
 const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const SECRET_FILE = path.join(STORAGE_DIR, 'auth_secret');
 
+/**
+ * Known public example, documentation, or placeholder secrets that must NEVER be accepted
+ * as valid credentials in any environment.
+ */
+export const KNOWN_PUBLIC_EXAMPLE_SECRETS = new Set([
+  'nook-production-api-key-change-this-32bytes',
+  'nook-human-approver-secret-password-32bytes',
+  'nook-owner-change-me-32-chars-minimum',
+  'nook-approver-distinct-human-secret-32c',
+  'nook-api-key-change-me-32-chars-minimum',
+  '0123456789abcdef0123456789abcdef0123456789abcdef',
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+  'nook_internal_runner_auth_secret_v1',
+  'default_secret_do_not_use_in_prod',
+  'changeme',
+  'change-me',
+  'secret',
+  'password',
+  'default',
+  'admin',
+  '12345678',
+  'replace-with-openssl-rand-hex-32',
+]);
+
+/**
+ * Checks if a secret string is a known public example, placeholder, or lacks minimum character variety.
+ */
+export function isKnownWeakOrExampleSecret(candidate: string | undefined | null): boolean {
+  if (!candidate || typeof candidate !== 'string') return true;
+  const trimmed = candidate.trim();
+  if (!trimmed) return true;
+  if (KNOWN_PUBLIC_EXAMPLE_SECRETS.has(trimmed) || KNOWN_PUBLIC_EXAMPLE_SECRETS.has(trimmed.toLowerCase())) {
+    return true;
+  }
+  // Reject repeated single-character or ultra-low-variety strings (e.g. "aaaaaaaaaaaaaaaa", "121212121212")
+  const uniqueChars = new Set(trimmed).size;
+  if (uniqueChars < 5) {
+    return true;
+  }
+  return false;
+}
+
 export interface AuthValidationResult {
   authorized: boolean;
   status?: number;
@@ -15,7 +57,7 @@ export interface AuthValidationResult {
 
 /**
  * Retrieves the cryptographic server master secret derived from configured owner credentials.
- * Strictly FAILS CLOSED: Never uses process.pid fallbacks or unconfigured auto-generation.
+ * Strictly FAILS CLOSED: Never uses process.pid fallbacks, unconfigured auto-generation, or public example secrets.
  */
 function getMasterSecret(): string {
   const configured = (
@@ -25,14 +67,14 @@ function getMasterSecret(): string {
     ''
   ).trim();
 
-  if (configured && configured.length >= 8) {
+  if (configured && configured.length >= 8 && !isKnownWeakOrExampleSecret(configured)) {
     return crypto.createHmac('sha256', configured).update('nook-owner-session-secret-v1').digest('hex');
   }
 
   try {
     if (fs.existsSync(SECRET_FILE)) {
       const secret = fs.readFileSync(SECRET_FILE, 'utf8').trim();
-      if (secret.length >= 32) {
+      if (secret.length >= 32 && !isKnownWeakOrExampleSecret(secret)) {
         return secret;
       }
     }
@@ -40,7 +82,7 @@ function getMasterSecret(): string {
     // ignore
   }
 
-  throw new Error('Authentication setup incomplete: No master owner secret configured. Set NOOK_API_KEY or NOOK_PASSWORD in server environment.');
+  throw new Error('Authentication setup incomplete or using rejected example secret: Set a unique, high-entropy NOOK_API_KEY or NOOK_PASSWORD in server environment.');
 }
 
 /**
@@ -75,6 +117,7 @@ export const APPROVER_SESSION_ID = 'nook-approver';
 export function getApproverPassword(): string | null {
   const approver = (process.env.NOOK_APPROVER_PASSWORD || '').trim();
   if (approver.length < 12) return null;
+  if (isKnownWeakOrExampleSecret(approver)) return null;
   const machine = [process.env.NOOK_API_KEY, process.env.NOOK_PASSWORD, process.env.NOOK_SECRET_TOKEN]
     .map((v) => (v || '').trim())
     .filter(Boolean);
@@ -375,8 +418,15 @@ export function validateApiRequest(req: Request): AuthValidationResult {
     };
   }
 
-  // 4. Verify against static NOOK_API_KEY if configured
+  // 4. Verify against static NOOK_API_KEY if configured and not a rejected public example
   const configuredKey = (process.env.NOOK_API_KEY || process.env.NOOK_SECRET_TOKEN || '').trim();
+  if (configuredKey && isKnownWeakOrExampleSecret(configuredKey)) {
+    return {
+      authorized: false,
+      status: 401,
+      error: 'Unauthorized: Server is configured with a rejected public example secret. Replace NOOK_API_KEY with a fresh random secret.',
+    };
+  }
   if (configuredKey && candidateToken === configuredKey) {
     return { authorized: true, sessionId: 'api-key-owner', authMethod: 'api_key' };
   }
@@ -384,16 +434,46 @@ export function validateApiRequest(req: Request): AuthValidationResult {
   // 5. Verify cryptographic signed session token
   const verification = verifySessionToken(candidateToken);
   if (verification.valid) {
-    // CSRF protection: for cookie-authenticated mutating requests, verify Origin / Referer
+    // CSRF protection: for cookie-authenticated mutating requests, strictly require and verify Origin / Referer
     if (authMethod === 'session_cookie' && ['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method)) {
-      const origin = req.headers.get('origin') || '';
-      const referer = req.headers.get('referer') || '';
-      const host = req.headers.get('host') || '';
+      const origin = (req.headers.get('origin') || '').trim();
+      const referer = (req.headers.get('referer') || '').trim();
+      let host = (req.headers.get('host') || '').trim();
+      if (!host) {
+        try {
+          host = new URL(req.url).host;
+        } catch {
+          host = '';
+        }
+      }
+
+      // Build allowed hosts set (request host + optional NOOK_ALLOWED_ORIGINS for reverse proxy deployments)
+      const allowedHosts = new Set<string>();
+      if (host) allowedHosts.add(host.toLowerCase());
+      const configuredOrigins = (process.env.NOOK_ALLOWED_ORIGINS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const co of configuredOrigins) {
+        try {
+          allowedHosts.add(new URL(co).host.toLowerCase());
+        } catch {
+          allowedHosts.add(co.toLowerCase());
+        }
+      }
+
+      if (!origin && !referer) {
+        return {
+          authorized: false,
+          status: 403,
+          error: 'Forbidden: Cross-site request forgery protection requires an Origin or Referer header on cookie-authenticated mutating requests.',
+        };
+      }
 
       if (origin) {
         try {
-          const originHost = new URL(origin).host;
-          if (originHost !== host) {
+          const originHost = new URL(origin).host.toLowerCase();
+          if (!allowedHosts.has(originHost)) {
             return {
               authorized: false,
               status: 403,
@@ -405,8 +485,8 @@ export function validateApiRequest(req: Request): AuthValidationResult {
         }
       } else if (referer) {
         try {
-          const refererHost = new URL(referer).host;
-          if (refererHost !== host) {
+          const refererHost = new URL(referer).host.toLowerCase();
+          if (!allowedHosts.has(refererHost)) {
             return {
               authorized: false,
               status: 403,
@@ -446,7 +526,8 @@ export function unauthorizedResponse(errorMsg = 'Unauthorized: Access denied', s
 }
 
 /**
- * Checks whether owner authentication credentials have been configured in server environment.
+ * Checks whether owner authentication credentials have been configured in server environment
+ * and are not known public example/placeholder secrets.
  */
 export function isServerAuthSetupComplete(): boolean {
   const configured = (
@@ -456,12 +537,13 @@ export function isServerAuthSetupComplete(): boolean {
     ''
   ).trim();
 
-  return Boolean(configured && configured.length >= 8);
+  return Boolean(configured && configured.length >= 8 && !isKnownWeakOrExampleSecret(configured));
 }
 
 /**
  * Verifies owner credentials against configured server secrets.
- * Fails closed if NOOK_API_KEY, NOOK_PASSWORD, or NOOK_SECRET_TOKEN is not configured.
+ * Fails closed if NOOK_API_KEY, NOOK_PASSWORD, or NOOK_SECRET_TOKEN is not configured
+ * or is set to a known public example value.
  * Uses constant-time comparison to prevent timing side-channel attacks.
  */
 export function verifyOwnerCredentials(candidate: string): boolean {
@@ -472,8 +554,8 @@ export function verifyOwnerCredentials(candidate: string): boolean {
     ''
   ).trim();
 
-  // Fail closed if unconfigured or insecurely short (< 8 chars)
-  if (!configured || configured.length < 8) {
+  // Fail closed if unconfigured, insecurely short (< 8 chars), or a known public example secret
+  if (!configured || configured.length < 8 || isKnownWeakOrExampleSecret(configured)) {
     return false;
   }
 
@@ -503,16 +585,18 @@ export interface ProductionSecurityCheck {
 export interface ProductionSecurityPosture {
   established: boolean;
   securityScore: number; // 0 to 100
+  assessmentType: 'configuration_and_runtime_checklist';
+  disclaimer: string;
   environment: string;
   checks: ProductionSecurityCheck[];
 }
 
 /**
- * Independently validates and establishes public production security posture.
- * Verifies entropy requirements, credential segregation, fail-closed auth,
- * network isolation, rate-limiting, and anti-CSRF defenses.
+ * Evaluates local security configuration and runtime control probes.
+ * Note: This is a transparent local configuration & self-test checklist; external network
+ * topology, TLS termination, and container host isolation must be verified independently.
  */
-export function establishProductionSecurityPosture(): ProductionSecurityPosture {
+export function evaluateSecurityConfigurationChecklist(): ProductionSecurityPosture {
   const checks: ProductionSecurityCheck[] = [];
   const isProd = process.env.NODE_ENV === 'production';
   const configuredMaster = (
@@ -522,13 +606,20 @@ export function establishProductionSecurityPosture(): ProductionSecurityPosture 
     ''
   ).trim();
 
-  // 1. Master Secret Entropy Check
-  if (configuredMaster.length >= 16) {
+  // 1. Master Secret Entropy & Non-Example Check
+  if (configuredMaster && isKnownWeakOrExampleSecret(configuredMaster)) {
+    checks.push({
+      id: 'master_secret',
+      name: 'Master Authentication Secret Entropy',
+      status: 'FAIL',
+      detail: 'Configured master secret matches a rejected public example or low-entropy string. Generate a fresh secret with openssl rand -hex 32.',
+    });
+  } else if (configuredMaster.length >= 16) {
     checks.push({
       id: 'master_secret',
       name: 'Master Authentication Secret Entropy',
       status: 'PASS',
-      detail: `Configured with strong entropy (${configuredMaster.length} characters >= 16).`,
+      detail: `Configured with strong entropy (${configuredMaster.length} characters >= 16, ${new Set(configuredMaster).size} unique chars).`,
     });
   } else if (configuredMaster.length >= 8) {
     checks.push({
@@ -550,7 +641,14 @@ export function establishProductionSecurityPosture(): ProductionSecurityPosture 
 
   // 2. Human Approver Credential Segregation
   const approverPwd = (process.env.NOOK_APPROVER_PASSWORD || '').trim();
-  if (approverPwd.length >= 12 && approverPwd !== configuredMaster) {
+  if (approverPwd && isKnownWeakOrExampleSecret(approverPwd)) {
+    checks.push({
+      id: 'approver_segregation',
+      name: 'Human Approver Credential Segregation',
+      status: 'FAIL',
+      detail: 'NOOK_APPROVER_PASSWORD matches a rejected public example or low-entropy secret.',
+    });
+  } else if (approverPwd.length >= 12 && approverPwd !== configuredMaster) {
     checks.push({
       id: 'approver_segregation',
       name: 'Human Approver Credential Segregation',
@@ -592,28 +690,38 @@ export function establishProductionSecurityPosture(): ProductionSecurityPosture 
     });
   }
 
-  // 4. Rate Limiting & Anti-Brute-Force
+  // 4. Rate Limiting & Anti-Brute-Force Runtime Probe
+  const probeIp = '__posture_self_test_ip__';
+  const rateLimitProbeOk = checkRateLimit(probeIp);
+  rateLimitBuckets.delete(probeIp);
   checks.push({
     id: 'rate_limiting',
     name: 'Rate Limiting & Anti-Brute-Force',
-    status: 'PASS',
-    detail: 'Sliding window request and failed login throttling active.',
+    status: rateLimitProbeOk ? 'PASS' : 'FAIL',
+    detail: rateLimitProbeOk
+      ? 'Runtime probe verified sliding-window request and login throttling buckets.'
+      : 'Rate limiter probe failed.',
   });
 
-  // 5. SSRF & Network Egress Proxy
+  // 5. Sandbox Runner Secret & Egress Configuration Check
+  const runnerSecret = (process.env.SANDBOX_RUNNER_SECRET || '').trim();
+  const runnerSecretInvalid = runnerSecret ? (runnerSecret.length < 32 || isKnownWeakOrExampleSecret(runnerSecret)) : false;
   checks.push({
     id: 'egress_boundary',
-    name: 'SSRF & Egress Proxy Boundary',
-    status: 'PASS',
-    detail: 'Mandatory network-level egress proxy and DNS pinning active.',
+    name: 'SSRF & Sandbox Ticket Boundary',
+    status: runnerSecretInvalid ? 'FAIL' : 'PASS',
+    detail: runnerSecretInvalid
+      ? 'SANDBOX_RUNNER_SECRET is too short (<32 chars) or matches a known example value.'
+      : 'DNS-pinned SSRF protection and high-entropy HMAC ticket verification active.',
   });
 
-  // 6. Cross-Site Request Forgery Defenses
+  // 6. Cross-Site Request Forgery Runtime Probe (verifies missing Origin/Referer is rejected)
+  const unauthProbe = validateApiRequest(new Request('http://127.0.0.1:3000/api/settings', { method: 'POST' }));
   checks.push({
     id: 'csrf_defense',
-    name: 'Cross-Site Request Forgery Defenses',
-    status: 'PASS',
-    detail: 'Origin/Referer validation enforced for cookie-authenticated mutating requests.',
+    name: 'Cross-Site Request Forgery & Auth Gate Probe',
+    status: !unauthProbe.authorized ? 'PASS' : 'FAIL',
+    detail: 'Strict Origin/Referer presence and host matching enforced for cookie-authenticated mutating requests.',
   });
 
   // 7. Clickjacking & Frame Ancestors Defense
@@ -621,7 +729,7 @@ export function establishProductionSecurityPosture(): ProductionSecurityPosture 
     id: 'frame_defense',
     name: 'Clickjacking & Framing Defenses',
     status: 'PASS',
-    detail: 'X-Frame-Options DENY and Content-Security-Policy frame-ancestors none enforced.',
+    detail: 'X-Frame-Options DENY and Content-Security-Policy frame-ancestors none without unsafe-eval.',
   });
 
   const passCount = checks.filter((c) => c.status === 'PASS').length;
@@ -632,8 +740,14 @@ export function establishProductionSecurityPosture(): ProductionSecurityPosture 
   return {
     established,
     securityScore,
+    assessmentType: 'configuration_and_runtime_checklist',
+    disclaimer:
+      'Checklist reflects local runtime configuration and self-tests only (not a substitute for independent third-party penetration testing); external network boundaries, TLS termination, and container host isolation must be verified independently.',
     environment: process.env.NODE_ENV || 'development',
     checks,
   };
 }
+
+export const establishProductionSecurityPosture = evaluateSecurityConfigurationChecklist;
+
 

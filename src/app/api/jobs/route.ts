@@ -1,15 +1,19 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { NextRequest, NextResponse } from 'next/server.js';
+import { validateApiRequest, unauthorizedResponse } from '../../../lib/auth.ts';
 import {
   enqueueJob,
   listJobs,
   getJobById,
   cancelJob,
-} from '@/lib/db';
-import { ensureWorkerStarted, tickWorker } from '@/lib/worker';
+  logAuditEvent,
+} from '../../../lib/db.ts';
+import { ensureWorkerStarted, tickWorker } from '../../../lib/worker.ts';
+import { validateCodeTestCommandBoundary } from '../../../lib/sandbox-ticket.ts';
 
-// Start the background worker process
-ensureWorkerStarted();
+// Start the background worker process unless explicitly disabled for a dedicated worker deployment
+if (process.env.NOOK_DISABLE_WEB_WORKER !== 'true') {
+  ensureWorkerStarted();
+}
 
 /**
  * GET /api/jobs
@@ -56,15 +60,56 @@ export async function POST(req: NextRequest) {
 
     // 1. Enqueue new job
     if (action === 'enqueue' || !action) {
+      const resolvedTaskType = taskType || 'research';
+      const resolvedPrompt = typeof prompt === 'string' ? prompt : '';
+
+      if (resolvedTaskType === 'code_test') {
+        if (auth.authMethod === 'api_key') {
+          logAuditEvent(
+            'JOB_ENQUEUE_BLOCKED',
+            'Blocked machine API key from enqueuing code_test job without interactive human session',
+            'blocked',
+            agentId || 'agent-scout'
+          );
+          return NextResponse.json(
+            {
+              error: 'Machine API keys cannot enqueue code_test execution jobs without interactive owner session authentication.',
+              code: 'CODE_TEST_REQUIRES_INTERACTIVE_OWNER',
+            },
+            { status: 403 }
+          );
+        }
+
+        const cmdToCheck = resolvedPrompt.trim() || 'node --version';
+        const boundary = validateCodeTestCommandBoundary(cmdToCheck);
+        if (!boundary.allowed) {
+          logAuditEvent(
+            'JOB_ENQUEUE_BLOCKED',
+            `Rejected arbitrary command in code_test job enqueue: ${boundary.reason}`,
+            'blocked',
+            agentId || 'agent-scout'
+          );
+          return NextResponse.json(
+            {
+              error: boundary.reason || 'Arbitrary shell commands are not permitted in code_test background jobs.',
+              code: 'CODE_TEST_COMMAND_BOUNDARY_VIOLATION',
+            },
+            { status: 403 }
+          );
+        }
+      }
+
       const job = enqueueJob({
         agentId: agentId || 'agent-scout',
-        taskType: taskType || 'research',
+        taskType: resolvedTaskType,
         title: title || 'Autonomous Background Task',
-        prompt: prompt || '',
+        prompt: resolvedPrompt,
       });
 
-      // Proactively trigger worker tick so execution starts immediately
-      tickWorker().catch(() => {});
+      // Proactively trigger worker tick unless web worker is disabled in dedicated worker topology
+      if (process.env.NOOK_DISABLE_WEB_WORKER !== 'true') {
+        tickWorker().catch(() => {});
+      }
 
       return NextResponse.json({
         success: true,

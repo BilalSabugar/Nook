@@ -924,6 +924,93 @@ export interface SynthesizeSolutionOptions {
   requireModel?: boolean;
 }
 
+const DEFAULT_APPROVED_OLLAMA_ORIGINS = new Set([
+  'http://localhost:11434',
+  'http://127.0.0.1:11434',
+  'http://[::1]:11434',
+  'http://host.docker.internal:11434',
+]);
+
+export function validateApprovedOllamaEndpoint(rawEndpoint?: string): {
+  allowed: boolean;
+  normalizedBaseUrl?: string;
+  reason?: string;
+} {
+  const candidate = (rawEndpoint || process.env.OLLAMA_BASE_URL || 'http://localhost:11434').trim();
+  if (!candidate) {
+    return { allowed: false, reason: 'Empty Ollama endpoint URL.' };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return { allowed: false, reason: 'Malformed Ollama endpoint URL.' };
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { allowed: false, reason: `Unsupported protocol "${parsed.protocol}". Only http: and https: are permitted.` };
+  }
+
+  if (parsed.username || parsed.password) {
+    return { allowed: false, reason: 'Credentials (username/password) are forbidden in Ollama endpoint URLs.' };
+  }
+
+  if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    return {
+      allowed: false,
+      reason: 'Ollama endpoint must be a clean base origin without custom paths, query strings, or fragments.',
+    };
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    hostname === '169.254.169.254' ||
+    hostname.startsWith('169.254.') ||
+    hostname === 'metadata.google.internal' ||
+    hostname === 'instance-data'
+  ) {
+    return { allowed: false, reason: `Cloud metadata host "${hostname}" is strictly forbidden.` };
+  }
+
+  const allowedOrigins = new Set<string>(DEFAULT_APPROVED_OLLAMA_ORIGINS);
+  const addConfiguredOrigin = (rawConfigUrl: string) => {
+    try {
+      const u = new URL(rawConfigUrl.trim());
+      if ((u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password) {
+        const h = u.hostname.toLowerCase();
+        if (h !== '169.254.169.254' && !h.startsWith('169.254.') && h !== 'metadata.google.internal') {
+          allowedOrigins.add(`${u.protocol}//${u.host.toLowerCase()}`);
+        }
+      }
+    } catch {
+      // ignore invalid env entry
+    }
+  };
+
+  if (process.env.OLLAMA_BASE_URL) {
+    addConfiguredOrigin(process.env.OLLAMA_BASE_URL);
+  }
+  if (process.env.NOOK_ALLOWED_OLLAMA_ORIGINS) {
+    for (const part of process.env.NOOK_ALLOWED_OLLAMA_ORIGINS.split(',')) {
+      if (part.trim()) addConfiguredOrigin(part.trim());
+    }
+  }
+
+  const normalizedOrigin = `${parsed.protocol}//${parsed.host.toLowerCase()}`;
+  if (!allowedOrigins.has(normalizedOrigin)) {
+    return {
+      allowed: false,
+      reason: `Endpoint origin "${normalizedOrigin}" is not in the approved Ollama origin allowlist (${Array.from(allowedOrigins).join(', ')}).`,
+    };
+  }
+
+  return {
+    allowed: true,
+    normalizedBaseUrl: normalizedOrigin,
+  };
+}
+
 /**
  * Model-driven plan synthesis.
  * Implements actual iterative code generation by querying configured LLM providers
@@ -954,6 +1041,19 @@ export async function synthesizeSolutionWithModel(
     anthropicApiKey ? 'anthropic' :
     (endpoint ? 'ollama' : undefined)
   );
+
+  // Strict SSRF & Destination Validation for Ollama Endpoint (NOOK-P1-03):
+  // Validate BEFORE any network connection or fallback decision.
+  let validatedOllamaBaseUrl = 'http://localhost:11434';
+  if (provider === 'ollama' || modelOptions?.endpoint) {
+    const endpointCheck = validateApprovedOllamaEndpoint(endpoint);
+    if (!endpointCheck.allowed || !endpointCheck.normalizedBaseUrl) {
+      throw new Error(
+        `SSRF Policy Violation: Unapproved Ollama endpoint '${endpoint || ''}': ${endpointCheck.reason || 'Destination not allowed'}`
+      );
+    }
+    validatedOllamaBaseUrl = endpointCheck.normalizedBaseUrl;
+  }
 
   const hasProviderCred =
     (provider === 'gemini' && Boolean(geminiApiKey)) ||
@@ -990,6 +1090,7 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
         const model = modelOptions?.model || 'gemini-1.5-flash';
         const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiApiKey)}`, {
           method: 'POST',
+          redirect: 'error',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
@@ -1011,6 +1112,7 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
         const model = modelOptions?.model || 'gpt-4o-mini';
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
+          redirect: 'error',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openaiApiKey}` },
           body: JSON.stringify({
             model,
@@ -1033,6 +1135,7 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
         const model = modelOptions?.model || 'claude-3-5-sonnet-20241022';
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
+          redirect: 'error',
           headers: {
             'Content-Type': 'application/json',
             'x-api-key': anthropicApiKey,
@@ -1053,10 +1156,10 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
           rawResponseText = data.content?.[0]?.text || '';
         }
       } else if (provider === 'ollama') {
-        const baseUrl = endpoint || 'http://localhost:11434';
         const model = modelOptions?.model || 'llama3.2:latest';
-        const res = await fetch(`${baseUrl}/api/generate`, {
+        const res = await fetch(`${validatedOllamaBaseUrl}/api/generate`, {
           method: 'POST',
+          redirect: 'error',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model,

@@ -178,8 +178,13 @@ export async function restoreWorkspaceBundleAtomically(
       fs.cpSync(sandboxesRoot, path.join(backupDir, 'sandboxes'), { recursive: true });
     }
 
+    let savepointActive = false;
     try {
-      // 4. Execute transactional SQLite import (rolls back SQLite automatically if it throws)
+      // 4. Open outer SQLite savepoint spanning both database import and filesystem swap
+      // so that if any filesystem write, hook, or integrity check fails, SQLite changes are rolled back too.
+      db.exec('SAVEPOINT nook_atomic_restore;');
+      savepointActive = true;
+
       const importStats = importWorkspaceSnapshot(bundle, db, {
         conflictStrategy,
         requireSignature: options?.requireSignature ?? Boolean(bundle?.requireSignature),
@@ -187,7 +192,7 @@ export async function restoreWorkspaceBundleAtomically(
       });
 
       if (typeof options?.beforeCommitHook === 'function') {
-        options.beforeCommitHook();
+        await options.beforeCommitHook();
       }
 
       // 5. Apply staged filesystem changes into live storageDir using safe confinement
@@ -219,11 +224,15 @@ export async function restoreWorkspaceBundleAtomically(
         }
       }
 
-      // 6. Verify physical database & foreign-key integrity post-restore
+      // 6. Verify physical database & foreign-key integrity prior to committing the outer savepoint
       const integrity = verifyDatabaseIntegrity(db);
       if (!integrity.healthy) {
         throw new Error(`Database integrity check failed post-import: ${integrity.integrityCheck}`);
       }
+
+      // 7. Commit outer SQLite savepoint now that both SQLite and filesystem changes have succeeded
+      db.exec('RELEASE SAVEPOINT nook_atomic_restore;');
+      savepointActive = false;
 
       return {
         ok: true as const,
@@ -237,6 +246,17 @@ export async function restoreWorkspaceBundleAtomically(
         },
       };
     } catch (commitErr: unknown) {
+      // Roll back uncommitted SQLite mutations inside outer savepoint
+      if (savepointActive) {
+        try {
+          db.exec('ROLLBACK TO SAVEPOINT nook_atomic_restore;');
+          db.exec('RELEASE SAVEPOINT nook_atomic_restore;');
+        } catch {
+          // ignore if savepoint already closed
+        }
+        savepointActive = false;
+      }
+
       // Roll back live filesystem from backup
       if (hadStateFile && fs.existsSync(path.join(backupDir, 'workspace-state.json'))) {
         fs.cpSync(path.join(backupDir, 'workspace-state.json'), stateFile, { force: true });

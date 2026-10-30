@@ -1,7 +1,17 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { exportWorkspaceSnapshot, scrubSensitiveData, seedInitialSpaces, computeSnapshotChecksum } from '@/lib/db';
-import { INITIAL_SPACES } from '@/lib/store';
+import { NextRequest, NextResponse } from 'next/server.js';
+import { validateApiRequest, unauthorizedResponse } from '../../../../lib/auth.ts';
+import {
+  exportWorkspaceSnapshot,
+  scrubSensitiveData,
+  seedInitialSpaces,
+  computeSnapshotChecksum,
+  computeSnapshotSignature,
+  SAFE_SNAPSHOT_ID_PATTERN,
+  SAFE_SNAPSHOT_FILENAME_PATTERN,
+  MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT,
+  MAX_SNAPSHOT_SANDBOX_FILE_BYTES,
+} from '../../../../lib/db.ts';
+import { INITIAL_SPACES } from '../../../../lib/store.ts';
 import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
@@ -38,8 +48,30 @@ export async function GET(req: NextRequest) {
       snapshot = exportWorkspaceSnapshot();
     }
 
-    // Ensure computerStates accurately reflects files on server disk
-    const computerStates = { ...(workspaceState.computerStates || {}) };
+    // Ensure computerStates accurately reflects safe, bounded files on server disk
+    const rawComputerStates = workspaceState.computerStates && typeof workspaceState.computerStates === 'object'
+      ? workspaceState.computerStates
+      : {};
+    const computerStates: Record<string, any> = {};
+    for (const [agentId, st] of Object.entries(rawComputerStates)) {
+      if (SAFE_SNAPSHOT_ID_PATTERN.test(agentId) && agentId !== '.' && agentId !== '..') {
+        const rawFiles = Array.isArray((st as any)?.files) ? (st as any).files : [];
+        const safeFiles = rawFiles
+          .filter(
+            (f: any) =>
+              f &&
+              typeof f.name === 'string' &&
+              SAFE_SNAPSHOT_FILENAME_PATTERN.test(f.name) &&
+              f.name !== '.' &&
+              f.name !== '..' &&
+              typeof f.content === 'string' &&
+              Buffer.byteLength(f.content, 'utf8') <= MAX_SNAPSHOT_SANDBOX_FILE_BYTES
+          )
+          .slice(0, MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT);
+        computerStates[agentId] = { ...(st as object), files: safeFiles };
+      }
+    }
+
     const sandboxesDir = path.join(STORAGE_DIR, 'sandboxes');
     if (fsSync.existsSync(sandboxesDir)) {
       try {
@@ -47,15 +79,21 @@ export async function GET(req: NextRequest) {
         for (const entry of agentEntries) {
           if (entry.isDirectory()) {
             const agentId = entry.name;
+            if (!SAFE_SNAPSHOT_ID_PATTERN.test(agentId) || agentId === '.' || agentId === '..') {
+              continue;
+            }
             const wsDir = path.join(sandboxesDir, agentId, 'workspace');
             if (fsSync.existsSync(wsDir)) {
               const fileEntries = await fs.readdir(wsDir, { withFileTypes: true });
               const files: Array<{ name: string; content: string }> = [];
               for (const fe of fileEntries) {
-                if (fe.isFile()) {
+                if (fe.isFile() && SAFE_SNAPSHOT_FILENAME_PATTERN.test(fe.name) && fe.name !== '.' && fe.name !== '..') {
                   try {
                     const content = await fs.readFile(path.join(wsDir, fe.name), 'utf8');
-                    files.push({ name: fe.name, content });
+                    if (Buffer.byteLength(content, 'utf8') <= MAX_SNAPSHOT_SANDBOX_FILE_BYTES) {
+                      files.push({ name: fe.name, content });
+                    }
+                    if (files.length >= MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT) break;
                   } catch {}
                 }
               }
@@ -82,7 +120,15 @@ export async function GET(req: NextRequest) {
     });
 
     if (exportBundle.manifest) {
-      exportBundle.manifest.checksum = `sha256:${computeSnapshotChecksum(exportBundle)}`;
+      const finalChecksum = `sha256:${computeSnapshotChecksum(exportBundle)}`;
+      const finalSignature = computeSnapshotSignature(finalChecksum);
+      exportBundle.manifest.checksum = finalChecksum;
+      exportBundle.manifest.integrityChecksum = finalChecksum;
+      if (finalSignature) {
+        exportBundle.manifest.signature = finalSignature;
+      } else {
+        delete exportBundle.manifest.signature;
+      }
     }
 
     return new NextResponse(JSON.stringify(exportBundle, null, 2), {

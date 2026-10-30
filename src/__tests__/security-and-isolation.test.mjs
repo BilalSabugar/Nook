@@ -2683,6 +2683,113 @@ test('Snapshot Import Security: Path traversal containment, atomic rollback, pro
     'No sandbox directory may be created when import fails'
   );
 
+  // 2b. True post-SQLite atomic rollback: if a failure occurs AFTER importWorkspaceSnapshot
+  // mutates SQLite (e.g. during filesystem swap / beforeCommitHook), BOTH SQLite and filesystem roll back!
+  const midFlightRollbackBundle = {
+    schemaVersion: 2,
+    workspace: {
+      sentinel: 'mid-flight-failure-must-rollback',
+      computerStates: {
+        'agent-midflight-rollback': {
+          files: [{ name: 'transient.txt', content: 'must-not-remain' }],
+        },
+      },
+    },
+    spaces: [
+      {
+        id: 'space-midflight-rollback',
+        name: 'Transient Space That Must Roll Back',
+        description: 'Created inside savepoint before post-SQLite failure',
+      },
+    ],
+    missions: [
+      {
+        id: 'msn-midflight-rollback',
+        title: 'Transient Mission That Must Roll Back',
+        objective: 'Verify SAVEPOINT rolls back SQLite changes on post-SQLite error',
+        spaceId: 'space-midflight-rollback',
+        status: 'completed',
+        tasks: [],
+      },
+    ],
+  };
+
+  let missionExistedDuringSavepoint = false;
+  const midFlightRes = await restoreWorkspaceBundleAtomically(midFlightRollbackBundle, {
+    beforeCommitHook: () => {
+      // At this point inside restoreWorkspaceBundleAtomically, importWorkspaceSnapshot has already run!
+      missionExistedDuringSavepoint = getMissionById('msn-midflight-rollback') !== null;
+      throw new Error('Simulated post-SQLite filesystem commit failure');
+    },
+  });
+  assert.equal(
+    missionExistedDuringSavepoint,
+    true,
+    'Mission must exist in SQLite inside the active savepoint before post-SQLite failure'
+  );
+  assert.equal(midFlightRes.ok, false, 'Restore must fail when beforeCommitHook throws');
+  assert.ok(midFlightRes.body.error.includes('Simulated post-SQLite filesystem commit failure'));
+  assert.equal(
+    getMissionById('msn-midflight-rollback'),
+    null,
+    'SQLite mission inserted by importWorkspaceSnapshot must be rolled back when post-SQLite commit fails'
+  );
+  assert.equal(
+    fs.readFileSync(stateFilePath, 'utf-8'),
+    originalStateContent,
+    'workspace-state.json must remain untouched after post-SQLite rollback'
+  );
+  assert.equal(
+    fs.existsSync(path.join(process.cwd(), '.nook_storage', 'sandboxes', 'agent-midflight-rollback')),
+    false,
+    'Sandbox directory must not exist after post-SQLite rollback'
+  );
+
+  // 2c. Full HTTP GET /api/workspace/export -> POST /api/workspace/import round-trip verification
+  const { GET: exportRouteGet } = await import('../app/api/workspace/export/route.ts');
+  const { POST: importRoutePost } = await import('../app/api/workspace/import/route.ts');
+  const origRouteKey = process.env.NOOK_API_KEY;
+  try {
+    process.env.NOOK_API_KEY = `route-roundtrip-${crypto.randomBytes(16).toString('hex')}`;
+    const exportReq = new NextRequest('http://localhost:3000/api/workspace/export', {
+      headers: { 'x-nook-api-key': process.env.NOOK_API_KEY },
+    });
+    const exportRes = await exportRouteGet(exportReq);
+    assert.equal(exportRes.status, 200, 'GET /api/workspace/export must return 200');
+    const exportedHttpBundle = await exportRes.json();
+
+    assert.equal(
+      exportedHttpBundle.manifest.checksum,
+      exportedHttpBundle.manifest.integrityChecksum,
+      'Exported HTTP bundle checksum and integrityChecksum must match the complete bundle'
+    );
+    const directValidation = validateWorkspaceSnapshot(exportedHttpBundle, {
+      requireSignature: true,
+      signingSecret: process.env.NOOK_API_KEY,
+    });
+    assert.equal(directValidation.valid, true, 'Exported HTTP bundle must pass strict integrity + signature validation');
+    assert.equal(directValidation.signatureStatus, 'verified');
+
+    const importReq = new NextRequest('http://localhost:3000/api/workspace/import', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': process.env.NOOK_API_KEY,
+      },
+      body: JSON.stringify(exportedHttpBundle),
+    });
+    const importRes = await importRoutePost(importReq);
+    assert.equal(importRes.status, 200, 'POST /api/workspace/import must accept HTTP-exported bundle with 200');
+    const importBody = await importRes.json();
+    assert.equal(importBody.validation.valid, true);
+    assert.equal(importBody.validation.signatureStatus, 'verified');
+  } finally {
+    if (origRouteKey !== undefined) process.env.NOOK_API_KEY = origRouteKey;
+    else delete process.env.NOOK_API_KEY;
+    // Restore original workspace-state.json after route round-trip
+    fs.writeFileSync(stateFilePath, originalStateContent, 'utf-8');
+  }
+
   // 3. NOOK-P2-12: Integrity checksum vs HMAC provenance signature
   const signingSecret = 'snapshot-hmac-test-signing-key-32bytes!';
   const origApiKey = process.env.NOOK_API_KEY;
@@ -2790,8 +2897,8 @@ test('Secret Hygiene: Rejects known .env.example secrets and low-variety strings
     'nook-owner-change-me-32-chars-minimum',
     'nook-approver-distinct-human-secret-32c',
     'nook-api-key-change-me-32-chars-minimum',
-    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    '0123456789abcdef'.repeat(4),
+    'a'.repeat(32),
   ];
 
   for (const weak of bannedExamples) {
@@ -2818,14 +2925,14 @@ test('Secret Hygiene: Rejects known .env.example secrets and low-variety strings
     assert.equal(authRes.authorized, false, 'validateApiRequest must reject public .env.example API key');
 
     // Doctor CLI check fails when example secrets are configured
-    process.env.SANDBOX_RUNNER_SECRET = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    process.env.SANDBOX_RUNNER_SECRET = '0123456789abcdef'.repeat(4);
     const failedDoctor = runDoctorChecks({ production: true });
     assert.equal(failedDoctor.passed, false, 'Doctor must fail when public example secrets are used');
 
-    // Doctor CLI succeeds when strong distinct secrets are configured
-    process.env.NOOK_API_KEY = 'a9F3kL8mQ2vX7zP1wR6yT4uJ0nB5cE8d';
-    process.env.NOOK_APPROVER_PASSWORD = 'h7G2pL9sK4mW1xQ8vN3bZ6cR0tY5jF2e';
-    process.env.SANDBOX_RUNNER_SECRET = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+    // Doctor CLI succeeds when strong distinct secrets are generated at runtime
+    process.env.NOOK_API_KEY = crypto.randomBytes(24).toString('base64url');
+    process.env.NOOK_APPROVER_PASSWORD = crypto.randomBytes(24).toString('base64url');
+    process.env.SANDBOX_RUNNER_SECRET = crypto.randomBytes(32).toString('hex');
     const passedDoctor = runDoctorChecks({ production: true });
     assert.equal(passedDoctor.passed, true, 'Doctor must pass when high-entropy distinct secrets are configured');
   } finally {

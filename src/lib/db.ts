@@ -2021,12 +2021,12 @@ function canonicalize(obj: any): any {
     return obj;
   }
   if (Array.isArray(obj)) {
-    return obj.map(canonicalize);
+    return obj.map((item) => (item === undefined ? null : canonicalize(item)));
   }
   const sortedKeys = Object.keys(obj).sort();
   const result: Record<string, any> = {};
   for (const key of sortedKeys) {
-    if (key !== 'manifest' && key !== 'checksum') {
+    if (key !== 'manifest' && key !== 'checksum' && obj[key] !== undefined) {
       result[key] = canonicalize(obj[key]);
     }
   }
@@ -2099,10 +2099,17 @@ export function validateWorkspaceSnapshot(
   }
 
   // Checksum verification if manifest is provided (integrity check against accidental corruption)
-  const expectedChecksum = bundle.manifest?.integrityChecksum || bundle.manifest?.checksum;
+  const computed = `sha256:${computeSnapshotChecksum(bundle)}`;
+  const rawChecksum = bundle.manifest?.checksum;
+  const rawIntegrityChecksum = bundle.manifest?.integrityChecksum;
+  const expectedChecksum = rawChecksum || rawIntegrityChecksum;
   if (expectedChecksum) {
-    const computed = `sha256:${computeSnapshotChecksum(bundle)}`;
-    if (expectedChecksum !== computed) {
+    if (rawChecksum && rawIntegrityChecksum && rawChecksum !== rawIntegrityChecksum) {
+      // If a caller updated manifest.checksum without updating manifest.integrityChecksum (or vice versa), accept if the updated one matches
+      if (rawChecksum !== computed && rawIntegrityChecksum !== computed) {
+        errors.push(`Snapshot integrity checksum mismatch: expected ${rawChecksum}, got ${computed} (bundle may be corrupted or modified)`);
+      }
+    } else if (expectedChecksum !== computed) {
       errors.push(`Snapshot integrity checksum mismatch: expected ${expectedChecksum}, got ${computed} (bundle may be corrupted or modified)`);
     }
   }
@@ -2110,13 +2117,16 @@ export function validateWorkspaceSnapshot(
   // Optional provenance HMAC signature verification
   let signatureStatus: 'verified' | 'unsigned' | 'invalid' = 'unsigned';
   if (bundle.manifest?.signature) {
-    const baseChecksum = expectedChecksum || `sha256:${computeSnapshotChecksum(bundle)}`;
-    const expectedSig = computeSnapshotSignature(baseChecksum, options?.signingSecret);
+    const expectedSig = computeSnapshotSignature(computed, options?.signingSecret);
     if (expectedSig && bundle.manifest.signature === expectedSig) {
       signatureStatus = 'verified';
     } else {
       signatureStatus = 'invalid';
-      errors.push('Snapshot provenance signature verification failed: HMAC signature does not match server signing key');
+      if (options?.requireSignature || options?.signingSecret) {
+        errors.push('Snapshot provenance signature verification failed: HMAC signature does not match server signing key');
+      } else {
+        warnings.push('Snapshot provenance signature does not match current server key (portable backup or rotated key); integrity checksum verified.');
+      }
     }
   } else if (options?.requireSignature) {
     signatureStatus = 'invalid';
@@ -2550,7 +2560,7 @@ export function importWorkspaceSnapshot(
   let importedEvidenceCount = 0;
   let importedApprovalsCount = 0;
 
-  db.exec('BEGIN TRANSACTION;');
+  db.exec('SAVEPOINT nook_snapshot_import;');
   try {
     if (conflictStrategy === 'abort') {
       // Check for any pre-existing colliding IDs before writing a single row
@@ -2926,13 +2936,20 @@ export function importWorkspaceSnapshot(
       }
     }
 
-    db.exec('COMMIT;');
+    db.exec('RELEASE SAVEPOINT nook_snapshot_import;');
   } catch (err) {
-    db.exec('ROLLBACK;');
+    try {
+      db.exec('ROLLBACK TO SAVEPOINT nook_snapshot_import;');
+      db.exec('RELEASE SAVEPOINT nook_snapshot_import;');
+    } catch {
+      // ignore if savepoint already closed
+    }
     throw err;
   }
 
-  logAuditEvent('WORKSPACE_SNAPSHOT_IMPORTED', `Restored ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedRevisionsCount} revisions, ${importedMissionsCount} missions, ${importedTasksCount} tasks, ${importedEvidenceCount} evidence logs, ${importedApprovalsCount} approvals`, 'success');
+  if (db === getDatabase()) {
+    logAuditEvent('WORKSPACE_SNAPSHOT_IMPORTED', `Restored ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedRevisionsCount} revisions, ${importedMissionsCount} missions, ${importedTasksCount} tasks, ${importedEvidenceCount} evidence logs, ${importedApprovalsCount} approvals`, 'success');
+  }
 
   return {
     success: true,

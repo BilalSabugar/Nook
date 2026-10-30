@@ -621,6 +621,136 @@ test('MCP Server Transport: SSE Stream & Discovery GET', async () => {
   assert.ok(eventPayload.includes('data: /api/mcp?sessionId='), 'SSE stream must deliver session endpoint url');
 });
 
+test('MCP Interoperability: Complete 2024-11-05 Protocol Suite (CORS, roots, subscriptions, completion, and bidirectional SSE)', async () => {
+  const { handleJsonRpcRequest, OPTIONS, POST, GET } = await import('../app/api/mcp/route.ts');
+  const { NextRequest } = await import('next/server.js');
+
+  // 1. CORS Preflight OPTIONS
+  const optionsRes = await OPTIONS();
+  assert.equal(optionsRes.status, 204);
+  assert.equal(optionsRes.headers.get('Access-Control-Allow-Origin'), '*');
+  assert.ok(optionsRes.headers.get('Access-Control-Allow-Methods').includes('POST'));
+
+  // 2. roots/list
+  const rootsRes = await handleJsonRpcRequest({ method: 'roots/list', id: 50 });
+  assert.equal(rootsRes.jsonrpc, '2.0');
+  assert.equal(rootsRes.id, 50);
+  assert.ok(Array.isArray(rootsRes.result.roots));
+  assert.equal(rootsRes.result.roots[0].uri, 'nook://spaces');
+
+  // 3. resources/subscribe & resources/unsubscribe
+  const subRes = await handleJsonRpcRequest({
+    method: 'resources/subscribe',
+    params: { uri: 'nook://spaces/space-general/documents/doc-1' },
+    id: 51,
+  });
+  assert.equal(subRes.id, 51);
+  assert.deepEqual(subRes.result, {});
+
+  const unsubRes = await handleJsonRpcRequest({
+    method: 'resources/unsubscribe',
+    params: { uri: 'nook://spaces/space-general/documents/doc-1' },
+    id: 52,
+  });
+  assert.equal(unsubRes.id, 52);
+  assert.deepEqual(unsubRes.result, {});
+
+  // 4. completion/complete for prompt arguments
+  const promptCompRes = await handleJsonRpcRequest({
+    method: 'completion/complete',
+    params: {
+      ref: { type: 'ref/prompt', name: 'research_brief' },
+      argument: { name: 'topic', value: 'auto' },
+    },
+    id: 53,
+  });
+  assert.equal(promptCompRes.id, 53);
+  assert.ok(Array.isArray(promptCompRes.result.completion.values));
+  assert.ok(promptCompRes.result.completion.values.some((v) => v.toLowerCase().includes('auto')));
+
+  // 5. completion/complete for resource URIs
+  const resCompRes = await handleJsonRpcRequest({
+    method: 'completion/complete',
+    params: {
+      ref: { type: 'ref/resource' },
+      argument: { name: 'uri', value: 'nook://' },
+    },
+    id: 54,
+  });
+  assert.equal(resCompRes.id, 54);
+  assert.ok(Array.isArray(resCompRes.result.completion.values));
+  assert.ok(resCompRes.result.completion.values[0].startsWith('nook://'));
+
+  // 6. JSON-RPC 2.0 Empty Batch Error Code -32600
+  const emptyBatchReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify([]),
+  });
+  const emptyBatchRes = await POST(emptyBatchReq);
+  assert.equal(emptyBatchRes.status, 400);
+  const emptyBatchData = await emptyBatchRes.json();
+  assert.equal(emptyBatchData.error.code, -32600);
+
+  // 7. tools/call returns explicit isError: false on success
+  const toolCallRes = await handleJsonRpcRequest({
+    method: 'tools/call',
+    params: {
+      name: 'calculate',
+      arguments: { expression: '7 * 6' },
+    },
+    id: 55,
+  });
+  assert.equal(toolCallRes.result.isError, false);
+  assert.ok(toolCallRes.result.content[0].text.includes('42'));
+
+  // 8. tools/list annotations presence
+  const toolListRes = await handleJsonRpcRequest({ method: 'tools/list', id: 56 });
+  for (const t of toolListRes.result.tools) {
+    assert.ok(t.annotations, `Tool ${t.name} must declare annotations object`);
+    assert.equal(typeof t.annotations.readOnlyHint, 'boolean');
+    assert.equal(typeof t.annotations.destructiveHint, 'boolean');
+  }
+
+  // 9. Bidirectional SSE Stream Message Delivery
+  const sseConnReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'GET',
+    headers: {
+      'accept': 'text/event-stream',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+  });
+  const sseConnRes = await GET(sseConnReq);
+  const streamReader = sseConnRes.body.getReader();
+  const initChunk = await streamReader.read();
+  const initText = new TextDecoder().decode(initChunk.value);
+  const match = initText.match(/data: \/api\/mcp\?sessionId=([a-zA-Z0-9_-]+)/);
+  assert.ok(match, 'Must extract sessionId from SSE endpoint event');
+  const activeSessionId = match[1];
+
+  // Client posts message targeting activeSessionId
+  const ssePostReq = new NextRequest(`http://localhost:3000/api/mcp?sessionId=${activeSessionId}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify({ method: 'ping', id: 777 }),
+  });
+  const ssePostRes = await POST(ssePostReq);
+  assert.equal(ssePostRes.status, 202, 'POST to active SSE session returns 202 Accepted');
+
+  // Verify response message arrived over SSE stream
+  const msgChunk = await streamReader.read();
+  const msgText = new TextDecoder().decode(msgChunk.value);
+  assert.ok(msgText.includes('event: message'), 'Message must be emitted over active SSE stream');
+  assert.ok(msgText.includes('"id":777') || msgText.includes('"id": 777'));
+});
+
+
 
 
 

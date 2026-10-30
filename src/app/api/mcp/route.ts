@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server.js';
+import crypto from 'node:crypto';
 import { REGISTERED_MCP_TOOLS } from '../../../lib/mcp-registry.ts';
 import type { MCPToolDefinition } from '../../../lib/mcp-registry.ts';
 import { validateApiRequest, unauthorizedResponse } from '../../../lib/auth.ts';
 import { safeFetch } from '../../../lib/ssrf.ts';
-import { logAuditEvent, listSpacesWithDocuments } from '../../../lib/db.ts';
-import { executePluginTool } from '../../../lib/plugins.ts';
+import { logAuditEvent, listSpacesWithDocuments, saveDocumentWithRevision } from '../../../lib/db.ts';
+import { executePluginTool, getAllPluginTools } from '../../../lib/plugins.ts';
 import { INITIAL_SPACES } from '../../../lib/store.ts';
 
 /**
@@ -324,16 +325,61 @@ function generatePromptMessages(name: string, args: Record<string, string>): {
 }
 
 // ==============================================================
-// JSON-RPC 2.0 PROTOCOL ENGINE
+// JSON-RPC 2.0 PROTOCOL ENGINE & MCP 2024-11-05 SPECIFICATION
 // ==============================================================
 
+const corsHeaders: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-nook-api-key, x-nook-session-token, Mcp-Session-Id, Last-Event-ID',
+  'Access-Control-Expose-Headers': 'Mcp-Session-Id',
+};
+
+interface SseSession {
+  id: string;
+  controller: ReadableStreamDefaultController<Uint8Array>;
+  createdAt: number;
+}
+
+const g = globalThis as unknown as { _mcpSseSessions?: Map<string, SseSession> };
+if (!g._mcpSseSessions) {
+  g._mcpSseSessions = new Map<string, SseSession>();
+}
+const sseSessions = g._mcpSseSessions;
+
+export function sendMcpSessionMessage(sessionId: string, message: any): boolean {
+  const session = sseSessions.get(sessionId);
+  if (!session) return false;
+  try {
+    const encoder = new TextEncoder();
+    const payload = JSON.stringify(message);
+    session.controller.enqueue(encoder.encode(`event: message\r\ndata: ${payload}\r\n\r\n`));
+    return true;
+  } catch {
+    sseSessions.delete(sessionId);
+    return false;
+  }
+}
+
 export async function handleJsonRpcRequest(body: any): Promise<any> {
-  const { method, params, id } = body || {};
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32600, message: 'Invalid Request: Expected a JSON object.' },
+    };
+  }
+
+  const { method, params } = body;
+  const hasId = 'id' in body;
+  const id = body.id;
+  const isNotification = !hasId || id === undefined;
+  const responseId = hasId ? (id ?? null) : 1;
 
   if (!method || typeof method !== 'string') {
     return {
       jsonrpc: '2.0',
-      id: id ?? null,
+      id: hasId ? (id ?? null) : null,
       error: { code: -32600, message: 'Invalid Request: method string is required.' },
     };
   }
@@ -342,14 +388,15 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
   if (method === 'initialize') {
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
         protocolVersion: '2024-11-05',
         capabilities: {
           tools: { listChanged: true },
-          resources: { subscribe: false, listChanged: true },
+          resources: { subscribe: true, listChanged: true },
           prompts: { listChanged: true },
           logging: {},
+          roots: { listChanged: true },
         },
         serverInfo: {
           name: 'nook',
@@ -360,48 +407,98 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
     };
   }
 
-  // 2. notifications/initialized
-  if (method === 'notifications/initialized') {
-    if (id === undefined || id === null) {
-      return null; // Standard notification returns no body
+  // 2. notifications/initialized & initialized
+  if (method === 'notifications/initialized' || method === 'initialized') {
+    if (isNotification || id === null) {
+      return null; // Standard notification returns no body (204)
     }
-    return { jsonrpc: '2.0', id, result: {} };
+    return { jsonrpc: '2.0', id: responseId, result: {} };
   }
 
-  // 3. ping
+  // 3. notifications/cancelled or general notification methods
+  if (method.startsWith('notifications/') && isNotification) {
+    return null;
+  }
+
+  // 4. ping
   if (method === 'ping') {
-    return { jsonrpc: '2.0', id: id ?? 1, result: {} };
+    return { jsonrpc: '2.0', id: responseId, result: {} };
   }
 
-  // 4. tools/list
+  // 5. tools/list
   if (method === 'tools/list') {
+    const coreTools = REGISTERED_MCP_TOOLS.map((t) => ({
+      name: t.name,
+      description: t.description,
+      readOnlyHint: t.readOnlyHint,
+      destructiveHint: t.destructiveHint,
+      idempotentHint: t.idempotentHint,
+      openWorldHint: t.openWorldHint,
+      annotations: {
+        readOnlyHint: t.readOnlyHint,
+        destructiveHint: t.destructiveHint,
+        idempotentHint: t.idempotentHint,
+        openWorldHint: t.openWorldHint,
+      },
+      inputSchema: t.inputSchema,
+    }));
+
+    const pluginTools = getAllPluginTools().map(({ tool }) => ({
+      name: tool.name,
+      description: tool.description,
+      readOnlyHint: tool.readOnlyHint,
+      destructiveHint: tool.destructiveHint,
+      idempotentHint: tool.idempotentHint,
+      openWorldHint: tool.openWorldHint,
+      annotations: {
+        readOnlyHint: tool.readOnlyHint,
+        destructiveHint: tool.destructiveHint,
+        idempotentHint: tool.idempotentHint,
+        openWorldHint: tool.openWorldHint,
+      },
+      inputSchema: tool.inputSchema,
+    }));
+
+    const seen = new Set<string>();
+    const allTools: any[] = [];
+    for (const t of [...coreTools, ...pluginTools]) {
+      if (!seen.has(t.name)) {
+        seen.add(t.name);
+        allTools.push(t);
+      }
+    }
+
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
-        tools: REGISTERED_MCP_TOOLS,
+        tools: allTools,
       },
     };
   }
 
-  // 5. tools/call
+  // 6. tools/call
   if (method === 'tools/call') {
-    const { name, arguments: args } = params || {};
+    const name = params?.name;
+    const args = params?.arguments ?? params?.args ?? params ?? {};
 
     if (!name) {
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         error: { code: -32602, message: 'Tool name is required in params' },
       };
     }
 
     const toolDef = REGISTERED_MCP_TOOLS.find((t) => t.name === name);
-    if (!toolDef) {
+    const pluginTools = getAllPluginTools();
+    const pluginMatch = pluginTools.find((pt) => pt.tool.name === name);
+
+    if (!toolDef && !pluginMatch && name !== 'read_space_document' && name !== 'save_to_space' && name !== 'execute_command' && name !== 'browse_url') {
       logAuditEvent('MCP_UNKNOWN_TOOL', `Attempted call to unknown MCP tool: "${name}"`, 'error');
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         error: {
           code: -32601,
           message: `Unknown or unsupported MCP tool: "${name}". Valid tools are: ${REGISTERED_MCP_TOOLS.map((t) => t.name).join(', ')}`,
@@ -449,9 +546,10 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
         if (titles.length === 0) {
           return {
             jsonrpc: '2.0',
-            id: id ?? 1,
+            id: responseId,
             result: {
               content: [{ type: 'text', text: `No search results found for "${query}".` }],
+              isError: false,
             },
           };
         }
@@ -466,15 +564,16 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
 
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: `Search Results for "${query}":\n\n${formattedResults}` }],
+            isError: false,
           },
         };
       } catch (searchErr: any) {
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: `Live web search failed: ${searchErr.message || 'Network error'}` }],
             isError: true,
@@ -489,7 +588,7 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
       if (!targetUrl) {
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: 'Error: URL parameter is required.' }],
             isError: true,
@@ -510,7 +609,7 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
         if (!fetchResult.ok) {
           return {
             jsonrpc: '2.0',
-            id: id ?? 1,
+            id: responseId,
             result: {
               content: [{ type: 'text', text: `Failed to fetch URL: HTTP ${fetchResult.status} ${fetchResult.statusText}` }],
               isError: true,
@@ -534,7 +633,7 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
 
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [
               {
@@ -542,13 +641,14 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
                 text: `# ${pageTitle}\n\n**Source:** ${fetchResult.finalUrl}\n\n${cleanText}`,
               },
             ],
+            isError: false,
           },
         };
       } catch (fetchErr: any) {
         logAuditEvent('MCP_TOOL_EXEC', `fetch_url blocked/failed for "${targetUrl}": ${fetchErr.message}`, 'error');
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: `URL fetch error: ${fetchErr.message}` }],
             isError: true,
@@ -563,7 +663,7 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
       if (!/^[0-9+\-*/().\s^%]+$/.test(expr)) {
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: 'Error: Invalid mathematical expression.' }],
             isError: true,
@@ -574,15 +674,16 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
         const answer = evaluateSafeMath(expr);
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: `Calculation result: ${answer}` }],
+            isError: false,
           },
         };
       } catch (err: any) {
         return {
           jsonrpc: '2.0',
-          id: id ?? 1,
+          id: responseId,
           result: {
             content: [{ type: 'text', text: `Error evaluating math expression: ${err.message}` }],
             isError: true,
@@ -601,30 +702,137 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
       const formatted = `# ${title}\n\n## 1. Executive Summary\n${notes.slice(0, 300).trim()}...\n\n## 2. Key Specifications\n${bulletPoints || '- No specifications provided.'}\n\n## 3. Action Items\n- [ ] Review technical content with assigned Coworker\n- [ ] Commit finalized draft to Living Spaces canvas\n\n*Generated via Nook MCP Document Engine*`;
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         result: {
           content: [{ type: 'text', text: formatted }],
+          isError: false,
         },
       };
     }
 
-    // Plugin-backed Tools: github_get_repo_summary, analyze_document_structure
-    if (name === 'github_get_repo_summary' || name === 'analyze_document_structure') {
+    // Plugin-backed Tools
+    if (pluginMatch || name === 'github_get_repo_summary' || name === 'analyze_document_structure') {
       const pluginResult = await executePluginTool(name, args || {});
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
-        result: pluginResult,
+        id: responseId,
+        result: {
+          ...pluginResult,
+          isError: pluginResult.isError || false,
+        },
+      };
+    }
+
+    // Standard Nook tools: read_space_document, save_to_space, browse_url, execute_command
+    if (name === 'read_space_document') {
+      const docId = String(args?.documentId || args?.id || '');
+      const doc = getLivingDocument(docId);
+      if (!doc) {
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: `Document not found: "${docId}"` }],
+            isError: true,
+          },
+        };
+      }
+      return {
+        jsonrpc: '2.0',
+        id: responseId,
+        result: {
+          content: [{ type: 'text', text: doc.content }],
+          isError: false,
+        },
+      };
+    }
+
+    if (name === 'save_to_space') {
+      const title = String(args?.title || 'Untitled Document');
+      const content = String(args?.content || '');
+      const spaceId = String(args?.spaceId || 'space-general');
+      const docId = String(args?.id || `doc-${Date.now()}`);
+
+      try {
+        saveDocumentWithRevision({
+          id: docId,
+          spaceId,
+          title,
+          content,
+          authorAgentId: 'mcp-client',
+        });
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: `Document "${title}" saved to Space ${spaceId} (ID: ${docId}).` }],
+            isError: false,
+          },
+        };
+      } catch (err: any) {
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: `Failed to save document: ${err.message}` }],
+            isError: true,
+          },
+        };
+      }
+    }
+
+    if (name === 'browse_url') {
+      const url = String(args?.url || '');
+      if (!url) {
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: 'URL parameter is required.' }],
+            isError: true,
+          },
+        };
+      }
+      try {
+        const fetchRes = await safeFetch(url, { timeoutMs: 8000 });
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: fetchRes.ok ? fetchRes.bodyText.slice(0, 5000) : `HTTP ${fetchRes.status}: ${fetchRes.statusText}` }],
+            isError: !fetchRes.ok,
+          },
+        };
+      } catch (err: any) {
+        return {
+          jsonrpc: '2.0',
+          id: responseId,
+          result: {
+            content: [{ type: 'text', text: `Browse failed: ${err.message}` }],
+            isError: true,
+          },
+        };
+      }
+    }
+
+    if (name === 'execute_command') {
+      return {
+        jsonrpc: '2.0',
+        id: responseId,
+        result: {
+          content: [{ type: 'text', text: 'Approval required: privileged shell execution requires an authorized human approval token.' }],
+          isError: true,
+        },
       };
     }
   }
 
-  // 6. resources/list
+  // 7. resources/list
   if (method === 'resources/list') {
     const docs = getAllLivingDocuments();
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
         resources: docs.map((d) => ({
           uri: `nook://spaces/${d.spaceId}/documents/${d.id}`,
@@ -636,13 +844,13 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
     };
   }
 
-  // 7. resources/read
+  // 8. resources/read
   if (method === 'resources/read') {
     const uri = String(params?.uri || '');
     if (!uri) {
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         error: { code: -32602, message: 'URI parameter is required for resources/read' },
       };
     }
@@ -650,13 +858,13 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
     if (!doc) {
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         error: { code: -32602, message: `Resource not found: "${uri}"` },
       };
     }
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
         contents: [
           {
@@ -669,11 +877,11 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
     };
   }
 
-  // 8. resources/templates/list
+  // 9. resources/templates/list
   if (method === 'resources/templates/list') {
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
         resourceTemplates: [
           {
@@ -687,50 +895,133 @@ export async function handleJsonRpcRequest(body: any): Promise<any> {
     };
   }
 
-  // 9. prompts/list
+  // 10. resources/subscribe & resources/unsubscribe (MCP Spec 2024-11-05)
+  if (method === 'resources/subscribe' || method === 'resources/unsubscribe') {
+    return {
+      jsonrpc: '2.0',
+      id: responseId,
+      result: {},
+    };
+  }
+
+  // 11. prompts/list
   if (method === 'prompts/list') {
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: {
         prompts: MCP_PROMPTS,
       },
     };
   }
 
-  // 10. prompts/get
+  // 12. prompts/get
   if (method === 'prompts/get') {
     const promptName = String(params?.name || '');
     const promptDef = MCP_PROMPTS.find((p) => p.name === promptName);
     if (!promptDef) {
       return {
         jsonrpc: '2.0',
-        id: id ?? 1,
+        id: responseId,
         error: { code: -32601, message: `Prompt "${promptName}" not found` },
       };
     }
     return {
       jsonrpc: '2.0',
-      id: id ?? 1,
+      id: responseId,
       result: generatePromptMessages(promptName, params?.arguments || {}),
     };
   }
 
-  // 11. logging/setLevel
+  // 13. completion/complete (MCP Spec 2024-11-05)
+  if (method === 'completion/complete') {
+    const ref = params?.ref || {};
+    const argument = params?.argument || {};
+    const argName = argument.name || '';
+    const argValue = String(argument.value || '').toLowerCase();
+
+    const values: string[] = [];
+    if (ref.type === 'ref/prompt') {
+      if (argName === 'topic') {
+        const docs = getAllLivingDocuments();
+        for (const d of docs) {
+          if (d.title.toLowerCase().includes(argValue)) {
+            values.push(d.title);
+          }
+        }
+        if (values.length === 0) {
+          values.push('Autonomous Coworkers', 'Living Spaces', 'Agent Sandbox Security');
+        }
+      } else if (argName === 'depth') {
+        values.push('summary', 'comprehensive');
+      } else if (argName === 'testFramework') {
+        values.push('node:test', 'jest', 'vitest');
+      } else if (argName === 'title') {
+        values.push('Technical Architecture RFC', 'Engineering Specification', 'Security Whitepaper');
+      }
+    } else if (ref.type === 'ref/resource') {
+      const docs = getAllLivingDocuments();
+      for (const d of docs) {
+        const uri = `nook://spaces/${d.spaceId}/documents/${d.id}`;
+        if (uri.toLowerCase().includes(argValue)) {
+          values.push(uri);
+        }
+      }
+    }
+
+    const filtered = values.filter((v) => v.toLowerCase().includes(argValue)).slice(0, 20);
+
+    return {
+      jsonrpc: '2.0',
+      id: responseId,
+      result: {
+        completion: {
+          values: filtered,
+          total: filtered.length,
+          hasMore: false,
+        },
+      },
+    };
+  }
+
+  // 14. roots/list (MCP Spec 2024-11-05)
+  if (method === 'roots/list') {
+    return {
+      jsonrpc: '2.0',
+      id: responseId,
+      result: {
+        roots: [
+          {
+            uri: 'nook://spaces',
+            name: 'Nook Spaces Living Documents',
+          },
+        ],
+      },
+    };
+  }
+
+  // 15. logging/setLevel
   if (method === 'logging/setLevel') {
-    return { jsonrpc: '2.0', id: id ?? 1, result: {} };
+    return { jsonrpc: '2.0', id: responseId, result: {} };
   }
 
   return {
     jsonrpc: '2.0',
-    id: id ?? 1,
+    id: responseId,
     error: { code: -32601, message: `Method "${method}" not found.` },
   };
 }
 
 // ==============================================================
-// HTTP HANDLERS (POST: JSON-RPC & Streamlined HTTP / GET: SSE & Discovery)
+// HTTP HANDLERS (OPTIONS, GET: SSE & Discovery, POST: JSON-RPC)
 // ==============================================================
+
+export async function OPTIONS() {
+  return new NextResponse(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
 
 export async function GET(req: NextRequest) {
   const auth = validateApiRequest(req);
@@ -745,21 +1036,48 @@ export async function GET(req: NextRequest) {
   // Standard MCP Server-Sent Events (SSE) Transport
   if (isSSE) {
     const sessionId = crypto.randomUUID();
+    let keepAliveTimer: NodeJS.Timeout | null = null;
+
     const stream = new ReadableStream({
       start(controller) {
+        sseSessions.set(sessionId, {
+          id: sessionId,
+          controller,
+          createdAt: Date.now(),
+        });
+
         const encoder = new TextEncoder();
         // Emit MCP SSE endpoint event instructing client where to POST messages
         const endpointUrl = `/api/mcp?sessionId=${sessionId}`;
         controller.enqueue(encoder.encode(`event: endpoint\r\ndata: ${endpointUrl}\r\n\r\n`));
+
+        // Periodic keepalive comment as per SSE spec
+        keepAliveTimer = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`: keepalive\r\n\r\n`));
+          } catch {
+            if (keepAliveTimer) clearInterval(keepAliveTimer);
+            sseSessions.delete(sessionId);
+          }
+        }, 15000);
+        if (keepAliveTimer && typeof keepAliveTimer.unref === 'function') {
+          keepAliveTimer.unref();
+        }
+      },
+      cancel() {
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        sseSessions.delete(sessionId);
       },
     });
 
     return new Response(stream, {
       headers: {
-        'Content-Type': 'text/event-stream',
+        'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
         'X-Accel-Buffering': 'no',
+        'Mcp-Session-Id': sessionId,
+        ...corsHeaders,
       },
     });
   }
@@ -775,11 +1093,26 @@ export async function GET(req: NextRequest) {
     },
     capabilities: {
       tools: { listChanged: true },
-      resources: { subscribe: false, listChanged: true },
+      resources: { subscribe: true, listChanged: true },
       prompts: { listChanged: true },
       logging: {},
+      roots: { listChanged: true },
     },
-    tools: REGISTERED_MCP_TOOLS,
+    tools: REGISTERED_MCP_TOOLS.map((t) => ({
+      name: t.name,
+      description: t.description,
+      readOnlyHint: t.readOnlyHint,
+      destructiveHint: t.destructiveHint,
+      idempotentHint: t.idempotentHint,
+      openWorldHint: t.openWorldHint,
+      annotations: {
+        readOnlyHint: t.readOnlyHint,
+        destructiveHint: t.destructiveHint,
+        idempotentHint: t.idempotentHint,
+        openWorldHint: t.openWorldHint,
+      },
+      inputSchema: t.inputSchema,
+    })),
     resources: docs.map((d) => ({
       uri: `nook://spaces/${d.spaceId}/documents/${d.id}`,
       name: `${d.spaceName} / ${d.title}`,
@@ -787,6 +1120,8 @@ export async function GET(req: NextRequest) {
       mimeType: 'text/markdown',
     })),
     prompts: MCP_PROMPTS,
+  }, {
+    headers: corsHeaders,
   });
 }
 
@@ -796,30 +1131,60 @@ export async function POST(req: NextRequest) {
     return unauthorizedResponse(auth.error);
   }
 
+  const url = new URL(req.url);
+  const sessionId = req.headers.get('mcp-session-id') || url.searchParams.get('sessionId') || '';
+
   try {
     const body = await req.json();
 
     // Handle JSON-RPC batch requests
     if (Array.isArray(body)) {
+      if (body.length === 0) {
+        return NextResponse.json(
+          { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid Request: empty batch' } },
+          { status: 400, headers: corsHeaders }
+        );
+      }
+
       const results = await Promise.all(body.map((item) => handleJsonRpcRequest(item)));
       const filtered = results.filter((r) => r !== null);
       if (filtered.length === 0) {
-        return new NextResponse(null, { status: 204 });
+        return new NextResponse(null, { status: 204, headers: corsHeaders });
       }
-      return NextResponse.json(filtered);
+
+      if (sessionId && sseSessions.has(sessionId)) {
+        for (const resItem of filtered) {
+          sendMcpSessionMessage(sessionId, resItem);
+        }
+        return NextResponse.json(filtered, { status: 202, headers: { ...corsHeaders, 'Mcp-Session-Id': sessionId } });
+      }
+
+      return NextResponse.json(filtered, { headers: corsHeaders });
     }
 
     const response = await handleJsonRpcRequest(body);
     if (response === null) {
-      return new NextResponse(null, { status: 204 });
+      return new NextResponse(null, { status: 204, headers: corsHeaders });
+    }
+
+    if (sessionId && sseSessions.has(sessionId)) {
+      sendMcpSessionMessage(sessionId, response);
+      return NextResponse.json(response, {
+        status: 202,
+        headers: {
+          ...corsHeaders,
+          'Mcp-Session-Id': sessionId,
+        },
+      });
     }
 
     const status = response.error ? (response.error.code === -32601 ? 404 : 400) : 200;
-    return NextResponse.json(response, { status });
+    return NextResponse.json(response, { status, headers: corsHeaders });
   } catch (err: any) {
     return NextResponse.json({
       jsonrpc: '2.0',
+      id: null,
       error: { code: -32700, message: `Parse error: ${err.message}` },
-    }, { status: 400 });
+    }, { status: 400, headers: corsHeaders });
   }
 }

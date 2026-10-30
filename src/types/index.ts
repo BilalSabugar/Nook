@@ -137,6 +137,10 @@ export interface MCPTool {
   category: 'web' | 'code' | 'data' | 'system' | 'custom';
   enabled: boolean;
   requiresApproval: boolean;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
   parameters: {
     name: string;
     type: string;

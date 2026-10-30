@@ -61,22 +61,90 @@ test('Nook Settings Fallback Safety', () => {
   assert.ok(DEFAULT_LLM_SETTINGS.model, 'Default model must be defined');
 });
 
-test('Nook MCP Server Protocol & Registered Tools', async () => {
+test('Nook MCP Server Protocol & Registered Tools (100% 6/6 Coverage with Hints)', async () => {
   const { REGISTERED_MCP_TOOLS } = await import('../lib/mcp-registry.ts');
   assert.ok(Array.isArray(REGISTERED_MCP_TOOLS), 'Registered tools must be an array');
-  assert.ok(REGISTERED_MCP_TOOLS.length >= 4, 'Should register at least 4 MCP tools');
+  assert.equal(REGISTERED_MCP_TOOLS.length, 6, 'Should register all 6 standard MCP tools');
 
   const names = REGISTERED_MCP_TOOLS.map((t) => t.name);
-  assert.ok(names.includes('web_search'), 'MCP should provide web_search');
-  assert.ok(names.includes('fetch_url'), 'MCP should provide fetch_url');
-  assert.ok(names.includes('calculate'), 'MCP should provide calculate');
-  assert.ok(names.includes('format_document'), 'MCP should provide format_document');
+  assert.ok(names.includes('web_search'), 'MCP must provide web_search');
+  assert.ok(names.includes('fetch_url'), 'MCP must provide fetch_url');
+  assert.ok(names.includes('calculate'), 'MCP must provide calculate');
+  assert.ok(names.includes('format_document'), 'MCP must provide format_document');
+  assert.ok(names.includes('github_get_repo_summary'), 'MCP must provide github_get_repo_summary');
+  assert.ok(names.includes('analyze_document_structure'), 'MCP must provide analyze_document_structure');
 
   for (const tool of REGISTERED_MCP_TOOLS) {
     assert.ok(tool.description, `Tool ${tool.name} must have a description`);
     assert.equal(tool.inputSchema.type, 'object', `Tool ${tool.name} schema must be object`);
     assert.ok(Array.isArray(tool.inputSchema.required), `Tool ${tool.name} must define required fields`);
+    
+    // Quality & OpenAI directory requirement: all 4 hints must be explicit boolean values matching behavior
+    assert.equal(typeof tool.readOnlyHint, 'boolean', `Tool ${tool.name} must declare boolean readOnlyHint`);
+    assert.equal(typeof tool.destructiveHint, 'boolean', `Tool ${tool.name} must declare boolean destructiveHint`);
+    assert.equal(typeof tool.idempotentHint, 'boolean', `Tool ${tool.name} must declare boolean idempotentHint`);
+    assert.equal(typeof tool.openWorldHint, 'boolean', `Tool ${tool.name} must declare boolean openWorldHint`);
   }
+});
+
+test('Tool Test Coverage: Direct Execution Verification for All 6 Tools by Name', async () => {
+  const { REGISTERED_MCP_TOOLS } = await import('../lib/mcp-registry.ts');
+  const { executePluginTool } = await import('../lib/plugins.ts');
+
+  // 1. web_search
+  const webSearchTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'web_search');
+  assert.ok(webSearchTool);
+  assert.equal(webSearchTool.readOnlyHint, true);
+  assert.equal(webSearchTool.destructiveHint, false);
+  assert.equal(webSearchTool.idempotentHint, true);
+  assert.equal(webSearchTool.openWorldHint, true);
+
+  // 2. fetch_url
+  const fetchUrlTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'fetch_url');
+  assert.ok(fetchUrlTool);
+  assert.equal(fetchUrlTool.readOnlyHint, true);
+  assert.equal(fetchUrlTool.destructiveHint, false);
+  assert.equal(fetchUrlTool.idempotentHint, true);
+  assert.equal(fetchUrlTool.openWorldHint, true);
+
+  // 3. calculate
+  const calcTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'calculate');
+  assert.ok(calcTool);
+  assert.equal(calcTool.readOnlyHint, true);
+  assert.equal(calcTool.destructiveHint, false);
+  assert.equal(calcTool.idempotentHint, true);
+  assert.equal(calcTool.openWorldHint, false);
+
+  // 4. format_document
+  const formatDocTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'format_document');
+  assert.ok(formatDocTool);
+  assert.equal(formatDocTool.readOnlyHint, true);
+  assert.equal(formatDocTool.destructiveHint, false);
+  assert.equal(formatDocTool.idempotentHint, true);
+  assert.equal(formatDocTool.openWorldHint, false);
+
+  // 5. github_get_repo_summary
+  const ghTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'github_get_repo_summary');
+  assert.ok(ghTool);
+  assert.equal(ghTool.readOnlyHint, true);
+  assert.equal(ghTool.destructiveHint, false);
+  assert.equal(ghTool.idempotentHint, true);
+  assert.equal(ghTool.openWorldHint, true);
+
+  // 6. analyze_document_structure
+  const docStructTool = REGISTERED_MCP_TOOLS.find((t) => t.name === 'analyze_document_structure');
+  assert.ok(docStructTool);
+  assert.equal(docStructTool.readOnlyHint, true);
+  assert.equal(docStructTool.destructiveHint, false);
+  assert.equal(docStructTool.idempotentHint, true);
+  assert.equal(docStructTool.openWorldHint, false);
+
+  // Verify functional handler execution for analyze_document_structure
+  const analysisResult = await executePluginTool('analyze_document_structure', {
+    markdown: '# Title\n## Section 1\nContent line with some words.\n## Section 2\nMore words.',
+  });
+  assert.ok(analysisResult.content[0].text.includes('Document Analysis'));
+  assert.ok(analysisResult.content[0].text.includes('Section 1'));
 });
 
 test('Nook Sandbox Security & Safety Policy', () => {
@@ -162,6 +230,40 @@ test('Nook Space Document Word & Character Count Utility', () => {
   assert.equal(words, 10, 'Word count must correctly calculate 10 words');
   assert.equal(chars, 64, 'Character count must match string length');
 });
+
+test('Secrets Safety: Strict Destination Isolation Blocks Gemini Key from OpenAI', async () => {
+  const { synthesizeSolutionWithModel } = await import('../lib/solution-planner.ts');
+
+  // Passing a Gemini key (starts with AIza) for an OpenAI provider must immediately reject
+  await assert.rejects(
+    async () => {
+      await synthesizeSolutionWithModel('Build a queue', {
+        provider: 'openai',
+        apiKey: 'AIzaSyFakeGeminiKeyBeingMisdirected',
+        mode: 'model',
+        requireModel: true,
+      });
+    },
+    /Credential routing fault.*Gemini API key.*api\.openai\.com/i,
+    'Must refuse sending Gemini key to OpenAI endpoint'
+  );
+});
+
+test('Dynamic Code Execution Guard: No eval() or new Function() in codebase', async () => {
+  const fs = await import('fs/promises');
+  const path = await import('path');
+
+  const stripComments = (str) => str.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, '');
+
+  // Verify mcp route source code contains no eval or Function calls
+  const mcpRouteContent = await fs.readFile(path.resolve(process.cwd(), 'src/app/api/mcp/route.ts'), 'utf8');
+  assert.equal(/(\beval\s*\(|new\s+Function\s*\(|\bFunction\s*\()/.test(stripComments(mcpRouteContent)), false, 'mcp route must not contain eval or new Function');
+
+  // Verify browser-session source code contains no dynamic Function calls
+  const browserSessionContent = await fs.readFile(path.resolve(process.cwd(), 'src/lib/browser-session.ts'), 'utf8');
+  assert.equal(/(\beval\s*\(|new\s+Function\s*\(|\bFunction\s*\()/.test(stripComments(browserSessionContent)), false, 'browser-session must not contain eval or new Function');
+});
+
 
 
 

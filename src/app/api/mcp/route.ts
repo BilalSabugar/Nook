@@ -4,6 +4,144 @@ import type { MCPToolDefinition } from '@/lib/mcp-registry';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
 import { safeFetch } from '@/lib/ssrf';
 import { logAuditEvent } from '@/lib/db';
+import { executePluginTool } from '@/lib/plugins';
+
+/**
+ * Safely parses and evaluates mathematical expressions deterministically.
+ * Employs standard tokenization and Shunting-Yard evaluation with strict bounds and division-by-zero checks.
+ */
+function evaluateSafeMath(expr: string): number {
+  const clean = expr.replace(/\s+/g, '');
+  if (!clean || !/^[0-9+\-*/().%^]+$/.test(clean)) {
+    throw new Error('Invalid mathematical expression.');
+  }
+
+  const tokens: (string | number)[] = [];
+  let i = 0;
+  while (i < clean.length) {
+    const ch = clean[i];
+    if (ch === '(' || ch === ')') {
+      tokens.push(ch);
+      i++;
+    } else if (ch === '+' || ch === '-' || ch === '*' || ch === '/' || ch === '%' || ch === '^') {
+      if (ch === '*' && clean[i + 1] === '*') {
+        tokens.push('^');
+        i += 2;
+      } else {
+        const prev = tokens[tokens.length - 1];
+        if (
+          (ch === '-' || ch === '+') &&
+          (tokens.length === 0 || prev === '(' || (typeof prev === 'string' && ['+', '-', '*', '/', '%', '^'].includes(prev)))
+        ) {
+          let numStr = ch;
+          i++;
+          while (i < clean.length && ((clean[i] >= '0' && clean[i] <= '9') || clean[i] === '.')) {
+            numStr += clean[i];
+            i++;
+          }
+          if (numStr === '-' || numStr === '+') {
+            tokens.push(ch === '-' ? -1 : 1);
+            tokens.push('*');
+          } else {
+            const num = parseFloat(numStr);
+            if (isNaN(num)) throw new Error('Invalid numeric literal');
+            tokens.push(num);
+          }
+        } else {
+          tokens.push(ch);
+          i++;
+        }
+      }
+    } else if ((ch >= '0' && ch <= '9') || ch === '.') {
+      let numStr = '';
+      while (i < clean.length && ((clean[i] >= '0' && clean[i] <= '9') || clean[i] === '.')) {
+        numStr += clean[i];
+        i++;
+      }
+      const num = parseFloat(numStr);
+      if (isNaN(num)) throw new Error('Invalid numeric literal');
+      tokens.push(num);
+    } else {
+      throw new Error(`Unexpected character: ${ch}`);
+    }
+  }
+
+  const precedence: Record<string, number> = {
+    '+': 1,
+    '-': 1,
+    '*': 2,
+    '/': 2,
+    '%': 2,
+    '^': 3,
+  };
+
+  const outputQueue: (number | string)[] = [];
+  const operatorStack: string[] = [];
+
+  for (const token of tokens) {
+    if (typeof token === 'number') {
+      outputQueue.push(token);
+    } else if (token in precedence) {
+      while (
+        operatorStack.length > 0 &&
+        operatorStack[operatorStack.length - 1] !== '(' &&
+        precedence[operatorStack[operatorStack.length - 1]] >= precedence[token]
+      ) {
+        outputQueue.push(operatorStack.pop()!);
+      }
+      operatorStack.push(token);
+    } else if (token === '(') {
+      operatorStack.push(token);
+    } else if (token === ')') {
+      while (operatorStack.length > 0 && operatorStack[operatorStack.length - 1] !== '(') {
+        outputQueue.push(operatorStack.pop()!);
+      }
+      if (operatorStack.length === 0) {
+        throw new Error('Mismatched parentheses');
+      }
+      operatorStack.pop();
+    }
+  }
+
+  while (operatorStack.length > 0) {
+    const op = operatorStack.pop()!;
+    if (op === '(' || op === ')') {
+      throw new Error('Mismatched parentheses');
+    }
+    outputQueue.push(op);
+  }
+
+  const evalStack: number[] = [];
+  for (const item of outputQueue) {
+    if (typeof item === 'number') {
+      evalStack.push(item);
+    } else {
+      const b = evalStack.pop();
+      const a = evalStack.pop();
+      if (a === undefined || b === undefined) {
+        throw new Error('Malformed arithmetic expression');
+      }
+      switch (item) {
+        case '+': evalStack.push(a + b); break;
+        case '-': evalStack.push(a - b); break;
+        case '*': evalStack.push(a * b); break;
+        case '/':
+          if (b === 0) throw new Error('Division by zero');
+          evalStack.push(a / b);
+          break;
+        case '%': evalStack.push(a % b); break;
+        case '^': evalStack.push(Math.pow(a, b)); break;
+        default: throw new Error(`Unsupported operator: ${item}`);
+      }
+    }
+  }
+
+  if (evalStack.length !== 1) {
+    throw new Error('Invalid calculation outcome');
+  }
+
+  return evalStack[0];
+}
 
 export type { MCPToolDefinition };
 export { REGISTERED_MCP_TOOLS };
@@ -252,7 +390,7 @@ export async function POST(req: NextRequest) {
           });
         }
         try {
-          const answer = Function(`'use strict'; return (${expr})`)();
+          const answer = evaluateSafeMath(expr);
           return NextResponse.json({
             jsonrpc: '2.0',
             id: id || 1,
@@ -260,12 +398,12 @@ export async function POST(req: NextRequest) {
               content: [{ type: 'text', text: `Calculation result: ${answer}` }],
             },
           });
-        } catch {
+        } catch (err: any) {
           return NextResponse.json({
             jsonrpc: '2.0',
             id: id || 1,
             result: {
-              content: [{ type: 'text', text: 'Error evaluating math expression.' }],
+              content: [{ type: 'text', text: `Error evaluating math expression: ${err.message}` }],
               isError: true,
             },
           });
@@ -288,6 +426,18 @@ export async function POST(req: NextRequest) {
           result: {
             content: [{ type: 'text', text: formatted }],
           },
+        });
+      }
+
+      // ----------------------------------------------------
+      // Plugin-backed Tools: github_get_repo_summary, analyze_document_structure
+      // ----------------------------------------------------
+      if (name === 'github_get_repo_summary' || name === 'analyze_document_structure') {
+        const pluginResult = await executePluginTool(name, args || {});
+        return NextResponse.json({
+          jsonrpc: '2.0',
+          id: id || 1,
+          result: pluginResult,
         });
       }
     }

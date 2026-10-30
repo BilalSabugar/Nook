@@ -4,7 +4,7 @@
  * without a running Docker daemon (e.g. Windows unit tests).
  * Conforms to the `docker run` interface expected by sandbox-runner.mjs.
  */
-import { exec } from 'child_process';
+import { spawn } from 'child_process';
 import path from 'path';
 
 const args = process.argv.slice(2);
@@ -58,7 +58,43 @@ if (args[0] === 'run') {
     cmdToRun = 'echo ' + cmdToRun.replace('Write-Output ', '').replace(/"/g, '');
   }
 
-  exec(cmdToRun, {
+  // Handle standard echo using native library functions instead of shelling out
+  if (cmdToRun.startsWith('echo ')) {
+    const echoContent = cmdToRun.slice(5).replace(/^["']|["']$/g, '');
+    process.stdout.write(echoContent + '\n');
+    process.exit(0);
+  }
+
+  // Tokenize safely into discrete executable and arguments without shell evaluation
+  const tokens = [];
+  let cur = '';
+  let quote = null;
+  for (let i = 0; i < cmdToRun.length; i++) {
+    const c = cmdToRun[i];
+    if (quote) {
+      if (c === quote) {
+        quote = null;
+      } else {
+        cur += c;
+      }
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (/\s/.test(c)) {
+      if (cur) {
+        tokens.push(cur);
+        cur = '';
+      }
+    } else {
+      cur += c;
+    }
+  }
+  if (cur) tokens.push(cur);
+
+  const rawBinary = tokens[0] || 'echo';
+  const execBinary = rawBinary === 'node' ? process.execPath : rawBinary;
+  const execArgs = tokens.slice(1);
+
+  const child = spawn(execBinary, execArgs, {
     cwd: workspaceDir,
     env: {
       ...process.env,
@@ -66,20 +102,22 @@ if (args[0] === 'run') {
       PWD: workspaceDir,
       NODE_ENV: 'production',
     },
-    maxBuffer: 2 * 1024 * 1024,
-  }, (err, stdout, stderr) => {
-    if (stdout) process.stdout.write(stdout);
-    if (stderr) process.stderr.write(stderr);
-    if (err && typeof err.code === 'number') {
-      process.exit(err.code);
-    } else if (err) {
-      process.exit(1);
-    } else {
-      process.exit(0);
-    }
+    shell: false,
+    stdio: ['inherit', 'pipe', 'pipe'],
+  });
+
+  child.stdout?.on('data', (d) => process.stdout.write(d));
+  child.stderr?.on('data', (d) => process.stderr.write(d));
+
+  child.on('error', (err) => {
+    process.stderr.write(`mock-docker error: ${err.message}\n`);
+    process.exit(1);
+  });
+
+  child.on('close', (code) => {
+    process.exit(typeof code === 'number' ? code : 0);
   });
 } else {
   process.stdout.write(`mock-docker: command ${args[0]} acknowledged\n`);
   process.exit(0);
 }
-

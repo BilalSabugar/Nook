@@ -17,6 +17,10 @@ export interface AgentExecutionResponse {
 interface ToolDefinition {
   name: string;
   description: string;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
   parameters: Record<string, string>;
 }
 
@@ -24,26 +28,46 @@ export const AGENT_TOOLS: ToolDefinition[] = [
   {
     name: 'web_search',
     description: 'Searches live technical documentation, encyclopedic sources, and real-time releases.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
     parameters: { query: 'Search query string' },
   },
   {
     name: 'fetch_url',
     description: 'Navigates to an authorized web URL on the agent computer, extracting verified readable text and DOM headings.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
     parameters: { url: 'Full HTTPS target URL' },
   },
   {
     name: 'calculate',
     description: 'Evaluates mathematical formulas and benchmark metrics safely.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
     parameters: { expression: 'Math expression' },
   },
   {
     name: 'request_command_execution',
     description: 'Prepares a shell command for execution in the isolated sandbox, registering an approval request on the server.',
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
     parameters: { command: 'Terminal command string' },
   },
   {
     name: 'create_document_draft',
     description: 'Generates a publication-grade markdown document for a living Space and registers an approval request on the server.',
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
     parameters: { title: 'Document Title', content: 'Markdown document content', targetSpaceId: 'Space ID' },
   },
 ];

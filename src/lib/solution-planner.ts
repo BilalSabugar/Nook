@@ -939,13 +939,31 @@ export async function synthesizeSolutionWithModel(
     return planRequirementDrivenSolution(objective);
   }
 
-  const provider = modelOptions?.provider || (process.env.GEMINI_API_KEY ? 'gemini' : process.env.OPENAI_API_KEY ? 'openai' : process.env.ANTHROPIC_API_KEY ? 'anthropic' : (process.env.OLLAMA_BASE_URL ? 'ollama' : undefined));
-  const apiKey = modelOptions?.apiKey || (provider === 'gemini' ? process.env.GEMINI_API_KEY : provider === 'openai' ? process.env.OPENAI_API_KEY : provider === 'anthropic' ? process.env.ANTHROPIC_API_KEY : undefined);
+  // Strict Provider Credential Boundary Guard:
+  // Each provider only accesses its own dedicated credentials.
+  // Cross-provider key leakage is strictly blocked.
+  const targetProvider = modelOptions?.provider;
+  const geminiApiKey = (targetProvider === 'gemini' ? modelOptions?.apiKey : undefined) || process.env.GEMINI_API_KEY;
+  const openaiApiKey = (targetProvider === 'openai' ? modelOptions?.apiKey : undefined) || process.env.OPENAI_API_KEY;
+  const anthropicApiKey = (targetProvider === 'anthropic' ? modelOptions?.apiKey : undefined) || process.env.ANTHROPIC_API_KEY;
   const endpoint = modelOptions?.endpoint || process.env.OLLAMA_BASE_URL;
 
+  const provider = targetProvider || (
+    geminiApiKey ? 'gemini' :
+    openaiApiKey ? 'openai' :
+    anthropicApiKey ? 'anthropic' :
+    (endpoint ? 'ollama' : undefined)
+  );
+
+  const hasProviderCred =
+    (provider === 'gemini' && Boolean(geminiApiKey)) ||
+    (provider === 'openai' && Boolean(openaiApiKey)) ||
+    (provider === 'anthropic' && Boolean(anthropicApiKey)) ||
+    (provider === 'ollama');
+
   // When model is required or auto-detected with provider credentials:
-  if (modelOptions?.requireModel || modelOptions?.mode === 'model' || (provider && (apiKey || endpoint || provider === 'ollama'))) {
-    if (!provider || (!apiKey && !endpoint && provider !== 'ollama')) {
+  if (modelOptions?.requireModel || modelOptions?.mode === 'model' || (provider && (hasProviderCred || endpoint))) {
+    if (!provider || !hasProviderCred) {
       throw new Error('Model execution requested, but no model provider (Gemini, OpenAI, Anthropic, or Ollama) is configured.');
     }
 
@@ -965,9 +983,12 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
     let lastError: string | null = null;
 
     try {
-      if (provider === 'gemini' && apiKey) {
+      if (provider === 'gemini' && geminiApiKey) {
+        if (geminiApiKey.startsWith('sk-')) {
+          throw new Error('Credential routing fault: OpenAI API key supplied for Gemini provider. Aborting dispatch.');
+        }
         const model = modelOptions?.model || 'gemini-1.5-flash';
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(geminiApiKey)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -982,11 +1003,15 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
           const data = (await res.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
           rawResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
         }
-      } else if (provider === 'openai' && apiKey) {
+      } else if (provider === 'openai' && openaiApiKey) {
+        // Strict boundary: A Google Gemini key (or any non-OpenAI credential) must NEVER be dispatched to api.openai.com
+        if (openaiApiKey.startsWith('AIza')) {
+          throw new Error('Credential routing fault: Detected Gemini API key being directed to api.openai.com. Refusing dispatch to prevent secret leakage.');
+        }
         const model = modelOptions?.model || 'gpt-4o-mini';
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${openaiApiKey}` },
           body: JSON.stringify({
             model,
             messages: [{ role: 'user', content: prompt }],
@@ -1001,13 +1026,16 @@ Return ONLY valid JSON with this exact schema (no markdown formatting, no code f
           const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
           rawResponseText = data.choices?.[0]?.message?.content || '';
         }
-      } else if (provider === 'anthropic' && apiKey) {
+      } else if (provider === 'anthropic' && anthropicApiKey) {
+        if (anthropicApiKey.startsWith('AIza')) {
+          throw new Error('Credential routing fault: Detected Gemini API key being directed to api.anthropic.com.');
+        }
         const model = modelOptions?.model || 'claude-3-5-sonnet-20241022';
         const res = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-api-key': apiKey,
+            'x-api-key': anthropicApiKey,
             'anthropic-version': '2023-06-01',
           },
           body: JSON.stringify({

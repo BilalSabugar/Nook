@@ -5,6 +5,10 @@ export interface NookPluginTool {
   name: string;
   description: string;
   requiresApproval: boolean;
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
   timeoutMs?: number;
   inputSchema: {
     type: string;
@@ -49,6 +53,10 @@ export const githubInspectorPlugin: NookPluginManifest = {
       name: 'github_get_repo_summary',
       description: 'Fetches repository statistics, star count, and description for a public GitHub repository.',
       requiresApproval: false,
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
       timeoutMs: 6000,
       inputSchema: {
         type: 'object',
@@ -108,6 +116,10 @@ export const docProcessorPlugin: NookPluginManifest = {
       name: 'analyze_document_structure',
       description: 'Generates structural table of contents and reading metrics for markdown text.',
       requiresApproval: false,
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
       inputSchema: {
         type: 'object',
         properties: {

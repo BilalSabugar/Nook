@@ -121,6 +121,13 @@ export async function POST(req: NextRequest) {
         const key = openaiApiKey || process.env.OPENAI_API_KEY || secrets.openaiApiKey;
         if (!key) return NextResponse.json({ error: 'No OpenAI API key configured.' }, { status: 400 });
 
+        // Security Guard: Prevent Gemini keys from flowing to OpenAI
+        if (key.startsWith('AIza')) {
+          return NextResponse.json({
+            error: 'Credential routing error: Gemini API key provided for OpenAI provider. Cross-provider secret flow is blocked.',
+          }, { status: 400 });
+        }
+
         const testRes = await fetch('https://api.openai.com/v1/models', {
           method: 'GET',
           headers: { Authorization: `Bearer ${key}` },

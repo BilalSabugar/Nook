@@ -251,8 +251,8 @@ export async function getOrCreateLivePlaywrightPage(
   }
 
   try {
-    const dynamicImport = new Function('specifier', 'return import(specifier)');
-    const pw = (await dynamicImport('playwright')) as typeof import('playwright');
+    const pkgName = ['play', 'wright'].join('');
+    const pw = (await import(pkgName)) as typeof import('playwright');
     const { chromium } = pw;
     let browser: any = null;
     let engine = 'playwright_chromium';
@@ -377,8 +377,8 @@ export async function captureRealBrowserScreenshot(
   }
 
   try {
-    const dynamicImport = new Function('specifier', 'return import(specifier)');
-    const pw = (await dynamicImport('playwright')) as typeof import('playwright');
+    const pkgName = ['play', 'wright'].join('');
+    const pw = (await import(pkgName)) as typeof import('playwright');
     const { chromium } = pw;
     let browser: import('playwright').Browser | null = null;
     let engine = 'playwright_chromium';

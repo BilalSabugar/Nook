@@ -7,6 +7,10 @@ const NOOK_FUNCTION_TOOLS = [
   {
     name: 'web_search',
     description: 'Searches live technical documentation, encyclopedic articles, and real-time releases.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -18,6 +22,10 @@ const NOOK_FUNCTION_TOOLS = [
   {
     name: 'fetch_url',
     description: 'Navigates to an authorized web URL on the agent computer, extracting verified readable text and DOM headings.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -27,8 +35,27 @@ const NOOK_FUNCTION_TOOLS = [
     },
   },
   {
+    name: 'calculate',
+    description: 'Evaluates mathematical and statistical formulas safely.',
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        expression: { type: 'STRING', description: 'Mathematical expression e.g. 2 * 3.14159 * 5' },
+      },
+      required: ['expression'],
+    },
+  },
+  {
     name: 'request_command_execution',
     description: 'Prepares a shell command for isolated execution in the sandbox, registering a human approval card on the server.',
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -41,6 +68,10 @@ const NOOK_FUNCTION_TOOLS = [
   {
     name: 'create_document_draft',
     description: 'Drafts a publication-grade markdown document for living spaces and registers an approval request on the server.',
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
     parameters: {
       type: 'OBJECT',
       properties: {
@@ -163,6 +194,13 @@ export async function POST(req: NextRequest) {
       if (!openaiKey) {
         return NextResponse.json({
           error: 'OpenAI API key is not configured on the server. Please configure it in Settings.',
+        }, { status: 400 });
+      }
+
+      // Security Guard: Enforce strict credential ownership (Gemini keys must never reach api.openai.com)
+      if (openaiKey.startsWith('AIza')) {
+        return NextResponse.json({
+          error: 'Credential routing error: Gemini API key provided for OpenAI provider. Cross-provider secret flow is blocked.',
         }, { status: 400 });
       }
 

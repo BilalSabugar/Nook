@@ -1,7 +1,7 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server.js';
 import fs from 'fs/promises';
 import path from 'path';
-import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
+import { validateApiRequest, unauthorizedResponse } from '../../../../lib/auth.ts';
 import {
   saveSpace,
   saveDocumentWithRevision,
@@ -9,10 +9,98 @@ import {
   listDocumentRevisions,
   rollbackDocumentToVersion,
   logAuditEvent,
-} from '@/lib/db';
+  scrubSensitiveData,
+  SAFE_SNAPSHOT_ID_PATTERN,
+  SAFE_SNAPSHOT_FILENAME_PATTERN,
+  MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT,
+  MAX_SNAPSHOT_SANDBOX_FILE_BYTES,
+} from '../../../../lib/db.ts';
+import {
+  ensureRealDirectoryWithin,
+  writeFileNoFollow,
+} from '../../../../lib/safe-workspace.mjs';
 
 const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const STATE_FILE = path.join(STORAGE_DIR, 'workspace-state.json');
+
+/**
+ * Validates client-supplied `computerStates` before any filesystem or database mutation.
+ * Strictly blocks path traversal (`..`, `/`, `\`), invalid agent IDs, unsafe filenames, and oversized payloads.
+ */
+function validateComputerStatesInput(computerStates: unknown): { valid: boolean; error?: string } {
+  if (computerStates === undefined || computerStates === null) {
+    return { valid: true };
+  }
+  if (typeof computerStates !== 'object' || Array.isArray(computerStates)) {
+    return { valid: false, error: 'Field "computerStates" must be a non-array object map of agentId -> state' };
+  }
+
+  for (const [agentId, compState] of Object.entries(computerStates as Record<string, unknown>)) {
+    if (
+      !SAFE_SNAPSHOT_ID_PATTERN.test(agentId) ||
+      agentId === '.' ||
+      agentId === '..' ||
+      agentId.includes('/') ||
+      agentId.includes('\\')
+    ) {
+      return {
+        valid: false,
+        error: `Invalid or unsafe agentId in computerStates: "${agentId}" (must match ^[A-Za-z0-9_-]{1,64}$)`,
+      };
+    }
+
+    if (compState !== null && compState !== undefined) {
+      if (typeof compState !== 'object' || Array.isArray(compState)) {
+        return { valid: false, error: `computerStates["${agentId}"] must be an object` };
+      }
+      const files = (compState as { files?: unknown }).files;
+      if (files !== undefined) {
+        if (!Array.isArray(files)) {
+          return { valid: false, error: `computerStates["${agentId}"].files must be an array` };
+        }
+        if (files.length > MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT) {
+          return {
+            valid: false,
+            error: `computerStates["${agentId}"].files exceeds limit of ${MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT} files`,
+          };
+        }
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i] as { name?: unknown; content?: unknown };
+          if (!file || typeof file !== 'object') {
+            return { valid: false, error: `Invalid file entry at computerStates["${agentId}"].files[${i}]` };
+          }
+          const fileName = typeof file.name === 'string' ? file.name : '';
+          if (
+            !SAFE_SNAPSHOT_FILENAME_PATTERN.test(fileName) ||
+            fileName === '.' ||
+            fileName === '..' ||
+            fileName.includes('/') ||
+            fileName.includes('\\')
+          ) {
+            return {
+              valid: false,
+              error: `Unsafe or invalid filename "${fileName}" in computerStates["${agentId}"]`,
+            };
+          }
+          if (typeof file.content !== 'string') {
+            return {
+              valid: false,
+              error: `File "${fileName}" in computerStates["${agentId}"] must have string content`,
+            };
+          }
+          if (Buffer.byteLength(file.content, 'utf8') > MAX_SNAPSHOT_SANDBOX_FILE_BYTES) {
+            return {
+              valid: false,
+              error: `File "${fileName}" in computerStates["${agentId}"] exceeds maximum size of ${MAX_SNAPSHOT_SANDBOX_FILE_BYTES} bytes`,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  return { valid: true };
+}
 
 /**
  * GET /api/workspace/state
@@ -81,7 +169,13 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    await fs.mkdir(STORAGE_DIR, { recursive: true });
+    // Validate client-supplied computerStates BEFORE any SQLite or filesystem writes
+    const csValidation = validateComputerStatesInput(computerStates);
+    if (!csValidation.valid) {
+      return NextResponse.json({ error: csValidation.error }, { status: 400 });
+    }
+
+    await ensureRealDirectoryWithin(process.cwd(), STORAGE_DIR);
 
     // Sanitize settings: strip private secrets from general workspace state
     const sanitizedSettings = settings
@@ -120,37 +214,35 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Atomic write for workspace state JSON backup
-    const tempFile = `${STATE_FILE}.${Date.now()}.tmp`;
+    // Atomic no-follow write for workspace state JSON backup with sensitive data scrubbing
     const serialized = JSON.stringify(
-      {
+      scrubSensitiveData({
         agents,
         spaces,
         computerStates,
         messages,
         settings: sanitizedSettings,
         savedAt: new Date().toISOString(),
-      },
+      }),
       null,
       2
     );
 
-    await fs.writeFile(tempFile, serialized, 'utf8');
-    await fs.rename(tempFile, STATE_FILE);
+    await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', serialized);
 
-    // Persist per-agent workspace files on durable server disk
+    // Persist per-agent workspace files on durable server disk using strict realpath & O_NOFOLLOW confinement
     if (computerStates && typeof computerStates === 'object') {
+      const sandboxesRoot = path.join(STORAGE_DIR, 'sandboxes');
+      await ensureRealDirectoryWithin(STORAGE_DIR, sandboxesRoot);
+
       for (const [agentId, compState] of Object.entries<any>(computerStates)) {
         if (compState?.files && Array.isArray(compState.files)) {
-          const agentDiskDir = path.join(STORAGE_DIR, 'sandboxes', agentId, 'workspace');
-          await fs.mkdir(agentDiskDir, { recursive: true });
+          const agentDiskDir = path.join(sandboxesRoot, agentId, 'workspace');
+          await ensureRealDirectoryWithin(sandboxesRoot, agentDiskDir);
 
           for (const file of compState.files) {
             if (file?.name && typeof file?.content === 'string') {
-              const safeName = path.basename(file.name).replace(/[^a-zA-Z0-9._-]/g, '_');
-              if (safeName) {
-                await fs.writeFile(path.join(agentDiskDir, safeName), file.content, 'utf8');
-              }
+              await writeFileNoFollow(agentDiskDir, file.name, file.content);
             }
           }
         }

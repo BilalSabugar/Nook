@@ -445,8 +445,7 @@ export function createApproval(record: {
   };
 }
 
-export function listApprovals(includeSecretTokens: boolean = false): DbApprovalRecord[] {
-  const db = getDatabase();
+export function listApprovals(includeSecretTokens: boolean = false, db: DatabaseSync = getDatabase()): DbApprovalRecord[] {
   const stmt = db.prepare(`SELECT * FROM approvals ORDER BY created_at DESC`);
   const rows = stmt.all() as unknown as ApprovalRow[];
 
@@ -2016,26 +2015,30 @@ export interface DatabaseIntegrityResult {
   foreignKeyViolations: any[];
 }
 
-function canonicalize(obj: any): any {
+function canonicalize(obj: any, depth: number = 0): any {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
   if (Array.isArray(obj)) {
-    return obj.map((item) => (item === undefined ? null : canonicalize(item)));
+    return obj.map((item) => (item === undefined ? null : canonicalize(item, depth + 1)));
   }
   const sortedKeys = Object.keys(obj).sort();
   const result: Record<string, any> = {};
   for (const key of sortedKeys) {
-    if (key !== 'manifest' && key !== 'checksum' && obj[key] !== undefined) {
-      result[key] = canonicalize(obj[key]);
+    if (obj[key] === undefined) {
+      continue;
     }
+    if (depth === 0 && (key === 'manifest' || key === 'checksum')) {
+      continue;
+    }
+    result[key] = canonicalize(obj[key], depth + 1);
   }
   return result;
 }
 
 export function computeSnapshotChecksum(bundle: Record<string, any>): string {
   if (!bundle || typeof bundle !== 'object') return '';
-  const canonical = JSON.stringify(canonicalize(bundle));
+  const canonical = JSON.stringify(canonicalize(bundle, 0));
   return crypto.createHash('sha256').update(canonical).digest('hex');
 }
 
@@ -2055,6 +2058,14 @@ export function computeSnapshotSignature(checksum: string, secret?: string | nul
   if (!signingKey || !checksum) return undefined;
   const hmac = crypto.createHmac('sha256', signingKey).update(`nook-snapshot-v2:${checksum}`).digest('hex');
   return `hmac-sha256:${hmac}`;
+}
+
+function verifySnapshotSignatureConstantTime(actualSig: string, expectedSig?: string): boolean {
+  if (!actualSig || !expectedSig) return false;
+  const aBuf = Buffer.from(actualSig, 'utf8');
+  const bBuf = Buffer.from(expectedSig, 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 export function verifyDatabaseIntegrity(db: DatabaseSync = getDatabase()): DatabaseIntegrityResult {
@@ -2098,37 +2109,51 @@ export function validateWorkspaceSnapshot(
     errors.push(`Unsupported or missing schemaVersion: expected 1 or 2, got ${bundle.schemaVersion}`);
   }
 
-  // Checksum verification if manifest is provided (integrity check against accidental corruption)
+  // Strict manifest & SHA-256 integrity checksum verification
   const computed = `sha256:${computeSnapshotChecksum(bundle)}`;
-  const rawChecksum = bundle.manifest?.checksum;
-  const rawIntegrityChecksum = bundle.manifest?.integrityChecksum;
-  const expectedChecksum = rawChecksum || rawIntegrityChecksum;
-  if (expectedChecksum) {
-    if (rawChecksum && rawIntegrityChecksum && rawChecksum !== rawIntegrityChecksum) {
-      // If a caller updated manifest.checksum without updating manifest.integrityChecksum (or vice versa), accept if the updated one matches
-      if (rawChecksum !== computed && rawIntegrityChecksum !== computed) {
-        errors.push(`Snapshot integrity checksum mismatch: expected ${rawChecksum}, got ${computed} (bundle may be corrupted or modified)`);
+  if (bundle.manifest !== undefined) {
+    if (!bundle.manifest || typeof bundle.manifest !== 'object' || Array.isArray(bundle.manifest)) {
+      errors.push('Field "manifest" must be a non-null object when present');
+    } else {
+      const rawChecksum = typeof bundle.manifest.checksum === 'string' ? bundle.manifest.checksum : '';
+      const rawIntegrityChecksum =
+        typeof bundle.manifest.integrityChecksum === 'string' ? bundle.manifest.integrityChecksum : '';
+      const expectedChecksum = rawChecksum || rawIntegrityChecksum;
+
+      if (!expectedChecksum || !expectedChecksum.startsWith('sha256:')) {
+        errors.push('Snapshot manifest is missing required sha256 integrity checksum');
+      } else {
+        if (rawChecksum && rawIntegrityChecksum && rawChecksum !== rawIntegrityChecksum) {
+          errors.push(
+            `Snapshot integrity checksum mismatch: manifest.checksum (${rawChecksum}) and manifest.integrityChecksum (${rawIntegrityChecksum}) do not match`
+          );
+        }
+        if (rawChecksum && rawChecksum !== computed) {
+          errors.push(
+            `Snapshot integrity checksum mismatch: expected ${rawChecksum}, got ${computed} (bundle may be corrupted or modified)`
+          );
+        } else if (rawIntegrityChecksum && rawIntegrityChecksum !== computed) {
+          errors.push(
+            `Snapshot integrity checksum mismatch: expected ${rawIntegrityChecksum}, got ${computed} (bundle may be corrupted or modified)`
+          );
+        }
       }
-    } else if (expectedChecksum !== computed) {
-      errors.push(`Snapshot integrity checksum mismatch: expected ${expectedChecksum}, got ${computed} (bundle may be corrupted or modified)`);
     }
   }
 
-  // Optional provenance HMAC signature verification
+  // Provenance HMAC signature verification
+  const requireSignature =
+    options?.requireSignature ?? process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
   let signatureStatus: 'verified' | 'unsigned' | 'invalid' = 'unsigned';
   if (bundle.manifest?.signature) {
     const expectedSig = computeSnapshotSignature(computed, options?.signingSecret);
-    if (expectedSig && bundle.manifest.signature === expectedSig) {
+    if (verifySnapshotSignatureConstantTime(String(bundle.manifest.signature), expectedSig)) {
       signatureStatus = 'verified';
     } else {
       signatureStatus = 'invalid';
-      if (options?.requireSignature || options?.signingSecret) {
-        errors.push('Snapshot provenance signature verification failed: HMAC signature does not match server signing key');
-      } else {
-        warnings.push('Snapshot provenance signature does not match current server key (portable backup or rotated key); integrity checksum verified.');
-      }
+      errors.push('Snapshot provenance signature verification failed: HMAC signature does not match server signing key');
     }
-  } else if (options?.requireSignature) {
+  } else if (requireSignature) {
     signatureStatus = 'invalid';
     errors.push('Snapshot provenance signature is required by policy, but bundle is unsigned');
   }
@@ -2337,6 +2362,35 @@ export function validateWorkspaceSnapshot(
     }
   }
 
+  // Verify manifest entity counts and schemaVersion against actual payload when manifest is present
+  if (bundle.manifest && typeof bundle.manifest === 'object' && !Array.isArray(bundle.manifest)) {
+    const mf = bundle.manifest as Partial<SnapshotManifest>;
+    if (mf.schemaVersion !== undefined && Number(mf.schemaVersion) !== schemaVersion) {
+      errors.push(`Snapshot manifest schemaVersion (${mf.schemaVersion}) does not match bundle schemaVersion (${schemaVersion})`);
+    }
+    if (typeof mf.totalSpaces === 'number' && mf.totalSpaces !== spacesCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalSpaces=${mf.totalSpaces}, found ${spacesCount}`);
+    }
+    if (typeof mf.totalDocs === 'number' && mf.totalDocs !== docsCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalDocs=${mf.totalDocs}, found ${docsCount}`);
+    }
+    if (typeof mf.totalRevisions === 'number' && mf.totalRevisions !== revisionsCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalRevisions=${mf.totalRevisions}, found ${revisionsCount}`);
+    }
+    if (typeof mf.totalMissions === 'number' && mf.totalMissions !== missionsCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalMissions=${mf.totalMissions}, found ${missionsCount}`);
+    }
+    if (typeof mf.totalTasks === 'number' && mf.totalTasks !== tasksCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalTasks=${mf.totalTasks}, found ${tasksCount}`);
+    }
+    if (typeof mf.totalEvidence === 'number' && mf.totalEvidence !== evidenceCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalEvidence=${mf.totalEvidence}, found ${evidenceCount}`);
+    }
+    if (typeof mf.totalApprovals === 'number' && mf.totalApprovals !== approvalsCount) {
+      errors.push(`Snapshot manifest count mismatch: expected totalApprovals=${mf.totalApprovals}, found ${approvalsCount}`);
+    }
+  }
+
   return {
     valid: errors.length === 0,
     schemaVersion: schemaVersion || 2,
@@ -2477,7 +2531,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     status: r.status as DbEvidenceRecord['status'],
   }));
 
-  const approvalsAudit = listApprovals(false);
+  const approvalsAudit = listApprovals(false, db);
 
   const totalTasks = missions.reduce((acc, m) => acc + (m.tasks?.length || 0), 0);
   const totalDocs = spaces.reduce((acc, s) => acc + (s.pages?.length || 0), 0);

@@ -2790,7 +2790,7 @@ test('Snapshot Import Security: Path traversal containment, atomic rollback, pro
     fs.writeFileSync(stateFilePath, originalStateContent, 'utf-8');
   }
 
-  // 3. NOOK-P2-12: Integrity checksum vs HMAC provenance signature
+  // 3. NOOK-P2-12: Integrity checksum vs HMAC provenance signature & manifest integrity
   const signingSecret = 'snapshot-hmac-test-signing-key-32bytes!';
   const origApiKey = process.env.NOOK_API_KEY;
   try {
@@ -2809,6 +2809,35 @@ test('Snapshot Import Security: Path traversal containment, atomic rollback, pro
     });
     assert.equal(wrongKeyCheck.valid, false);
     assert.equal(wrongKeyCheck.signatureStatus, 'invalid');
+
+    // Forged checksum on a signed bundle must fail validation even without requireSignature: true
+    const forgedSignedBundle = JSON.parse(JSON.stringify(signedBundle));
+    forgedSignedBundle.spaces[0].name = 'Tampered Signed Space';
+    const { computeSnapshotChecksum } = await import('../lib/db.ts');
+    const forgedHash = `sha256:${computeSnapshotChecksum(forgedSignedBundle)}`;
+    forgedSignedBundle.manifest.checksum = forgedHash;
+    forgedSignedBundle.manifest.integrityChecksum = forgedHash;
+    const forgedCheck = validateWorkspaceSnapshot(forgedSignedBundle);
+    assert.equal(forgedCheck.valid, false, 'Signed bundle with recomputed checksum and stale HMAC must fail');
+    assert.equal(forgedCheck.signatureStatus, 'invalid');
+
+    // Stripped manifest checksums (manifest: {}) must fail validation
+    const strippedManifestBundle = JSON.parse(JSON.stringify(signedBundle));
+    strippedManifestBundle.manifest = {};
+    const strippedCheck = validateWorkspaceSnapshot(strippedManifestBundle);
+    assert.equal(strippedCheck.valid, false, 'Manifest with stripped checksums must fail validation');
+
+    // Disagreed checksum vs integrityChecksum must fail validation
+    const disagreedBundle = JSON.parse(JSON.stringify(signedBundle));
+    disagreedBundle.manifest.integrityChecksum = `sha256:${'0'.repeat(64)}`;
+    const disagreedCheck = validateWorkspaceSnapshot(disagreedBundle);
+    assert.equal(disagreedCheck.valid, false, 'Disagreed checksum and integrityChecksum must fail validation');
+
+    // Manifest entity count mismatch must fail validation
+    const countMismatchBundle = JSON.parse(JSON.stringify(signedBundle));
+    countMismatchBundle.manifest.totalSpaces = 9999;
+    const countCheck = validateWorkspaceSnapshot(countMismatchBundle);
+    assert.equal(countCheck.valid, false, 'Manifest count mismatch must fail validation');
   } finally {
     if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
     else delete process.env.NOOK_API_KEY;
@@ -2828,6 +2857,43 @@ test('Snapshot Import Security: Path traversal containment, atomic rollback, pro
   const quotaValidation = validateWorkspaceSnapshot(oversizedBundle);
   assert.equal(quotaValidation.valid, false);
   assert.ok(quotaValidation.errors.some((e) => e.includes('exceeds maximum size')));
+
+  // 5. POST /api/workspace/state strictly rejects filesystem traversal in agentId and filenames
+  const { POST: stateRoutePost } = await import('../app/api/workspace/state/route.ts');
+  const origStateKey = process.env.NOOK_API_KEY;
+  try {
+    process.env.NOOK_API_KEY = `state-sync-${crypto.randomBytes(16).toString('hex')}`;
+    const traversalPayloads = [
+      { computerStates: { '../../outside_state_sync': { files: [{ name: 'pwn.txt', content: 'bad' }] } } },
+      { computerStates: { '..': { files: [{ name: 'pwn.txt', content: 'bad' }] } } },
+      { computerStates: { 'agent/slash': { files: [{ name: 'pwn.txt', content: 'bad' }] } } },
+      { computerStates: { 'agent-cipher': { files: [{ name: '../escape.txt', content: 'bad' }] } } },
+      { computerStates: { 'agent-cipher': { files: [{ name: '..', content: 'bad' }] } } },
+    ];
+
+    for (const badState of traversalPayloads) {
+      const stateReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-nook-api-key': process.env.NOOK_API_KEY,
+        },
+        body: JSON.stringify(badState),
+      });
+      const stateRes = await stateRoutePost(stateReq);
+      assert.equal(stateRes.status, 400, 'POST /api/workspace/state must reject traversal payload with 400');
+    }
+
+    assert.equal(
+      fs.existsSync(path.join(process.cwd(), 'outside_state_sync')),
+      false,
+      'Traversal directory outside .nook_storage/sandboxes must never be created by /api/workspace/state'
+    );
+  } finally {
+    if (origStateKey !== undefined) process.env.NOOK_API_KEY = origStateKey;
+    else delete process.env.NOOK_API_KEY;
+    fs.writeFileSync(stateFilePath, originalStateContent, 'utf-8');
+  }
 });
 
 // =========================================================================

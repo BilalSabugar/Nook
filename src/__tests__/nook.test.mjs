@@ -327,6 +327,300 @@ test('Mission Database & Export Security: API keys and secrets strictly excluded
   assert.equal(snapshotJson.includes('sk-OpenAiSecretKeyToFilterOut'), false, 'Exported snapshot must not contain any leaked OpenAI API key');
 });
 
+test('MCP Server 2024-11-05 Protocol: initialize Handshake, ping, and notifications/initialized', async () => {
+  const { handleJsonRpcRequest } = await import('../app/api/mcp/route.ts');
+
+  // 1. initialize handshake
+  const initRes = await handleJsonRpcRequest({
+    method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05',
+      clientInfo: { name: 'test-client', version: '1.0.0' },
+    },
+    id: 'req-init',
+  });
+
+  assert.equal(initRes.jsonrpc, '2.0');
+  assert.equal(initRes.id, 'req-init');
+  assert.equal(initRes.result.protocolVersion, '2024-11-05', 'Must support MCP 2024-11-05 protocol version');
+  assert.equal(initRes.result.serverInfo.name, 'nook');
+  assert.equal(initRes.result.serverInfo.version, '1.0.0');
+  assert.ok(initRes.result.capabilities.tools, 'Must declare tools capability');
+  assert.ok(initRes.result.capabilities.resources, 'Must declare resources capability');
+  assert.ok(initRes.result.capabilities.prompts, 'Must declare prompts capability');
+  assert.ok(initRes.result.capabilities.logging, 'Must declare logging capability');
+
+  // 2. ping
+  const pingRes = await handleJsonRpcRequest({ method: 'ping', id: 42 });
+  assert.equal(pingRes.jsonrpc, '2.0');
+  assert.equal(pingRes.id, 42);
+  assert.deepEqual(pingRes.result, {});
+
+  // 3. notifications/initialized (standard notification returns null / no content)
+  const notifRes = await handleJsonRpcRequest({ method: 'notifications/initialized' });
+  assert.equal(notifRes, null, 'MCP notification must return null to signify 204 No Content');
+
+  // 4. logging/setLevel
+  const logRes = await handleJsonRpcRequest({ method: 'logging/setLevel', params: { level: 'info' }, id: 99 });
+  assert.equal(logRes.id, 99);
+  assert.deepEqual(logRes.result, {});
+});
+
+test('MCP Server 2024-11-05 Protocol: Tools Listing and Execution', async () => {
+  const { handleJsonRpcRequest } = await import('../app/api/mcp/route.ts');
+
+  // 1. tools/list
+  const listRes = await handleJsonRpcRequest({ method: 'tools/list', id: 1 });
+  assert.equal(listRes.jsonrpc, '2.0');
+  assert.ok(Array.isArray(listRes.result.tools));
+  assert.equal(listRes.result.tools.length, 6, 'Should list all 6 registered MCP tools');
+  for (const tool of listRes.result.tools) {
+    assert.equal(typeof tool.readOnlyHint, 'boolean');
+    assert.equal(typeof tool.destructiveHint, 'boolean');
+    assert.equal(typeof tool.idempotentHint, 'boolean');
+    assert.equal(typeof tool.openWorldHint, 'boolean');
+  }
+
+  // 2. tools/call: calculate
+  const calcRes = await handleJsonRpcRequest({
+    method: 'tools/call',
+    params: {
+      name: 'calculate',
+      arguments: { expression: '100 / 4 + 5 * 2 - 3' },
+    },
+    id: 2,
+  });
+  assert.equal(calcRes.id, 2);
+  assert.ok(calcRes.result.content[0].text.includes('32'), 'Calculation result must be 32');
+
+  // 3. tools/call: format_document
+  const formatRes = await handleJsonRpcRequest({
+    method: 'tools/call',
+    params: {
+      name: 'format_document',
+      arguments: {
+        title: 'Security Architecture RFC',
+        rawNotes: 'Strict path containment\nNo eval or dynamic Function execution',
+      },
+    },
+    id: 3,
+  });
+  assert.ok(formatRes.result.content[0].text.includes('# Security Architecture RFC'));
+  assert.ok(formatRes.result.content[0].text.includes('Strict path containment'));
+
+  // 4. tools/call: unknown tool error handling
+  const unknownRes = await handleJsonRpcRequest({
+    method: 'tools/call',
+    params: { name: 'non_existent_tool' },
+    id: 4,
+  });
+  assert.equal(unknownRes.error.code, -32601);
+  assert.ok(unknownRes.error.message.includes('Unknown or unsupported MCP tool'));
+
+  // 5. tools/call: missing name parameter error handling
+  const missingNameRes = await handleJsonRpcRequest({
+    method: 'tools/call',
+    params: {},
+    id: 5,
+  });
+  assert.equal(missingNameRes.error.code, -32602);
+});
+
+test('MCP Server 2024-11-05 Protocol: Resources, Templates, and Document Reading', async () => {
+  const { handleJsonRpcRequest } = await import('../app/api/mcp/route.ts');
+
+  // 1. resources/list
+  const resList = await handleJsonRpcRequest({ method: 'resources/list', id: 10 });
+  assert.equal(resList.jsonrpc, '2.0');
+  assert.ok(Array.isArray(resList.result.resources));
+  assert.ok(resList.result.resources.length > 0, 'Should expose living space documents as MCP resources');
+
+  const firstResource = resList.result.resources[0];
+  assert.ok(firstResource.uri.startsWith('nook://spaces/'));
+  assert.equal(firstResource.mimeType, 'text/markdown');
+  assert.ok(firstResource.name);
+
+  // 2. resources/templates/list
+  const tplList = await handleJsonRpcRequest({ method: 'resources/templates/list', id: 11 });
+  assert.ok(Array.isArray(tplList.result.resourceTemplates));
+  assert.equal(tplList.result.resourceTemplates[0].uriTemplate, 'nook://spaces/{spaceId}/documents/{documentId}');
+
+  // 3. resources/read with valid URI
+  const readRes = await handleJsonRpcRequest({
+    method: 'resources/read',
+    params: { uri: firstResource.uri },
+    id: 12,
+  });
+  assert.equal(readRes.id, 12);
+  assert.ok(Array.isArray(readRes.result.contents));
+  assert.equal(readRes.result.contents[0].uri, firstResource.uri);
+  assert.equal(readRes.result.contents[0].mimeType, 'text/markdown');
+  assert.ok(readRes.result.contents[0].text.length > 0, 'Document content must be returned');
+
+  // 4. resources/read with non-existent URI
+  const notFoundRes = await handleJsonRpcRequest({
+    method: 'resources/read',
+    params: { uri: 'nook://spaces/invalid-space/documents/invalid-doc' },
+    id: 13,
+  });
+  assert.equal(notFoundRes.error.code, -32602);
+  assert.ok(notFoundRes.error.message.includes('Resource not found'));
+
+  // 5. resources/read without URI parameter
+  const missingUriRes = await handleJsonRpcRequest({
+    method: 'resources/read',
+    params: {},
+    id: 14,
+  });
+  assert.equal(missingUriRes.error.code, -32602);
+});
+
+test('MCP Server 2024-11-05 Protocol: Coworker Prompts Listing and Retrieval', async () => {
+  const { handleJsonRpcRequest, MCP_PROMPTS } = await import('../app/api/mcp/route.ts');
+
+  // 1. prompts/list
+  const promptList = await handleJsonRpcRequest({ method: 'prompts/list', id: 20 });
+  assert.equal(promptList.jsonrpc, '2.0');
+  assert.equal(promptList.result.prompts.length, MCP_PROMPTS.length);
+
+  const promptNames = promptList.result.prompts.map((p) => p.name);
+  assert.ok(promptNames.includes('research_brief'), 'Must expose Scout research brief prompt');
+  assert.ok(promptNames.includes('technical_specification'), 'Must expose Quill technical specification prompt');
+  assert.ok(promptNames.includes('code_implementation'), 'Must expose Cipher code implementation prompt');
+  assert.ok(promptNames.includes('mission_orchestration'), 'Must expose Aura mission orchestration prompt');
+
+  // 2. prompts/get: research_brief (Scout)
+  const scoutPrompt = await handleJsonRpcRequest({
+    method: 'prompts/get',
+    params: {
+      name: 'research_brief',
+      arguments: { topic: 'Autonomous Multi-Agent Architecture' },
+    },
+    id: 21,
+  });
+  assert.equal(scoutPrompt.id, 21);
+  assert.ok(scoutPrompt.result.description.includes('Autonomous Multi-Agent Architecture'));
+  assert.ok(scoutPrompt.result.messages[0].content.text.includes('Scout'));
+  assert.ok(scoutPrompt.result.messages[0].content.text.includes('Autonomous Multi-Agent Architecture'));
+
+  // 3. prompts/get: code_implementation (Cipher)
+  const cipherPrompt = await handleJsonRpcRequest({
+    method: 'prompts/get',
+    params: {
+      name: 'code_implementation',
+      arguments: { objective: 'Deterministic Math Parser' },
+    },
+    id: 22,
+  });
+  assert.ok(cipherPrompt.result.messages[0].content.text.includes('Cipher'));
+  assert.ok(cipherPrompt.result.messages[0].content.text.includes('Deterministic Math Parser'));
+
+  // 4. prompts/get: unknown prompt
+  const unknownPrompt = await handleJsonRpcRequest({
+    method: 'prompts/get',
+    params: { name: 'non_existent_prompt' },
+    id: 23,
+  });
+  assert.equal(unknownPrompt.error.code, -32601);
+});
+
+test('MCP Server Transport: HTTP POST Batching & Error Handling', async () => {
+  process.env.NOOK_API_KEY = 'test-mcp-api-key-9999';
+  const { NextRequest } = await import('next/server.js');
+  const { POST } = await import('../app/api/mcp/route.ts');
+
+  // 1. Batch JSON-RPC request
+  const batchReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify([
+      { method: 'ping', id: 101 },
+      { method: 'tools/list', id: 102 },
+      { method: 'notifications/initialized' }, // Notification returns null and is filtered
+    ]),
+  });
+
+  const batchRes = await POST(batchReq);
+  assert.equal(batchRes.status, 200);
+  const batchData = await batchRes.json();
+  assert.equal(Array.isArray(batchData), true);
+  assert.equal(batchData.length, 2, 'Should return exactly 2 responses for 2 calls with IDs');
+  assert.equal(batchData[0].id, 101);
+  assert.equal(batchData[1].id, 102);
+
+  // 2. Unknown method error handling
+  const unknownMethodReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify({ method: 'invalid/method', id: 201 }),
+  });
+  const unknownMethodRes = await POST(unknownMethodReq);
+  assert.equal(unknownMethodRes.status, 404);
+  const unknownData = await unknownMethodRes.json();
+  assert.equal(unknownData.error.code, -32601);
+
+  // 3. Malformed JSON-RPC without method
+  const invalidRpcReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+    body: JSON.stringify({ params: {}, id: 202 }),
+  });
+  const invalidRpcRes = await POST(invalidRpcReq);
+  assert.equal(invalidRpcRes.status, 400);
+  const invalidRpcData = await invalidRpcRes.json();
+  assert.equal(invalidRpcData.error.code, -32600);
+});
+
+test('MCP Server Transport: SSE Stream & Discovery GET', async () => {
+  process.env.NOOK_API_KEY = 'test-mcp-api-key-9999';
+  const { NextRequest } = await import('next/server.js');
+  const { GET } = await import('../app/api/mcp/route.ts');
+
+  // 1. Standard Discovery GET
+  const discoveryReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'GET',
+    headers: {
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+  });
+  const discoveryRes = await GET(discoveryReq);
+  assert.equal(discoveryRes.status, 200);
+  const discoveryData = await discoveryRes.json();
+  assert.equal(discoveryData.server.name, 'nook');
+  assert.equal(discoveryData.server.protocolVersion, '2024-11-05');
+  assert.ok(Array.isArray(discoveryData.tools));
+  assert.ok(Array.isArray(discoveryData.resources));
+  assert.ok(Array.isArray(discoveryData.prompts));
+
+  // 2. Server-Sent Events (SSE) Transport GET
+  const sseReq = new NextRequest('http://localhost:3000/api/mcp', {
+    method: 'GET',
+    headers: {
+      'accept': 'text/event-stream',
+      'x-nook-api-key': 'test-mcp-api-key-9999',
+    },
+  });
+  const sseRes = await GET(sseReq);
+  assert.equal(sseRes.status, 200);
+  assert.ok(sseRes.headers.get('content-type').includes('text/event-stream'));
+
+  // Verify first event emitted is MCP SSE endpoint announcement
+  const reader = sseRes.body.getReader();
+  const { value } = await reader.read();
+  const eventPayload = new TextDecoder().decode(value);
+  assert.ok(eventPayload.includes('event: endpoint'), 'SSE stream must emit endpoint event');
+  assert.ok(eventPayload.includes('data: /api/mcp?sessionId='), 'SSE stream must deliver session endpoint url');
+});
+
 
 
 

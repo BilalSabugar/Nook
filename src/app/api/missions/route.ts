@@ -8,6 +8,7 @@ import {
   listEvidence,
   acquireWorkerLease,
   releaseWorkerLease,
+  scrubSensitiveData,
 } from '@/lib/db';
 import { planMission, tickMission } from '@/lib/orchestrator';
 
@@ -33,21 +34,21 @@ export async function GET(req: NextRequest) {
     const tasks = listTasksForMission(missionId);
     const evidence = listEvidence({ missionId });
 
-    return NextResponse.json({
+    return NextResponse.json(scrubSensitiveData({
       mission: {
         ...mission,
         tasks,
         evidenceTimeline: evidence,
       },
-    });
+    }));
   }
 
   const missions = listMissions();
-  return NextResponse.json({
+  return NextResponse.json(scrubSensitiveData({
     missions,
     total: missions.length,
     timestamp: new Date().toISOString(),
-  });
+  }));
 }
 
 /**
@@ -73,19 +74,26 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'Mission objective is required' }, { status: 400 });
       }
 
+      // Strip any API keys or credentials from modelOptions before planning
+      const safeModelOptions = modelOptions ? {
+        provider: modelOptions.provider,
+        model: modelOptions.model,
+        endpoint: modelOptions.endpoint,
+      } : undefined;
+
       const mission = planMission({
         title: title || 'Autonomous Multi-Agent Mission',
         objective,
         priority: priority || 'medium',
         requiresCodeExecution: Boolean(requiresCodeExecution),
         codeGenerationMode: codeGenerationMode || 'auto',
-        modelOptions,
+        modelOptions: safeModelOptions,
       });
 
-      return NextResponse.json({
+      return NextResponse.json(scrubSensitiveData({
         success: true,
         mission,
-      }, { status: 201 });
+      }), { status: 201 });
     }
 
     // 2. Tick / step mission execution
@@ -102,14 +110,14 @@ export async function POST(req: NextRequest) {
       const tasks = listTasksForMission(missionId);
       const evidence = listEvidence({ missionId });
 
-      return NextResponse.json({
+      return NextResponse.json(scrubSensitiveData({
         success: true,
         mission: {
           ...updated,
           tasks,
           evidenceTimeline: evidence,
         },
-      });
+      }));
     }
 
     // 3. Pause mission (coordinates with active worker lease)

@@ -1207,6 +1207,51 @@ export function updateMissionStatus(
   logAuditEvent('MISSION_STATUS', `Mission ${id} status updated to ${status}`, 'success', 'agent-aura');
 }
 
+/**
+ * Recursively strips all API keys, authorization tokens, passwords, and private credentials
+ * from any object, array, or string payload. Guarantees secrets never enter regular
+ * SQLite tables (agent_tasks, missions, evidence_records) or workspace export bundles.
+ */
+export function scrubSensitiveData<T>(data: T): T {
+  if (data === null || data === undefined) return data;
+
+  if (typeof data === 'string') {
+    // Redact recognizable secret formats in raw strings
+    if (/^AIza[0-9A-Za-z-_]{35}$/.test(data)) return '[REDACTED_GEMINI_KEY]' as unknown as T;
+    if (/^sk-[a-zA-Z0-9-_]{20,}$/.test(data)) return '[REDACTED_OPENAI_KEY]' as unknown as T;
+    if (/^sk-ant-[a-zA-Z0-9-_]{20,}$/.test(data)) return '[REDACTED_ANTHROPIC_KEY]' as unknown as T;
+    return data;
+  }
+
+  if (typeof data !== 'object') {
+    return data;
+  }
+
+  if (Array.isArray(data)) {
+    return data.map((item) => scrubSensitiveData(item)) as unknown as T;
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    const lowerKey = key.toLowerCase();
+    // Exclude or redact any sensitive key related to API keys, secrets, tokens, or credentials
+    if (
+      lowerKey.includes('apikey') ||
+      lowerKey.includes('api_key') ||
+      lowerKey.includes('secret') ||
+      lowerKey.includes('token') ||
+      lowerKey.includes('password') ||
+      lowerKey.includes('credential') ||
+      lowerKey.includes('bearer') ||
+      (lowerKey.includes('auth') && !lowerKey.includes('author'))
+    ) {
+      continue;
+    }
+    result[key] = scrubSensitiveData(value);
+  }
+  return result as T;
+}
+
 export function createAgentTask(task: {
   id?: string;
   missionId: string;
@@ -1220,6 +1265,8 @@ export function createAgentTask(task: {
   const db = getDatabase();
   const id = task.id || `tsk-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
+  // Strip any API keys, tokens, or credentials from inputs before SQLite insertion
+  const cleanInputs = scrubSensitiveData(task.inputs || {});
 
   db.prepare(`
     INSERT INTO agent_tasks (
@@ -1234,7 +1281,7 @@ export function createAgentTask(task: {
     task.assignedAgentId,
     JSON.stringify(task.dependencies || []),
     task.priority || 'medium',
-    JSON.stringify(task.inputs || {}),
+    JSON.stringify(cleanInputs),
     now,
     now
   );
@@ -1250,7 +1297,7 @@ export function createAgentTask(task: {
     status: 'pending',
     dependencies: task.dependencies || [],
     priority: task.priority || 'medium',
-    inputs: task.inputs || {},
+    inputs: cleanInputs,
     outputs: {},
     observations: [],
     createdAt: now,
@@ -1327,7 +1374,8 @@ export function updateAgentTask(
 
   const now = new Date().toISOString();
   const status = update.status || existing.status;
-  const outputs = update.outputs ? { ...existing.outputs, ...update.outputs } : existing.outputs;
+  const rawOutputs = update.outputs ? { ...existing.outputs, ...update.outputs } : existing.outputs;
+  const cleanOutputs = scrubSensitiveData(rawOutputs);
   const completedAt = status === 'completed' || status === 'failed' ? now : existing.completedAt;
 
   db.prepare(`
@@ -1336,7 +1384,7 @@ export function updateAgentTask(
     WHERE id = ?
   `).run(
     status,
-    JSON.stringify(outputs),
+    JSON.stringify(cleanOutputs),
     update.error || existing.error || null,
     update.approvalId || existing.approvalId || null,
     update.approvalToken || existing.approvalToken || null,
@@ -1360,8 +1408,8 @@ export function addAgentTaskObservation(
   observations.push({
     timestamp: new Date().toISOString(),
     tool: obs.tool,
-    input: obs.input,
-    output: obs.output,
+    input: scrubSensitiveData(obs.input),
+    output: typeof obs.output === 'string' ? scrubSensitiveData(obs.output) : obs.output,
     status: obs.status,
   });
 
@@ -1434,13 +1482,8 @@ export function recordEvidence(record: {
   const id = `ev-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
 
-  // Sanitize details: strip secrets if present
-  const safeDetails = { ...(record.details || {}) };
-  for (const k of Object.keys(safeDetails)) {
-    if (k.toLowerCase().includes('key') || k.toLowerCase().includes('token') || k.toLowerCase().includes('secret')) {
-      safeDetails[k] = '[REDACTED]';
-    }
-  }
+  // Deeply sanitize details: scrub all API keys, tokens, and credentials
+  const safeDetails = scrubSensitiveData(record.details || {});
 
   db.prepare(`
     INSERT INTO evidence_records (
@@ -1794,10 +1837,10 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
       status: r.status as DbAgentTask['status'],
       dependencies: JSON.parse(r.dependencies_json || '[]'),
       priority: r.priority as DbAgentTask['priority'],
-      inputs: JSON.parse(r.inputs_json || '{}'),
-      outputs: JSON.parse(r.outputs_json || '{}'),
-      observations: JSON.parse(r.observations_json || '[]'),
-      verification: r.verification_json ? JSON.parse(r.verification_json) : undefined,
+      inputs: scrubSensitiveData(JSON.parse(r.inputs_json || '{}')),
+      outputs: scrubSensitiveData(JSON.parse(r.outputs_json || '{}')),
+      observations: scrubSensitiveData(JSON.parse(r.observations_json || '[]')),
+      verification: r.verification_json ? scrubSensitiveData(JSON.parse(r.verification_json)) : undefined,
       approvalId: r.approval_id || undefined,
       approvalToken: undefined, // NEVER export single-use tokens!
       error: r.error || undefined,
@@ -1814,7 +1857,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
       priority: row.priority as DbMission['priority'],
       assignedAgents: JSON.parse(row.assigned_agents_json || '[]'),
       milestones: JSON.parse(row.milestones_json || '[]'),
-      budget: row.budget_json ? JSON.parse(row.budget_json) : undefined,
+      budget: row.budget_json ? scrubSensitiveData(JSON.parse(row.budget_json)) : undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       completedAt: row.completed_at || undefined,
@@ -1832,13 +1875,13 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     timestamp: r.timestamp,
     actionType: r.action_type,
     summary: r.summary,
-    details: JSON.parse(r.details_json || '{}'),
+    details: scrubSensitiveData(JSON.parse(r.details_json || '{}')),
     status: r.status as DbEvidenceRecord['status'],
   }));
 
   const approvalsAudit = listApprovals(false);
 
-  return {
+  return scrubSensitiveData({
     nookVersion: '1.2.0',
     exportedAt: new Date().toISOString(),
     schemaVersion: 2,
@@ -1847,7 +1890,7 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     missions,
     evidenceTimeline,
     approvalsAudit,
-  };
+  });
 }
 
 export function importWorkspaceSnapshot(

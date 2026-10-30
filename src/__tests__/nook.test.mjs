@@ -264,6 +264,69 @@ test('Dynamic Code Execution Guard: No eval() or new Function() in codebase', as
   assert.equal(/(\beval\s*\(|new\s+Function\s*\(|\bFunction\s*\()/.test(stripComments(browserSessionContent)), false, 'browser-session must not contain eval or new Function');
 });
 
+test('Mission Database & Export Security: API keys and secrets strictly excluded', async () => {
+  const { createMission, createAgentTask, exportWorkspaceSnapshot, scrubSensitiveData, getDatabase } = await import('../lib/db.ts');
+
+  // 1. Verify scrubSensitiveData function
+  const rawPayload = {
+    provider: 'gemini',
+    apiKey: 'AIzaSy1234567890abcdef1234567890abcdef',
+    modelOptions: {
+      apiKey: 'sk-proj-secret-key-1234567890',
+      nestedSecret: 'my_super_secret_token',
+      safeParam: 'hello world',
+    },
+    authHeader: 'Bearer sk-123456',
+    normalText: 'This is a public research note',
+  };
+
+  const scrubbed = scrubSensitiveData(rawPayload);
+  assert.equal(scrubbed.apiKey, undefined, 'apiKey property must be removed');
+  assert.equal(scrubbed.authHeader, undefined, 'authHeader property must be removed');
+  assert.equal(scrubbed.modelOptions.apiKey, undefined, 'nested apiKey property must be removed');
+  assert.equal(scrubbed.modelOptions.nestedSecret, undefined, 'nested secret property must be removed');
+  assert.equal(scrubbed.modelOptions.safeParam, 'hello world', 'safe param must be preserved');
+  assert.equal(scrubbed.normalText, 'This is a public research note', 'normal text must be preserved');
+
+  // 2. Verify agent_tasks SQLite table does NOT store API keys
+  const testMission = createMission({
+    title: 'Security Scrubbing Test Mission',
+    objective: 'Verify database inputs do not retain API keys',
+  });
+
+  const testTask = createAgentTask({
+    missionId: testMission.id,
+    title: 'Code task with accidental API key',
+    goal: 'Test scrubbing in SQLite',
+    assignedAgentId: 'agent-cipher',
+    inputs: {
+      codeSpec: 'export default {}',
+      apiKey: 'AIzaSySecretLeak12345678901234567890',
+      modelOptions: {
+        apiKey: 'sk-OpenAiSecretKeyToFilterOut12345',
+        model: 'gemini-1.5-flash',
+      },
+    },
+  });
+
+  // Verify memory object has clean inputs
+  assert.equal(testTask.inputs.apiKey, undefined, 'Task object inputs must not retain apiKey');
+  assert.equal(testTask.inputs.modelOptions?.apiKey, undefined, 'Task object modelOptions must not retain apiKey');
+
+  // Check actual SQLite table contents
+  const db = getDatabase();
+  const dbRow = db.prepare('SELECT inputs_json FROM agent_tasks WHERE id = ?').get(testTask.id);
+  assert.ok(dbRow, 'Task must exist in DB');
+  assert.equal(dbRow.inputs_json.includes('AIzaSySecretLeak'), false, 'DB inputs_json must not contain Gemini API key');
+  assert.equal(dbRow.inputs_json.includes('sk-OpenAiSecretKeyToFilterOut'), false, 'DB inputs_json must not contain OpenAI API key');
+
+  // 3. Verify workspace export NEVER contains API keys
+  const snapshot = exportWorkspaceSnapshot(db);
+  const snapshotJson = JSON.stringify(snapshot);
+  assert.equal(snapshotJson.includes('AIzaSySecretLeak'), false, 'Exported snapshot must not contain any leaked Gemini API key');
+  assert.equal(snapshotJson.includes('sk-OpenAiSecretKeyToFilterOut'), false, 'Exported snapshot must not contain any leaked OpenAI API key');
+});
+
 
 
 

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { exportWorkspaceSnapshot } from '@/lib/db';
+import { exportWorkspaceSnapshot, scrubSensitiveData } from '@/lib/db';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -28,14 +28,14 @@ export async function GET(req: NextRequest) {
 
     const snapshot = exportWorkspaceSnapshot();
 
-    const exportBundle = {
+    const exportBundle = scrubSensitiveData({
       ...snapshot,
       workspace: {
         agents: workspaceState.agents || [],
         messages: workspaceState.messages || {},
         computerStates: workspaceState.computerStates || {},
       },
-    };
+    });
 
     return new NextResponse(JSON.stringify(exportBundle, null, 2), {
       status: 200,

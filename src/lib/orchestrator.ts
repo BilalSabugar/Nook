@@ -21,6 +21,7 @@ import {
 import type { DbMission, DbAgentTask } from './db.ts';
 import { safeFetch } from './ssrf.ts';
 import { executeSandboxedCommand } from './sandbox.ts';
+import { loadEncryptedSecrets } from './secrets.ts';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -100,7 +101,11 @@ export function planMission(input: MissionPlanInput): DbMission {
         testContent: codeSpec.testContent,
         command: codeSpec.command,
         codeGenerationMode: input.codeGenerationMode || 'auto',
-        modelOptions: input.modelOptions,
+        modelOptions: input.modelOptions ? {
+          provider: input.modelOptions.provider,
+          model: input.modelOptions.model,
+          endpoint: input.modelOptions.endpoint,
+        } : undefined,
       },
     });
   }
@@ -483,12 +488,22 @@ ${citationsList}
 
     const genMode = task.inputs.codeGenerationMode || 'auto';
     const modelOpts = (task.inputs.modelOptions as any) || {};
-    const hasConfiguredProvider = Boolean(
+
+    // Retrieve provider API keys dynamically at runtime from the encrypted secrets store or environment.
+    // Keys are never persisted inside SQLite task inputs or mission records.
+    const serverSecrets = await loadEncryptedSecrets().catch(() => ({} as any));
+    const targetProvider = modelOpts.provider;
+    const resolvedApiKey = (
       modelOpts.apiKey ||
+      (targetProvider === 'gemini' ? (serverSecrets.geminiApiKey || process.env.GEMINI_API_KEY) :
+       targetProvider === 'openai' ? (serverSecrets.openaiApiKey || process.env.OPENAI_API_KEY) :
+       targetProvider === 'anthropic' ? (serverSecrets.anthropicApiKey || process.env.ANTHROPIC_API_KEY) :
+       (serverSecrets.geminiApiKey || serverSecrets.openaiApiKey || serverSecrets.anthropicApiKey || process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY))
+    );
+
+    const hasConfiguredProvider = Boolean(
+      resolvedApiKey ||
       modelOpts.endpoint ||
-      process.env.GEMINI_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      process.env.ANTHROPIC_API_KEY ||
       process.env.OLLAMA_BASE_URL
     );
 
@@ -498,7 +513,7 @@ ${citationsList}
           mode: genMode === 'model' ? 'model' : 'auto',
           requireModel: genMode === 'model',
           provider: modelOpts.provider,
-          apiKey: modelOpts.apiKey,
+          apiKey: resolvedApiKey,
           endpoint: modelOpts.endpoint,
           model: modelOpts.model,
         });

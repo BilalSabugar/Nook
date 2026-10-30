@@ -15,41 +15,45 @@ let _globalProxy: EgressProxyInstance | null = null;
 let _startingPromise: Promise<EgressProxyInstance> | null = null;
 
 export async function resolveHostSafely(hostname: string): Promise<{ safe: boolean; reason?: string; pinnedIp?: string; allIps?: string[] }> {
+  const cleanHost = (hostname || '').replace(/^\[|\]$/g, '').trim().toLowerCase();
+  if (!cleanHost) {
+    return { safe: false, reason: 'Empty hostname' };
+  }
+
   // Respect test loopback override if configured (strictly disabled in production)
   if (process.env.ALLOW_TEST_LOOPBACK === 'true' && process.env.NODE_ENV !== 'production') {
-    if (hostname === '127.0.0.1' || hostname === 'localhost') {
+    if (cleanHost === '127.0.0.1' || cleanHost === 'localhost') {
       return { safe: true, pinnedIp: '127.0.0.1', allIps: ['127.0.0.1'] };
     }
   }
 
   // Check direct IP
-  if (net.isIP(hostname)) {
-    if (net.isIPv4(hostname) && isForbiddenIpv4(hostname)) {
-      return { safe: false, reason: `Direct IP ${hostname} is in forbidden private/link-local/metadata range` };
+  if (net.isIP(cleanHost)) {
+    if (net.isIPv4(cleanHost) && isForbiddenIpv4(cleanHost)) {
+      return { safe: false, reason: `Direct IP ${cleanHost} is in forbidden private/link-local/metadata range` };
     }
-    if (net.isIPv6(hostname) && isForbiddenIpv6(hostname)) {
-      return { safe: false, reason: `Direct IPv6 ${hostname} is in forbidden private/link-local range` };
+    if (net.isIPv6(cleanHost) && isForbiddenIpv6(cleanHost)) {
+      return { safe: false, reason: `Direct IPv6 ${cleanHost} is in forbidden private/link-local range` };
     }
-    return { safe: true, pinnedIp: hostname, allIps: [hostname] };
+    return { safe: true, pinnedIp: cleanHost, allIps: [cleanHost] };
   }
 
   // Obvious internal domain names
-  const lower = hostname.toLowerCase();
   if (
-    lower === 'localhost' ||
-    lower.endsWith('.localhost') ||
-    lower.endsWith('.internal') ||
-    lower.endsWith('.local') ||
-    lower === 'metadata.google.internal' ||
-    lower === 'instance-data'
+    cleanHost === 'localhost' ||
+    cleanHost.endsWith('.localhost') ||
+    cleanHost.endsWith('.internal') ||
+    cleanHost.endsWith('.local') ||
+    cleanHost === 'metadata.google.internal' ||
+    cleanHost === 'instance-data'
   ) {
-    return { safe: false, reason: `Forbidden internal host: ${hostname}` };
+    return { safe: false, reason: `Forbidden internal host: ${cleanHost}` };
   }
 
   try {
-    const lookupResults = await dns.promises.lookup(hostname, { all: true });
+    const lookupResults = await dns.promises.lookup(cleanHost, { all: true });
     if (!lookupResults || lookupResults.length === 0) {
-      return { safe: false, reason: `No DNS records found for ${hostname}` };
+      return { safe: false, reason: `No DNS records found for ${cleanHost}` };
     }
 
     const allIps: string[] = [];
@@ -66,7 +70,7 @@ export async function resolveHostSafely(hostname: string): Promise<{ safe: boole
     return { safe: true, pinnedIp: lookupResults[0].address, allIps };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { safe: false, reason: `DNS resolution failed for ${hostname}: ${msg}` };
+    return { safe: false, reason: `DNS resolution failed for ${cleanHost}: ${msg}` };
   }
 }
 
@@ -123,14 +127,29 @@ export function createEgressProxy(): Promise<EgressProxyInstance> {
     // CONNECT tunnel proxying (for HTTPS)
     server.on('connect', async (req, clientSocket, head) => {
       try {
-        const [host, portStr] = (req.url || '').split(':');
-        const port = parseInt(portStr, 10) || 443;
+        const rawUrl = req.url || '';
+        let host = rawUrl;
+        let port = 443;
+        if (rawUrl.startsWith('[')) {
+          const closing = rawUrl.indexOf(']');
+          if (closing !== -1) {
+            host = rawUrl.slice(1, closing);
+            const rest = rawUrl.slice(closing + 1);
+            if (rest.startsWith(':')) {
+              port = parseInt(rest.slice(1), 10) || 443;
+            }
+          }
+        } else if (rawUrl.includes(':')) {
+          const parts = rawUrl.split(':');
+          host = parts[0];
+          port = parseInt(parts[1], 10) || 443;
+        }
+
         const check = await resolveHostSafely(host);
 
         if (!check.safe || !check.pinnedIp) {
           logAuditEvent('BROWSER_EGRESS_BLOCKED', `Egress CONNECT tunnel blocked for ${host}:${port}: ${check.reason}`, 'blocked');
-          clientSocket.write('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\n\r\nForbidden by Nook Egress Policy\r\n');
-          clientSocket.destroy();
+          clientSocket.end('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden by Nook Egress Policy\r\n');
           return;
         }
 
@@ -144,16 +163,18 @@ export function createEgressProxy(): Promise<EgressProxyInstance> {
         });
 
         targetSocket.on('error', () => {
-          clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-          clientSocket.destroy();
+          if (!clientSocket.destroyed) {
+            clientSocket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n');
+          }
         });
 
         clientSocket.on('error', () => {
           targetSocket.destroy();
         });
       } catch {
-        clientSocket.write('HTTP/1.1 500 Internal Proxy Error\r\n\r\n');
-        clientSocket.destroy();
+        if (!clientSocket.destroyed) {
+          clientSocket.end('HTTP/1.1 500 Internal Proxy Error\r\nConnection: close\r\n\r\n');
+        }
       }
     });
 
@@ -185,13 +206,24 @@ export function createEgressProxy(): Promise<EgressProxyInstance> {
 }
 
 export async function getGlobalEgressProxy(): Promise<EgressProxyInstance> {
-  if (_globalProxy) return _globalProxy;
+  if (_globalProxy && _globalProxy.server && _globalProxy.server.listening) {
+    return _globalProxy;
+  }
+  if (_globalProxy) {
+    _globalProxy = null;
+  }
   if (!_startingPromise) {
-    _startingPromise = createEgressProxy().then((proxy) => {
-      _globalProxy = proxy;
-      _startingPromise = null;
-      return proxy;
-    });
+    _startingPromise = createEgressProxy()
+      .then((proxy) => {
+        _globalProxy = proxy;
+        _startingPromise = null;
+        return proxy;
+      })
+      .catch((err) => {
+        _globalProxy = null;
+        _startingPromise = null;
+        throw err;
+      });
   }
   return _startingPromise;
 }
@@ -200,6 +232,7 @@ export async function stopGlobalEgressProxy(): Promise<void> {
   if (_globalProxy) {
     const p = _globalProxy;
     _globalProxy = null;
+    _startingPromise = null;
     await p.close();
   }
 }

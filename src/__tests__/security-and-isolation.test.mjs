@@ -2113,9 +2113,72 @@ test('Operational Recovery: Interrupted approved tasks fail safely on crash to p
   assert.equal(task?.status, 'failed', 'Interrupted approved task must fail safe instead of resetting to pending');
 });
 
+// =========================================================================
+// 52. BROWSER EGRESS PROTECTION: MANDATORY PROXY & NO SILENT FALLBACK
+// =========================================================================
+test('Browser Egress: Mandatory proxy enforcement and fail-closed defense against silent fallback', async () => {
+  const { getGlobalEgressProxy, stopGlobalEgressProxy } = await import('../lib/egress-proxy.ts');
+  const net = await import('net');
+
+  // 1. Egress proxy starts and binds securely to loopback
+  const proxy = await getGlobalEgressProxy();
+  assert.ok(proxy.port > 0);
+  assert.ok(proxy.url.startsWith('http://127.0.0.1:'));
+
+  // 2. CONNECT tunnel refuses link-local / cloud metadata targets
+  const connectBlocked = await new Promise((resolve) => {
+    const client = net.connect({ host: '127.0.0.1', port: proxy.port }, () => {
+      client.write('CONNECT 169.254.169.254:80 HTTP/1.1\r\nHost: 169.254.169.254:80\r\n\r\n');
+    });
+    client.on('data', (chunk) => {
+      resolve(chunk.toString());
+      client.destroy();
+    });
+    client.on('error', () => resolve('error'));
+  });
+  assert.ok(connectBlocked.includes('403 Forbidden'), 'CONNECT tunnel to metadata must be rejected with 403');
+  assert.ok(connectBlocked.includes('Forbidden by Nook Egress Policy'));
+
+  // 3. Plain HTTP proxy refuses link-local / cloud metadata targets
+  const httpBlocked = await new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: proxy.port,
+        path: 'http://169.254.169.254/latest/meta-data',
+        method: 'GET',
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (d) => (body += d));
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      }
+    );
+    req.on('error', (err) => resolve({ status: 500, body: err.message }));
+    req.end();
+  });
+  assert.equal(httpBlocked.status, 403);
+  assert.ok(httpBlocked.body.includes('403 Forbidden by Nook Browser Egress Policy'));
+
+  // 4. navigateBrowser refuses to silently fall back when egress protection blocks navigation
+  await assert.rejects(
+    async () => {
+      await navigateBrowser('agent-scout-egress-test', 'http://169.254.169.254/latest/meta-data');
+    },
+    /SSRF Policy Violation/
+  );
+
+  // 5. Proxy restart resilience: after stopping proxy, getGlobalEgressProxy cleanly provisions new instance
+  await stopGlobalEgressProxy();
+  const refreshedProxy = await getGlobalEgressProxy();
+  assert.ok(refreshedProxy.server.listening, 'Restarted proxy must be active and listening');
+});
+
 after(async () => {
   killProcessSafely(runnerProc);
   await closeAllBrowserSessions().catch(() => {});
+  const { stopGlobalEgressProxy } = await import('../lib/egress-proxy.ts');
+  await stopGlobalEgressProxy().catch(() => {});
 });
 
 

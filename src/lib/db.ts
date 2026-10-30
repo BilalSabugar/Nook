@@ -867,14 +867,14 @@ export interface DbDocumentRevision {
   changeSummary?: string;
 }
 
-export function saveSpace(space: { id: string; name: string; icon: string }): void {
+export function saveSpace(space: { id: string; name: string; icon?: string }): void {
   const db = getDatabase();
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO spaces (id, name, icon, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET name = excluded.name, icon = excluded.icon, updated_at = excluded.updated_at
-  `).run(space.id, space.name, space.icon, now, now);
+  `).run(space.id, space.name, space.icon || 'folder', now, now);
 }
 
 export function listSpacesWithDocuments(): Array<{ id: string; name: string; icon: string; createdAt: string; updatedAt: string; pages: Array<{ id: string; spaceId: string; title: string; content: string; excerpt?: string; icon?: string; authorAgentId: string; version: number; tags: string[]; createdAt: string; updatedAt: string }> }> {
@@ -906,6 +906,74 @@ export function listSpacesWithDocuments(): Array<{ id: string; name: string; ico
   }));
 }
 
+export function getDocumentById(id: string): DbDocument | null {
+  const db = getDatabase();
+  const d = db.prepare(`SELECT * FROM documents WHERE id = ?`).get(id) as unknown as DocumentRow | undefined;
+  if (!d) return null;
+  return {
+    id: d.id,
+    spaceId: d.space_id,
+    title: d.title,
+    content: d.content,
+    excerpt: d.excerpt || '',
+    icon: d.icon || 'file-text',
+    authorAgentId: d.author_agent_id,
+    version: d.version,
+    tags: JSON.parse(d.tags_json || '[]'),
+    createdAt: d.created_at,
+    updatedAt: d.updated_at,
+  };
+}
+
+export function seedInitialSpaces(
+  spacesToSeed?: Array<{ id: string; name: string; icon?: string; pages?: any[] }>,
+  db: DatabaseSync = getDatabase()
+): Array<{ id: string; name: string }> {
+  const existingCount = db.prepare(`SELECT COUNT(*) as count FROM spaces`).get() as { count: number };
+  if (existingCount.count > 0) return [];
+
+  let toSeed = spacesToSeed;
+  if (!toSeed || !Array.isArray(toSeed) || toSeed.length === 0) {
+    toSeed = [
+      { id: 'space-general', name: 'General', icon: 'folder', pages: [] },
+      { id: 'space-missions', name: 'Mission Log', icon: 'crosshair', pages: [] },
+      { id: 'space-knowledge', name: 'Knowledge Base', icon: 'book', pages: [] },
+    ];
+  }
+
+  const now = new Date().toISOString();
+  for (const s of toSeed) {
+    db.prepare(`INSERT OR IGNORE INTO spaces (id, name, icon, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`).run(
+      s.id,
+      s.name,
+      s.icon || 'folder',
+      now,
+      now
+    );
+    for (const p of s.pages || []) {
+      db.prepare(`
+        INSERT OR IGNORE INTO documents (
+          id, space_id, title, content, excerpt, icon, author_agent_id, version, tags_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        p.id,
+        s.id,
+        p.title,
+        p.content,
+        p.excerpt || null,
+        p.icon || 'file-text',
+        p.authorAgentId || 'system',
+        p.version || 1,
+        JSON.stringify(p.tags || []),
+        p.createdAt || now,
+        p.updatedAt || now
+      );
+    }
+  }
+
+  return toSeed.map((s) => ({ id: s.id, name: s.name }));
+}
+
 export function saveDocumentWithRevision(doc: {
   id: string;
   spaceId: string;
@@ -913,15 +981,36 @@ export function saveDocumentWithRevision(doc: {
   content: string;
   excerpt?: string;
   icon?: string;
-  authorAgentId: string;
+  authorAgentId?: string;
   tags?: string[];
   changeSummary?: string;
 }): DbDocument {
   const db = getDatabase();
   const now = new Date().toISOString();
+  const authorAgentId = doc.authorAgentId || 'user';
 
-  // Check if document exists to increment version
-  const existing = db.prepare(`SELECT version FROM documents WHERE id = ?`).get(doc.id) as unknown as { version: number } | undefined;
+  // Check if document exists
+  const existing = db.prepare(`SELECT * FROM documents WHERE id = ?`).get(doc.id) as unknown as DocumentRow | undefined;
+
+  // Idempotency & bloat guard: If document exists with identical title and content, do not bump version or create redundant revision
+  if (existing && existing.title === doc.title && existing.content === doc.content) {
+    db.prepare(`
+      UPDATE documents SET
+        excerpt = ?,
+        icon = ?,
+        tags_json = ?,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      doc.excerpt || existing.excerpt || null,
+      doc.icon || existing.icon || 'file-text',
+      JSON.stringify(doc.tags || JSON.parse(existing.tags_json || '[]')),
+      now,
+      doc.id
+    );
+    return getDocumentById(doc.id)!;
+  }
+
   const newVersion = existing ? existing.version + 1 : 1;
 
   // Transaction for atomic document update + revision log
@@ -953,7 +1042,7 @@ export function saveDocumentWithRevision(doc: {
       doc.content,
       doc.excerpt || doc.content.slice(0, 150).replace(/[#*`_]/g, ''),
       doc.icon || 'file-text',
-      doc.authorAgentId,
+      authorAgentId,
       newVersion,
       JSON.stringify(doc.tags || []),
       now,
@@ -972,7 +1061,7 @@ export function saveDocumentWithRevision(doc: {
       newVersion,
       doc.title,
       doc.content,
-      doc.authorAgentId,
+      authorAgentId,
       now,
       doc.changeSummary || `Version ${newVersion} created`
     );
@@ -983,7 +1072,7 @@ export function saveDocumentWithRevision(doc: {
     throw err;
   }
 
-  logAuditEvent('DOCUMENT_SAVED', `Document '${doc.title}' (${doc.id}) saved at v${newVersion}`, 'success', doc.authorAgentId);
+  logAuditEvent('DOCUMENT_SAVED', `Document '${doc.title}' (${doc.id}) saved at v${newVersion}`, 'success', authorAgentId);
 
   return {
     id: doc.id,
@@ -992,7 +1081,7 @@ export function saveDocumentWithRevision(doc: {
     content: doc.content,
     excerpt: doc.excerpt || doc.content.slice(0, 150).replace(/[#*`_]/g, ''),
     icon: doc.icon || 'file-text',
-    authorAgentId: doc.authorAgentId,
+    authorAgentId,
     version: newVersion,
     tags: doc.tags || [],
     createdAt: now,
@@ -1031,9 +1120,13 @@ export function rollbackDocumentToVersion(documentId: string, targetVersion: num
     throw new Error(`Revision v${targetVersion} for document ${documentId} not found.`);
   }
 
+  // Look up current space for document so it is not moved into a phantom space
+  const currentDoc = db.prepare(`SELECT space_id FROM documents WHERE id = ?`).get(documentId) as unknown as DocumentRow | undefined;
+  const currentSpaceId = currentDoc?.space_id || 'default-space';
+
   return saveDocumentWithRevision({
     id: documentId,
-    spaceId: rev.document_id, // falls back in transaction
+    spaceId: currentSpaceId,
     title: rev.title,
     content: rev.content,
     authorAgentId: 'system-rollback',
@@ -1904,6 +1997,7 @@ export function importWorkspaceSnapshot(
   importedMissionsCount: number;
   importedTasksCount: number;
   importedEvidenceCount: number;
+  importedApprovalsCount: number;
 } {
   if (!bundle || typeof bundle !== 'object' || !bundle.schemaVersion) {
     throw new Error('Invalid workspace bundle: Missing schemaVersion');
@@ -1915,14 +2009,19 @@ export function importWorkspaceSnapshot(
   let importedMissionsCount = 0;
   let importedTasksCount = 0;
   let importedEvidenceCount = 0;
+  let importedApprovalsCount = 0;
 
   db.exec('BEGIN TRANSACTION;');
   try {
     // 1. Spaces & Documents
     if (Array.isArray(bundle.spaces)) {
       const insertSpace = db.prepare(`
-        INSERT OR IGNORE INTO spaces (id, name, icon, created_at, updated_at)
+        INSERT INTO spaces (id, name, icon, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          icon = excluded.icon,
+          updated_at = excluded.updated_at
       `);
       const insertDoc = db.prepare(`
         INSERT INTO documents (
@@ -1938,7 +2037,6 @@ export function importWorkspaceSnapshot(
           version = excluded.version,
           tags_json = excluded.tags_json,
           updated_at = excluded.updated_at
-        WHERE excluded.version >= documents.version
       `);
 
       for (const space of bundle.spaces) {
@@ -1964,7 +2062,7 @@ export function importWorkspaceSnapshot(
               page.icon || null,
               page.authorAgentId || 'import',
               page.version || 1,
-              JSON.stringify(page.tags || []),
+              typeof page.tags === 'string' ? page.tags : JSON.stringify(page.tags || []),
               page.createdAt || new Date().toISOString(),
               page.updatedAt || new Date().toISOString()
             );
@@ -1976,13 +2074,41 @@ export function importWorkspaceSnapshot(
 
     // 2. Document Revisions
     if (Array.isArray(bundle.documentRevisions)) {
+      const ensureSpaceStub = db.prepare(`
+        INSERT INTO spaces (id, name, icon, created_at, updated_at)
+        VALUES ('default-space', 'General Space', 'folder', ?, ?)
+        ON CONFLICT(id) DO NOTHING
+      `);
+      const ensureDocStub = db.prepare(`
+        INSERT INTO documents (id, space_id, title, content, author_agent_id, version, created_at, updated_at)
+        VALUES (?, 'default-space', ?, ?, 'import', ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+      `);
       const insertRev = db.prepare(`
-        INSERT OR IGNORE INTO document_revisions (
+        INSERT INTO document_revisions (
           id, document_id, version, title, content, author_agent_id, created_at, change_summary
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          content = excluded.content,
+          change_summary = excluded.change_summary
       `);
+
+      const now = new Date().toISOString();
+      ensureSpaceStub.run(now, now);
+
       for (const rev of bundle.documentRevisions) {
         if (!rev?.id || !rev?.documentId) continue;
+        // Foreign key guard: ensure parent document exists
+        ensureDocStub.run(
+          rev.documentId,
+          rev.title || 'Untitled Document',
+          rev.content || '',
+          rev.version || 1,
+          rev.createdAt || now,
+          rev.createdAt || now
+        );
+
         insertRev.run(
           rev.id,
           rev.documentId,
@@ -1990,7 +2116,7 @@ export function importWorkspaceSnapshot(
           rev.title || '',
           rev.content || '',
           rev.authorAgentId || 'import',
-          rev.createdAt || new Date().toISOString(),
+          rev.createdAt || now,
           rev.changeSummary || null
         );
         importedRevisionsCount++;
@@ -2000,16 +2126,41 @@ export function importWorkspaceSnapshot(
     // 3. Missions & Tasks
     if (Array.isArray(bundle.missions)) {
       const insertMission = db.prepare(`
-        INSERT OR IGNORE INTO missions (
+        INSERT INTO missions (
           id, title, objective, status, priority, assigned_agents_json, milestones_json, budget_json, created_at, updated_at, completed_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          title = excluded.title,
+          objective = excluded.objective,
+          status = excluded.status,
+          priority = excluded.priority,
+          assigned_agents_json = excluded.assigned_agents_json,
+          milestones_json = excluded.milestones_json,
+          budget_json = excluded.budget_json,
+          updated_at = excluded.updated_at,
+          completed_at = excluded.completed_at
       `);
       const insertTask = db.prepare(`
-        INSERT OR IGNORE INTO agent_tasks (
+        INSERT INTO agent_tasks (
           id, mission_id, title, goal, assigned_agent_id, status, dependencies_json,
           priority, inputs_json, outputs_json, observations_json, verification_json,
           approval_id, approval_token, error, created_at, updated_at, completed_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          mission_id = excluded.mission_id,
+          title = excluded.title,
+          goal = excluded.goal,
+          assigned_agent_id = excluded.assigned_agent_id,
+          status = excluded.status,
+          dependencies_json = excluded.dependencies_json,
+          priority = excluded.priority,
+          inputs_json = excluded.inputs_json,
+          outputs_json = excluded.outputs_json,
+          observations_json = excluded.observations_json,
+          verification_json = excluded.verification_json,
+          error = excluded.error,
+          updated_at = excluded.updated_at,
+          completed_at = excluded.completed_at
       `);
 
       for (const m of bundle.missions) {
@@ -2022,9 +2173,9 @@ export function importWorkspaceSnapshot(
           m.objective || '',
           safeStatus,
           m.priority || 'medium',
-          JSON.stringify(m.assignedAgents || []),
-          JSON.stringify(m.milestones || []),
-          m.budget ? JSON.stringify(m.budget) : null,
+          typeof m.assignedAgents === 'string' ? m.assignedAgents : JSON.stringify(m.assignedAgents || []),
+          typeof m.milestones === 'string' ? m.milestones : JSON.stringify(m.milestones || []),
+          m.budget ? (typeof m.budget === 'string' ? m.budget : JSON.stringify(m.budget)) : null,
           m.createdAt || new Date().toISOString(),
           m.updatedAt || new Date().toISOString(),
           m.completedAt || null
@@ -2041,12 +2192,12 @@ export function importWorkspaceSnapshot(
               t.goal || '',
               t.assignedAgentId || 'agent-aura',
               t.status || 'pending',
-              JSON.stringify(t.dependencies || []),
+              typeof t.dependencies === 'string' ? t.dependencies : JSON.stringify(t.dependencies || []),
               t.priority || 'medium',
-              JSON.stringify(t.inputs || {}),
-              JSON.stringify(t.outputs || {}),
-              JSON.stringify(t.observations || []),
-              t.verification ? JSON.stringify(t.verification) : null,
+              typeof t.inputs === 'string' ? t.inputs : JSON.stringify(t.inputs || {}),
+              typeof t.outputs === 'string' ? t.outputs : JSON.stringify(t.outputs || {}),
+              typeof t.observations === 'string' ? t.observations : JSON.stringify(t.observations || []),
+              t.verification ? (typeof t.verification === 'string' ? t.verification : JSON.stringify(t.verification)) : null,
               t.error || null,
               t.createdAt || new Date().toISOString(),
               t.updatedAt || new Date().toISOString(),
@@ -2058,12 +2209,79 @@ export function importWorkspaceSnapshot(
       }
     }
 
+    // Support top-level tasks if present in snapshot
+    if (Array.isArray(bundle.tasks)) {
+      const ensureMissionStub = db.prepare(`
+        INSERT INTO missions (id, title, objective, status, priority, assigned_agents_json, milestones_json, created_at, updated_at)
+        VALUES (?, 'Imported Mission', 'Imported stub', 'paused', 'medium', '[]', '[]', ?, ?)
+        ON CONFLICT(id) DO NOTHING
+      `);
+      const insertTask = db.prepare(`
+        INSERT INTO agent_tasks (
+          id, mission_id, title, goal, assigned_agent_id, status, dependencies_json,
+          priority, inputs_json, outputs_json, observations_json, verification_json,
+          approval_id, approval_token, error, created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          mission_id = excluded.mission_id,
+          title = excluded.title,
+          goal = excluded.goal,
+          assigned_agent_id = excluded.assigned_agent_id,
+          status = excluded.status,
+          dependencies_json = excluded.dependencies_json,
+          priority = excluded.priority,
+          inputs_json = excluded.inputs_json,
+          outputs_json = excluded.outputs_json,
+          observations_json = excluded.observations_json,
+          verification_json = excluded.verification_json,
+          error = excluded.error,
+          updated_at = excluded.updated_at,
+          completed_at = excluded.completed_at
+      `);
+      const now = new Date().toISOString();
+      for (const t of bundle.tasks) {
+        if (!t?.id || !t?.title) continue;
+        if (t.missionId) {
+          ensureMissionStub.run(t.missionId, now, now);
+        }
+        insertTask.run(
+          t.id,
+          t.missionId || null,
+          t.title,
+          t.goal || '',
+          t.assignedAgentId || 'agent-aura',
+          t.status || 'pending',
+          typeof t.dependencies === 'string' ? t.dependencies : JSON.stringify(t.dependencies || []),
+          t.priority || 'medium',
+          typeof t.inputs === 'string' ? t.inputs : JSON.stringify(t.inputs || {}),
+          typeof t.outputs === 'string' ? t.outputs : JSON.stringify(t.outputs || {}),
+          typeof t.observations === 'string' ? t.observations : JSON.stringify(t.observations || []),
+          t.verification ? (typeof t.verification === 'string' ? t.verification : JSON.stringify(t.verification)) : null,
+          t.error || null,
+          t.createdAt || now,
+          t.updatedAt || now,
+          t.completedAt || null
+        );
+        importedTasksCount++;
+      }
+    }
+
     // 4. Evidence Timeline
     if (Array.isArray(bundle.evidenceTimeline)) {
       const insertEvidence = db.prepare(`
-        INSERT OR IGNORE INTO evidence_records (
+        INSERT INTO evidence_records (
           id, mission_id, task_id, agent_id, agent_name, timestamp, action_type, summary, details_json, status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          mission_id = excluded.mission_id,
+          task_id = excluded.task_id,
+          agent_id = excluded.agent_id,
+          agent_name = excluded.agent_name,
+          timestamp = excluded.timestamp,
+          action_type = excluded.action_type,
+          summary = excluded.summary,
+          details_json = excluded.details_json,
+          status = excluded.status
       `);
       for (const ev of bundle.evidenceTimeline) {
         if (!ev?.id || !ev?.agentId || !ev?.summary) continue;
@@ -2083,13 +2301,54 @@ export function importWorkspaceSnapshot(
       }
     }
 
+    // 5. Approvals Audit History
+    if (Array.isArray(bundle.approvalsAudit)) {
+      const insertApproval = db.prepare(`
+        INSERT INTO approvals (
+          id, agent_id, agent_name, type, title, description, target_space_id,
+          payload_json, status, created_at, expires_at, single_use_token,
+          decision_at, decision_reason, execution_result_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          decision_at = excluded.decision_at,
+          decision_reason = excluded.decision_reason,
+          execution_result_json = excluded.execution_result_json
+      `);
+
+      for (const appr of bundle.approvalsAudit) {
+        if (!appr?.id) continue;
+        const safeStatus = appr.status === 'pending' ? 'expired' : (appr.status || 'expired');
+        const dummyToken = `expired-import-token-${crypto.randomBytes(8).toString('hex')}`;
+        const title = appr.title || appr.action || appr.command || 'Privileged Operation';
+        insertApproval.run(
+          appr.id,
+          appr.agentId || 'agent-aura',
+          appr.agentName || 'Agent',
+          appr.type || appr.action || 'run_command',
+          title,
+          appr.description || appr.reason || null,
+          appr.targetSpaceId || null,
+          typeof appr.payload === 'string' ? appr.payload : JSON.stringify(appr.payload || (appr.command ? { command: appr.command } : {})),
+          safeStatus,
+          appr.createdAt || appr.requestedAt || new Date().toISOString(),
+          appr.expiresAt || new Date().toISOString(),
+          dummyToken,
+          appr.decisionAt || appr.decidedAt || null,
+          appr.decisionReason || null,
+          appr.executionResult ? (typeof appr.executionResult === 'string' ? appr.executionResult : JSON.stringify(appr.executionResult)) : null
+        );
+        importedApprovalsCount++;
+      }
+    }
+
     db.exec('COMMIT;');
   } catch (err) {
     db.exec('ROLLBACK;');
     throw err;
   }
 
-  logAuditEvent('WORKSPACE_SNAPSHOT_IMPORTED', `Restored ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedRevisionsCount} revisions, ${importedMissionsCount} missions, ${importedTasksCount} tasks, ${importedEvidenceCount} evidence logs`, 'success');
+  logAuditEvent('WORKSPACE_SNAPSHOT_IMPORTED', `Restored ${importedSpacesCount} spaces, ${importedDocsCount} docs, ${importedRevisionsCount} revisions, ${importedMissionsCount} missions, ${importedTasksCount} tasks, ${importedEvidenceCount} evidence logs, ${importedApprovalsCount} approvals`, 'success');
 
   return {
     success: true,
@@ -2099,6 +2358,7 @@ export function importWorkspaceSnapshot(
     importedMissionsCount,
     importedTasksCount,
     importedEvidenceCount,
+    importedApprovalsCount,
   };
 }
 

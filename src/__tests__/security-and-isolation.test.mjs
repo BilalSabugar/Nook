@@ -44,6 +44,8 @@ import {
   importWorkspaceSnapshot,
   applySchema,
   markJobSideEffectStarted,
+  getDocumentById,
+  seedInitialSpaces,
 } from '../lib/db.ts';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -2172,6 +2174,157 @@ test('Browser Egress: Mandatory proxy enforcement and fail-closed defense agains
   await stopGlobalEgressProxy();
   const refreshedProxy = await getGlobalEgressProxy();
   assert.ok(refreshedProxy.server.listening, 'Restarted proxy must be active and listening');
+});
+
+// =========================================================================
+// 53. PERSISTENCE & EXPORT: REVISION DEDUPING, ROLLBACK SPACE INTEGRITY, & IMPORT CONFLICT HANDLING
+// =========================================================================
+test('Persistence: Document revisions deduping, rollback space preservation, and snapshot import/export integrity', () => {
+  const nonce = Date.now();
+  const spaceId = `space-persist-${nonce}`;
+  const docId = `doc-persist-${nonce}`;
+  const testMissionId = `mission-conflict-${nonce}`;
+  const testTaskId = `task-conflict-${nonce}`;
+  const testApprovalId = `app-audit-${nonce}`;
+
+  // 1. Revision deduping: identical content does NOT create duplicate revisions or increment version
+  saveSpace({ id: spaceId, name: 'Persistence Space', icon: 'folder' });
+
+  const v1 = saveDocumentWithRevision({
+    id: docId,
+    spaceId,
+    title: 'Idempotency Doc',
+    content: 'Initial immutable text content',
+  });
+  assert.equal(v1.version, 1);
+  const revs1 = listDocumentRevisions(docId);
+  assert.equal(revs1.length, 1);
+
+  // Re-saving identical content & title -> version remains 1, no duplicate revision inserted
+  const v1Same = saveDocumentWithRevision({
+    id: docId,
+    spaceId,
+    title: 'Idempotency Doc',
+    content: 'Initial immutable text content',
+  });
+  assert.equal(v1Same.version, 1);
+  const revsAfterSame = listDocumentRevisions(docId);
+  assert.equal(revsAfterSame.length, 1, 'Identical content must not create duplicate revision rows');
+
+  // Saving modified content -> increments version to 2
+  const v2 = saveDocumentWithRevision({
+    id: docId,
+    spaceId,
+    title: 'Idempotency Doc',
+    content: 'Updated modified text content',
+  });
+  assert.equal(v2.version, 2);
+  const revs2 = listDocumentRevisions(docId);
+  assert.equal(revs2.length, 2);
+
+  // 2. Rollback space preservation: rolling back does NOT corrupt spaceId to rev.document_id
+  const rolledBack = rollbackDocumentToVersion(docId, 1);
+  assert.equal(rolledBack.version, 3);
+  assert.equal(rolledBack.content, 'Initial immutable text content');
+  assert.equal(rolledBack.spaceId, spaceId, 'Rollback must preserve original spaceId instead of document_id');
+
+  const docInDb = getDocumentById(docId);
+  assert.equal(docInDb?.spaceId, spaceId, 'Database record must retain spaceId');
+
+  // 3. Isolated DB: seedInitialSpaces seeds default spaces when table is empty
+  const isolatedDb = new DatabaseSync(':memory:');
+  applySchema(isolatedDb);
+  const emptySpaces = isolatedDb.prepare('SELECT count(*) as count FROM spaces').get();
+  assert.equal(emptySpaces.count, 0);
+
+  const seeded = seedInitialSpaces(undefined, isolatedDb);
+  assert.ok(seeded.length > 0);
+  const filledSpaces = isolatedDb.prepare('SELECT count(*) as count FROM spaces').get();
+  assert.equal(filledSpaces.count, seeded.length);
+
+  // 4. Snapshot Import: updates existing records (ON CONFLICT DO UPDATE) and restores approvals with safe tokens
+  const db = getDatabase();
+  db.prepare(`
+    INSERT INTO missions (id, title, objective, status, priority, assigned_agents_json, milestones_json, created_at, updated_at)
+    VALUES (?, 'Old Title', 'Old Objective', 'planning', 'low', '[]', '[]', datetime('now'), datetime('now'))
+  `).run(testMissionId);
+
+  // Prepare a snapshot with an update for this mission, plus approvals audit
+  const bundle = {
+    exportedAt: new Date().toISOString(),
+    schemaVersion: 1,
+    version: 1,
+    spaces: [{ id: spaceId, name: 'Updated Space Name', description: 'Updated Space Description' }],
+    documents: [{
+      id: docId,
+      spaceId,
+      title: 'Updated From Snapshot',
+      content: 'Imported Snapshot Content',
+      version: 5,
+      excerpt: 'Imported',
+      icon: 'file-text',
+    }],
+    missions: [{
+      id: testMissionId,
+      title: 'New Title From Snapshot',
+      objective: 'New Objective From Snapshot',
+      status: 'active',
+      priority: 'high',
+      assignedAgentIds: ['agent-cipher'],
+      milestones: [{ id: 'm-1', title: 'Milestone 1', completed: true }],
+      budget: { tokenLimit: 50000 },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }],
+    tasks: [{
+      id: testTaskId,
+      missionId: testMissionId,
+      title: 'Imported Task',
+      goal: 'Execute imported goal',
+      assignedAgentId: 'agent-cipher',
+      status: 'completed',
+      inputs: { key: 'value' },
+      outputs: { result: 'done' },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }],
+    approvalsAudit: [{
+      id: testApprovalId,
+      action: 'run_command',
+      command: 'echo imported',
+      agentId: 'agent-cipher',
+      status: 'approved',
+      reason: 'Audit import test',
+      requestedAt: new Date().toISOString(),
+      decidedAt: new Date().toISOString(),
+      decidedBy: 'owner',
+      decisionReason: 'Allowed',
+    }],
+  };
+
+  const importResult = importWorkspaceSnapshot(bundle);
+  assert.equal(importResult.importedMissionsCount, 1);
+  assert.equal(importResult.importedTasksCount, 1);
+  assert.equal(importResult.importedApprovalsCount, 1);
+
+  // Verify mission was updated, not ignored
+  const updatedMission = getMissionById(testMissionId);
+  assert.equal(updatedMission?.title, 'New Title From Snapshot');
+  assert.equal(updatedMission?.status, 'paused', 'Imported active missions are safely set to paused');
+  // Check no double stringification
+  assert.equal(typeof updatedMission?.milestones, 'object');
+  assert.equal(updatedMission?.milestones[0]?.title, 'Milestone 1');
+
+  // Verify task inputs/outputs are parsed objects
+  const importedTask = getAgentTaskById(testTaskId);
+  assert.equal(importedTask?.inputs?.key, 'value');
+  assert.equal(importedTask?.outputs?.result, 'done');
+
+  // Verify approval was restored with safe token
+  const restoredApproval = getApprovalById(testApprovalId);
+  assert.ok(restoredApproval !== null);
+  assert.equal(restoredApproval?.status, 'approved');
+  assert.ok(restoredApproval?.singleUseToken?.startsWith('expired-import-token-'));
 });
 
 after(async () => {

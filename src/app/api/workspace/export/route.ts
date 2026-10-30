@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { exportWorkspaceSnapshot, scrubSensitiveData } from '@/lib/db';
+import { exportWorkspaceSnapshot, scrubSensitiveData, seedInitialSpaces } from '@/lib/db';
+import { INITIAL_SPACES } from '@/lib/store';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 
 const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
@@ -26,14 +28,56 @@ export async function GET(req: NextRequest) {
       workspaceState = JSON.parse(raw);
     } catch {}
 
-    const snapshot = exportWorkspaceSnapshot();
+    let snapshot = exportWorkspaceSnapshot();
+    if (!snapshot.spaces || snapshot.spaces.length === 0) {
+      if (workspaceState.spaces && workspaceState.spaces.length > 0) {
+        seedInitialSpaces(workspaceState.spaces);
+      } else {
+        seedInitialSpaces(INITIAL_SPACES);
+      }
+      snapshot = exportWorkspaceSnapshot();
+    }
+
+    // Ensure computerStates accurately reflects files on server disk
+    const computerStates = { ...(workspaceState.computerStates || {}) };
+    const sandboxesDir = path.join(STORAGE_DIR, 'sandboxes');
+    if (fsSync.existsSync(sandboxesDir)) {
+      try {
+        const agentEntries = await fs.readdir(sandboxesDir, { withFileTypes: true });
+        for (const entry of agentEntries) {
+          if (entry.isDirectory()) {
+            const agentId = entry.name;
+            const wsDir = path.join(sandboxesDir, agentId, 'workspace');
+            if (fsSync.existsSync(wsDir)) {
+              const fileEntries = await fs.readdir(wsDir, { withFileTypes: true });
+              const files: Array<{ name: string; content: string }> = [];
+              for (const fe of fileEntries) {
+                if (fe.isFile()) {
+                  try {
+                    const content = await fs.readFile(path.join(wsDir, fe.name), 'utf8');
+                    files.push({ name: fe.name, content });
+                  } catch {}
+                }
+              }
+              if (files.length > 0) {
+                computerStates[agentId] = {
+                  ...(computerStates[agentId] || {}),
+                  files,
+                };
+              }
+            }
+          }
+        }
+      } catch {}
+    }
 
     const exportBundle = scrubSensitiveData({
       ...snapshot,
       workspace: {
         agents: workspaceState.agents || [],
         messages: workspaceState.messages || {},
-        computerStates: workspaceState.computerStates || {},
+        computerStates,
+        settings: workspaceState.settings || undefined,
       },
     });
 

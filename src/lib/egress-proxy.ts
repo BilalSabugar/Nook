@@ -74,13 +74,64 @@ export async function resolveHostSafely(hostname: string): Promise<{ safe: boole
   }
 }
 
+const FORBIDDEN_PORTS = new Set([
+  20, 21,    // FTP
+  22,        // SSH
+  23,        // Telnet
+  25, 465, 587, // SMTP
+  53,        // DNS
+  67, 68,    // DHCP
+  69,        // TFTP
+  110, 995,  // POP3
+  137, 138, 139, 445, // SMB / NetBIOS
+  143, 993,  // IMAP
+  389, 636,  // LDAP
+  1433,      // MSSQL
+  1521,      // Oracle
+  2375, 2376,// Docker daemon
+  3306,      // MySQL
+  5432,      // PostgreSQL
+  6379,      // Redis
+  11211,     // Memcached
+  27017,     // MongoDB
+]);
+
+export function isForbiddenPort(port: number): boolean {
+  if (isNaN(port) || port < 1 || port > 65535) return true;
+  return FORBIDDEN_PORTS.has(port);
+}
+
 export function createEgressProxy(): Promise<EgressProxyInstance> {
   return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       // Plain HTTP proxying
       try {
         const rawUrl = req.url || '';
-        const parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `http://${req.headers.host || 'unknown'}${rawUrl}`);
+        let parsed: URL;
+        try {
+          parsed = new URL(rawUrl.startsWith('http') ? rawUrl : `http://${req.headers.host || 'unknown'}${rawUrl}`);
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'text/plain' });
+          res.end('400 Bad Request: Malformed egress URL');
+          return;
+        }
+
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end(`403 Forbidden by Nook Browser Egress Policy: Unsupported protocol '${parsed.protocol}'`);
+          return;
+        }
+
+        const isHttps = parsed.protocol === 'https:';
+        const port = parsed.port ? parseInt(parsed.port, 10) : (isHttps ? 443 : 80);
+
+        if (isForbiddenPort(port)) {
+          logAuditEvent('BROWSER_EGRESS_BLOCKED', `Egress HTTP proxy blocked request to unsafe port ${parsed.href}`, 'blocked');
+          res.writeHead(403, { 'Content-Type': 'text/plain' });
+          res.end(`403 Forbidden by Nook Browser Egress Policy: Outbound port ${port} is restricted`);
+          return;
+        }
+
         const check = await resolveHostSafely(parsed.hostname);
 
         if (!check.safe || !check.pinnedIp) {
@@ -89,9 +140,6 @@ export function createEgressProxy(): Promise<EgressProxyInstance> {
           res.end(`403 Forbidden by Nook Browser Egress Policy: ${check.reason || 'Restricted host'}`);
           return;
         }
-
-        const isHttps = parsed.protocol === 'https:';
-        const port = parsed.port ? parseInt(parsed.port, 10) : (isHttps ? 443 : 80);
 
         const proxyReq = http.request({
           host: check.pinnedIp,
@@ -140,9 +188,15 @@ export function createEgressProxy(): Promise<EgressProxyInstance> {
             }
           }
         } else if (rawUrl.includes(':')) {
-          const parts = rawUrl.split(':');
-          host = parts[0];
-          port = parseInt(parts[1], 10) || 443;
+          const lastColon = rawUrl.lastIndexOf(':');
+          host = rawUrl.slice(0, lastColon);
+          port = parseInt(rawUrl.slice(lastColon + 1), 10) || 443;
+        }
+
+        if (isForbiddenPort(port)) {
+          logAuditEvent('BROWSER_EGRESS_BLOCKED', `Egress CONNECT tunnel blocked for unsafe port ${host}:${port}`, 'blocked');
+          clientSocket.end('HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden by Nook Egress Policy: Restricted Port\r\n');
+          return;
         }
 
         const check = await resolveHostSafely(host);

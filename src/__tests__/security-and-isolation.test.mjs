@@ -1,5 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 
 // Import core security and infrastructure libraries
 import {
@@ -42,6 +43,9 @@ import {
   getDatabase,
   exportWorkspaceSnapshot,
   importWorkspaceSnapshot,
+  validateWorkspaceSnapshot,
+  verifyDatabaseIntegrity,
+  computeSnapshotChecksum,
   applySchema,
   markJobSideEffectStarted,
   getDocumentById,
@@ -51,9 +55,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   validateHumanApproverRequest,
   verifyApproverCredentials,
+  establishProductionSecurityPosture,
   APPROVER_SESSION_ID,
 } from '../lib/auth.ts';
-import { resolveHostSafely } from '../lib/egress-proxy.ts';
+import { resolveHostSafely, isForbiddenPort, getGlobalEgressProxy, stopGlobalEgressProxy } from '../lib/egress-proxy.ts';
 import {
   WorkspaceSecurityError,
   ensureRealDirectoryWithin,
@@ -78,6 +83,8 @@ import {
   renderBrowserScreenshotPng,
   captureRealBrowserScreenshot,
   closeBrowserSession,
+  updateSessionFromLivePage,
+  livePlaywrightSessions,
   closeAllBrowserSessions,
 } from '../lib/browser-session.ts';
 import http from 'http';
@@ -2325,6 +2332,243 @@ test('Persistence: Document revisions deduping, rollback space preservation, and
   assert.ok(restoredApproval !== null);
   assert.equal(restoredApproval?.status, 'approved');
   assert.ok(restoredApproval?.singleUseToken?.startsWith('expired-import-token-'));
+});
+
+// =========================================================================
+// 54. BROWSER EGRESS GUARANTEES: FAIL-CLOSED ENFORCEMENT & RESTRICTED PORTS
+// =========================================================================
+test('Browser Egress: Fail-closed guarantees strictly block unproxied access, unsafe ports, and live redirects', async () => {
+  // 1. Unsafe port restriction: Ports like 22 (SSH), 25 (SMTP), 6379 (Redis), 11211 (Memcached) are strictly forbidden
+  assert.equal(isForbiddenPort(22), true, 'Port 22 SSH must be forbidden');
+  assert.equal(isForbiddenPort(25), true, 'Port 25 SMTP must be forbidden');
+  assert.equal(isForbiddenPort(6379), true, 'Port 6379 Redis must be forbidden');
+  assert.equal(isForbiddenPort(11211), true, 'Port 11211 Memcached must be forbidden');
+  assert.equal(isForbiddenPort(80), false, 'Port 80 HTTP must be allowed');
+  assert.equal(isForbiddenPort(443), false, 'Port 443 HTTPS must be allowed');
+  assert.equal(isForbiddenPort(8080), false, 'Port 8080 Web must be allowed');
+
+  const proxy = await getGlobalEgressProxy();
+  assert.ok(proxy && proxy.server.listening, 'Global egress proxy must be active');
+
+  // 2. CONNECT tunnel to unsafe port is rejected with 403 Forbidden
+  const connectBlocked = await new Promise((resolve) => {
+    const s = net.connect({ host: '127.0.0.1', port: proxy.port }, () => {
+      s.write('CONNECT example.com:22 HTTP/1.1\r\nHost: example.com:22\r\n\r\n');
+    });
+    let data = '';
+    s.on('data', (d) => {
+      data += d.toString();
+      s.end();
+    });
+    s.on('end', () => resolve(data));
+    s.on('error', () => resolve(data));
+  });
+  assert.ok(connectBlocked.includes('403 Forbidden'), 'CONNECT to unsafe port 22 must return 403 Forbidden');
+
+  // 3. Plain HTTP proxy to unsafe port is rejected with 403 Forbidden
+  const httpBlocked = await new Promise((resolve) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port: proxy.port,
+        path: 'http://example.com:6379/keys',
+        method: 'GET',
+        headers: { host: 'example.com:6379' },
+      },
+      (res) => {
+        let b = '';
+        res.on('data', (c) => (b += c.toString()));
+        res.on('end', () => resolve({ status: res.statusCode, body: b }));
+      }
+    );
+    req.on('error', () => resolve({ status: 500, body: 'error' }));
+    req.end();
+  });
+  assert.equal(httpBlocked.status, 403);
+  assert.ok(httpBlocked.body.includes('Outbound port 6379 is restricted'));
+
+  // 4. Live page navigation to forbidden host fails closed: closes page and throws SSRF Policy Violation
+  const mockPage = {
+    _closed: false,
+    async url() {
+      return 'http://169.254.169.254/latest/meta-data/';
+    },
+    async close() {
+      this._closed = true;
+    },
+    async title() {
+      return 'Metadata Page';
+    },
+    async content() {
+      return '<html>sensitive metadata</html>';
+    },
+  };
+  const testSession = getOrCreateBrowserSession('agent-leak-test');
+  livePlaywrightSessions.set('agent-leak-test', { browser: null, context: null, page: mockPage, engine: 'test' });
+
+  await assert.rejects(
+    async () => {
+      await updateSessionFromLivePage('agent-leak-test', mockPage, testSession);
+    },
+    /SSRF Policy Violation/
+  );
+  assert.equal(mockPage._closed, true, 'Live page must be immediately terminated upon egress violation');
+  assert.equal(livePlaywrightSessions.has('agent-leak-test'), false, 'Session must be purged from active live sessions');
+
+  // 5. Inactive proxy strictly fails closed during navigation
+  await stopGlobalEgressProxy();
+  await assert.rejects(
+    async () => {
+      // Must not silently fall back to unproxied navigation when proxy is stopped
+      await navigateBrowser('agent-failclosed-test', 'http://169.254.169.254/secret');
+    },
+    /Browser Egress Error|SSRF Policy Violation/
+  );
+
+  // Restart proxy for subsequent tests
+  await getGlobalEgressProxy();
+});
+
+// =========================================================================
+// 55. BACKUP AND RESTORE: OPERATIONAL VALIDATION & DISASTER RECOVERY
+// =========================================================================
+test('Backup & Restore: Operational validation, checksums, and SQLite physical integrity verification', () => {
+  const nonce = Date.now();
+  const spaceId = `space-opval-${nonce}`;
+  const docId = `doc-opval-${nonce}`;
+
+  saveSpace({ id: spaceId, name: 'Operational Validation Space', icon: 'shield' });
+  saveDocumentWithRevision({
+    id: docId,
+    spaceId,
+    title: 'Integrity Document',
+    content: 'Durable data subject to cryptographic checksum and validation.',
+  });
+
+  // 1. Export snapshot includes manifest with SHA-256 checksum and exact counts
+  const snapshot = exportWorkspaceSnapshot();
+  assert.ok(snapshot.manifest, 'Exported snapshot must include manifest');
+  assert.equal(snapshot.manifest.schemaVersion, 2);
+  assert.ok(snapshot.manifest.checksum.startsWith('sha256:'));
+  assert.ok(snapshot.manifest.totalSpaces >= 1);
+  assert.ok(snapshot.manifest.totalDocs >= 1);
+
+  // 2. Preflight validation succeeds on pristine snapshot
+  const validation = validateWorkspaceSnapshot(snapshot);
+  assert.equal(validation.valid, true, 'Pristine exported snapshot must pass validation');
+  assert.equal(validation.errors.length, 0);
+  assert.ok(validation.summary.spacesCount >= 1);
+
+  // 3. Checksum tampering detection: modifying any content causes checksum verification failure
+  const tamperedSnapshot = JSON.parse(JSON.stringify(snapshot));
+  tamperedSnapshot.spaces[0].name = 'Tampered Space Name Injection';
+  const tamperedValidation = validateWorkspaceSnapshot(tamperedSnapshot);
+  assert.equal(tamperedValidation.valid, false, 'Tampered snapshot must fail validation');
+  assert.ok(
+    tamperedValidation.errors.some((e) => e.includes('Snapshot integrity checksum mismatch')),
+    'Integrity failure error must be reported'
+  );
+
+  // 4. Cyclic dependency detection in tasks
+  const cyclicSnapshot = {
+    schemaVersion: 2,
+    missions: [
+      {
+        id: `m-cycle-${nonce}`,
+        title: 'Cyclic Mission',
+        tasks: [
+          { id: 'task-a', title: 'Task A', dependencies: ['task-b'] },
+          { id: 'task-b', title: 'Task B', dependencies: ['task-c'] },
+          { id: 'task-c', title: 'Task C', dependencies: ['task-a'] }, // Cycle: A -> B -> C -> A
+        ],
+      },
+    ],
+  };
+  const cyclicValidation = validateWorkspaceSnapshot(cyclicSnapshot);
+  assert.equal(cyclicValidation.valid, false, 'Cyclic dependency must fail validation');
+  assert.ok(
+    cyclicValidation.errors.some((e) => e.includes('Cyclic dependency detected')),
+    'Error must explain cyclic dependency'
+  );
+
+  // 5. Corrupt / missing schemaVersion is rejected
+  assert.throws(
+    () => importWorkspaceSnapshot({ schemaVersion: 999 }),
+    /Invalid workspace bundle: Unsupported or missing schemaVersion/
+  );
+
+  // 6. SQLite Physical Integrity Check: PRAGMA integrity_check and foreign_key_check
+  const integrity = verifyDatabaseIntegrity();
+  assert.equal(integrity.healthy, true, 'SQLite database physical integrity must be healthy');
+  assert.equal(integrity.integrityCheck.toLowerCase(), 'ok');
+  assert.equal(integrity.foreignKeyViolations.length, 0);
+});
+
+// =========================================================================
+// 56. PUBLIC PRODUCTION SECURITY: INDEPENDENT ESTABLISHMENT & DEFENSE POSTURE
+// =========================================================================
+test('Public Production Security: Independently established posture, headers, and fail-closed authentication', async () => {
+  // 1. Verify next.config.ts production security headers and poweredByHeader disabled
+  const nextConfigModule = await import('../../next.config.ts');
+  const nextConfig = nextConfigModule.default || nextConfigModule;
+  assert.equal(nextConfig.poweredByHeader, false, 'poweredByHeader must be disabled in next.config.ts');
+  assert.equal(typeof nextConfig.headers, 'function', 'next.config.ts must define custom headers function');
+
+  const headersConfig = await nextConfig.headers();
+  assert.ok(Array.isArray(headersConfig) && headersConfig.length > 0);
+  const globalHeaders = headersConfig.find((h) => h.source === '/:path*');
+  assert.ok(globalHeaders, 'Headers must apply to /:path*');
+
+  const headerKeys = new Map(globalHeaders.headers.map((h) => [h.key.toLowerCase(), h.value]));
+  assert.ok(headerKeys.has('content-security-policy'), 'CSP must be declared');
+  assert.ok(headerKeys.get('content-security-policy')?.includes("frame-ancestors 'none'"), 'CSP must block framing');
+  assert.equal(headerKeys.get('x-frame-options'), 'DENY', 'X-Frame-Options must be DENY');
+  assert.equal(headerKeys.get('x-content-type-options'), 'nosniff', 'X-Content-Type-Options must be nosniff');
+  assert.ok(headerKeys.get('strict-transport-security')?.includes('max-age=63072000'), 'HSTS must be declared with >= 2 years');
+  assert.equal(headerKeys.get('referrer-policy'), 'strict-origin-when-cross-origin');
+  assert.ok(headerKeys.get('permissions-policy')?.includes('camera=()'));
+
+  // 2. Production Security Posture: Fails when master secret is missing or insufficient (< 16 chars in production)
+  const origNodeEnv = process.env.NODE_ENV;
+  const origApiKey = process.env.NOOK_API_KEY;
+  const origPwd = process.env.NOOK_PASSWORD;
+  const origSecret = process.env.NOOK_SECRET_TOKEN;
+  const origApprover = process.env.NOOK_APPROVER_PASSWORD;
+  const origLoopback = process.env.ALLOW_TEST_LOOPBACK;
+
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.NOOK_API_KEY;
+    delete process.env.NOOK_PASSWORD;
+    delete process.env.NOOK_SECRET_TOKEN;
+    delete process.env.NOOK_APPROVER_PASSWORD;
+
+    const unconfiguredPosture = establishProductionSecurityPosture();
+    assert.equal(unconfiguredPosture.established, false, 'Unconfigured production must report established: false');
+    assert.ok(unconfiguredPosture.securityScore <= 75, 'Unconfigured score must be degraded');
+
+    // 3. Posture with short master key in production (< 16 chars) fails entropy requirement
+    process.env.NOOK_API_KEY = 'shortkey123';
+    const weakPosture = establishProductionSecurityPosture();
+    assert.equal(weakPosture.established, false, 'Weak master key (<16 chars) must not establish production security');
+
+    // 4. Posture with strong, segregated master key (>= 16 chars) and approver password (>= 12 chars) succeeds
+    process.env.NOOK_API_KEY = 'production-secret-master-entropy-key-32b';
+    process.env.NOOK_APPROVER_PASSWORD = 'human-approver-secure-password-24b';
+    delete process.env.ALLOW_TEST_LOOPBACK;
+
+    const securePosture = establishProductionSecurityPosture();
+    assert.equal(securePosture.established, true, 'Fully configured posture must report established: true');
+    assert.equal(securePosture.securityScore, 100, 'Security score must reach 100%');
+    assert.ok(securePosture.checks.every((c) => c.status === 'PASS'));
+  } finally {
+    process.env.NODE_ENV = origNodeEnv;
+    if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey; else delete process.env.NOOK_API_KEY;
+    if (origPwd !== undefined) process.env.NOOK_PASSWORD = origPwd; else delete process.env.NOOK_PASSWORD;
+    if (origSecret !== undefined) process.env.NOOK_SECRET_TOKEN = origSecret; else delete process.env.NOOK_SECRET_TOKEN;
+    if (origApprover !== undefined) process.env.NOOK_APPROVER_PASSWORD = origApprover; else delete process.env.NOOK_APPROVER_PASSWORD;
+    if (origLoopback !== undefined) process.env.ALLOW_TEST_LOOPBACK = origLoopback; else delete process.env.ALLOW_TEST_LOOPBACK;
+  }
 });
 
 after(async () => {

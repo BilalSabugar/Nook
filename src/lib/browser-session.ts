@@ -267,8 +267,11 @@ export async function getOrCreateLivePlaywrightPage(
     }
 
     // Enforce network-level egress proxying on Chromium process itself - strictly fail closed
-    const egressProxy = await getGlobalEgressProxy();
-    if (!egressProxy || !egressProxy.url) {
+    const egressProxy = await getGlobalEgressProxy().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Browser Egress Error: Network-level egress proxy failed to initialize: ${msg}`);
+    });
+    if (!egressProxy || !egressProxy.url || !egressProxy.server?.listening) {
       logAuditEvent('BROWSER_EGRESS_BLOCKED', 'Mandatory browser egress proxy is unavailable; refusing unproxied browser launch', 'error', agentId);
       throw new Error('Browser Egress Error: Network-level egress proxy is required and cannot be bypassed. Refusing unproxied browser launch.');
     }
@@ -276,6 +279,11 @@ export async function getOrCreateLivePlaywrightPage(
     baseArgs.push(
       `--proxy-server=${egressProxy.url}`,
       '--proxy-bypass-list=<-loopback>',
+      '--disable-quic',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--no-pings',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
     );
 
@@ -337,7 +345,12 @@ export async function getOrCreateLivePlaywrightPage(
     return session;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('Browser Egress Error') || msg.includes('egress proxy is required')) {
+    if (
+      msg.includes('Browser Egress Error') ||
+      msg.includes('egress proxy') ||
+      msg.includes('SSRF') ||
+      msg.includes('Forbidden by Nook')
+    ) {
       throw err;
     }
     return null;
@@ -374,12 +387,16 @@ export async function closeAllBrowserSessions(): Promise<void> {
  */
 export async function captureRealBrowserScreenshot(
   targetUrl: string,
-  viewport = { width: 1280, height: 800 }
+  viewport = { width: 1280, height: 800 },
+  options: { failClosed?: boolean } = {}
 ): Promise<{ buffer: Buffer; engine: string } | null> {
   // 1. Initial SSRF policy verification before browser dispatch
   const initialCheck = await validateOutboundUrl(targetUrl);
   if (!initialCheck.allowed) {
     logAuditEvent('BROWSER_EGRESS_BLOCKED', `Playwright blocked navigation to ${targetUrl}: ${initialCheck.reason}`, 'blocked');
+    if (options.failClosed) {
+      throw new Error(`SSRF Policy Violation: Outbound browser navigation blocked. ${initialCheck.reason}`);
+    }
     return null;
   }
 
@@ -400,8 +417,11 @@ export async function captureRealBrowserScreenshot(
     }
 
     // Enforce network-level egress proxying on Chromium process itself - strictly fail closed
-    const egressProxy = await getGlobalEgressProxy();
-    if (!egressProxy || !egressProxy.url) {
+    const egressProxy = await getGlobalEgressProxy().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Browser Egress Error: Network-level egress proxy failed to initialize: ${msg}`);
+    });
+    if (!egressProxy || !egressProxy.url || !egressProxy.server?.listening) {
       logAuditEvent('BROWSER_EGRESS_BLOCKED', 'Mandatory browser egress proxy is unavailable; refusing unproxied screenshot capture', 'error');
       throw new Error('Browser Egress Error: Network-level egress proxy is required and cannot be bypassed. Refusing unproxied browser launch.');
     }
@@ -409,6 +429,11 @@ export async function captureRealBrowserScreenshot(
     baseArgs.push(
       `--proxy-server=${egressProxy.url}`,
       '--proxy-bypass-list=<-loopback>',
+      '--disable-quic',
+      '--disable-background-networking',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--no-pings',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'
     );
 
@@ -477,7 +502,12 @@ export async function captureRealBrowserScreenshot(
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('Browser Egress Error') || msg.includes('egress proxy is required')) {
+    if (
+      msg.includes('Browser Egress Error') ||
+      msg.includes('egress proxy') ||
+      msg.includes('SSRF') ||
+      msg.includes('Forbidden by Nook')
+    ) {
       throw err;
     }
     return null;
@@ -496,6 +526,16 @@ export async function navigateBrowser(
   const targetUrl = rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
     ? rawUrl
     : `https://${rawUrl}`;
+
+  // 0. Ensure mandatory egress proxy is running - fail closed
+  const egressProxy = await getGlobalEgressProxy().catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Browser Egress Error: Network-level egress proxy failed to initialize: ${msg}`);
+  });
+  if (!egressProxy || !egressProxy.url || !egressProxy.server?.listening) {
+    logAuditEvent('BROWSER_EGRESS_BLOCKED', 'Mandatory browser egress proxy is inactive; refusing unproxied navigation', 'error', agentId);
+    throw new Error('Browser Egress Error: Network-level egress proxy is required and cannot be bypassed. Refusing unproxied navigation.');
+  }
 
   // 1. Strict pre-flight SSRF check
   const validation = await validateOutboundUrl(targetUrl);
@@ -666,12 +706,17 @@ export async function navigateBrowser(
         msg.includes('Forbidden by Nook') ||
         msg.includes('ERR_TUNNEL_CONNECTION_FAILED') ||
         msg.includes('ERR_PROXY_CONNECTION_FAILED') ||
-        msg.includes('SSRF');
+        msg.includes('ERR_CONNECTION_RESET') ||
+        msg.includes('ERR_ABORTED') ||
+        msg.includes('SSRF') ||
+        msg.includes('Egress');
 
       if (isEgressBlocked) {
         logAuditEvent('BROWSER_EGRESS_BLOCKED', `Live browser navigation to ${response.finalUrl} blocked by egress protection: ${msg}`, 'blocked', agentId);
         session.consoleLogs.push(`[Security Error] Egress protection blocked live navigation to ${response.finalUrl}: ${msg}`);
         await persistSessionToDisk(session);
+        await live.page.close().catch(() => {});
+        livePlaywrightSessions.delete(agentId);
         throw new Error(`SSRF Policy Violation: Outbound browser navigation blocked by egress policy. ${msg}`);
       }
       // Non-egress error (e.g. timeout on slow valid page) - proceed with fallback
@@ -682,10 +727,15 @@ export async function navigateBrowser(
   if (!isRealBrowser) {
     let realCapture: { buffer: Buffer; engine: string } | null = null;
     try {
-      realCapture = await captureRealBrowserScreenshot(response.finalUrl);
+      realCapture = await captureRealBrowserScreenshot(response.finalUrl, undefined, { failClosed: true });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('Browser Egress') || msg.includes('SSRF') || msg.includes('egress proxy')) {
+      if (
+        msg.includes('Browser Egress') ||
+        msg.includes('SSRF') ||
+        msg.includes('egress proxy') ||
+        msg.includes('Forbidden by Nook')
+      ) {
         logAuditEvent('BROWSER_EGRESS_BLOCKED', `Browser screenshot capture aborted due to egress policy failure: ${msg}`, 'blocked', agentId);
         session.consoleLogs.push(`[Security Error] Egress protection prevented screenshot capture: ${msg}`);
         await persistSessionToDisk(session);
@@ -766,7 +816,10 @@ export async function updateSessionFromLivePage(
       logAuditEvent('BROWSER_EGRESS_BLOCKED', `Live page navigated to forbidden host ${liveUrl}: ${val.reason}`, 'blocked', agentId);
       session.consoleLogs.push(`[Security Error] Egress policy blocked page navigation to ${liveUrl}: ${val.reason}`);
       await persistSessionToDisk(session);
-      return;
+      // Strictly fail closed: terminate page immediately and purge live session
+      await page.close().catch(() => {});
+      livePlaywrightSessions.delete(agentId);
+      throw new Error(`SSRF Policy Violation: Outbound browser navigation blocked by egress policy. Forbidden host: ${liveUrl} (${val.reason})`);
     }
   }
   session.currentUrl = liveUrl || session.currentUrl;

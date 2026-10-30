@@ -1852,10 +1852,275 @@ export function commitMissionStateWithFencing(
 // SOVEREIGN WORKSPACE EXPORT & IMPORT (v2)
 // ==========================================
 
+export interface SnapshotManifest {
+  schemaVersion: number;
+  nookVersion: string;
+  exportedAt: string;
+  totalSpaces: number;
+  totalDocs: number;
+  totalRevisions: number;
+  totalMissions: number;
+  totalTasks: number;
+  totalEvidence: number;
+  totalApprovals: number;
+  checksum: string;
+}
+
+export interface SnapshotValidationResult {
+  valid: boolean;
+  schemaVersion: number;
+  manifest?: SnapshotManifest;
+  errors: string[];
+  warnings: string[];
+  summary: {
+    spacesCount: number;
+    docsCount: number;
+    revisionsCount: number;
+    missionsCount: number;
+    tasksCount: number;
+    evidenceCount: number;
+    approvalsCount: number;
+  };
+}
+
+export interface DatabaseIntegrityResult {
+  healthy: boolean;
+  integrityCheck: string;
+  foreignKeyViolations: any[];
+}
+
+function canonicalize(obj: any): any {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(canonicalize);
+  }
+  const sortedKeys = Object.keys(obj).sort();
+  const result: Record<string, any> = {};
+  for (const key of sortedKeys) {
+    if (key !== 'manifest' && key !== 'checksum') {
+      result[key] = canonicalize(obj[key]);
+    }
+  }
+  return result;
+}
+
+export function computeSnapshotChecksum(bundle: Record<string, any>): string {
+  if (!bundle || typeof bundle !== 'object') return '';
+  const canonical = JSON.stringify(canonicalize(bundle));
+  return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+export function verifyDatabaseIntegrity(db: DatabaseSync = getDatabase()): DatabaseIntegrityResult {
+  const checkRow = db.prepare('PRAGMA integrity_check;').get() as { integrity_check?: string } | undefined;
+  const integrityCheck = checkRow?.integrity_check || 'ok';
+  const fkRows = db.prepare('PRAGMA foreign_key_check;').all();
+
+  return {
+    healthy: integrityCheck.toLowerCase() === 'ok' && fkRows.length === 0,
+    integrityCheck,
+    foreignKeyViolations: fkRows,
+  };
+}
+
+export function validateWorkspaceSnapshot(bundle: any): SnapshotValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!bundle || typeof bundle !== 'object') {
+    return {
+      valid: false,
+      schemaVersion: 0,
+      errors: ['Invalid bundle: snapshot payload must be a non-null object'],
+      warnings: [],
+      summary: { spacesCount: 0, docsCount: 0, revisionsCount: 0, missionsCount: 0, tasksCount: 0, evidenceCount: 0, approvalsCount: 0 },
+    };
+  }
+
+  const schemaVersion = Number(bundle.schemaVersion);
+  if (!schemaVersion || (schemaVersion !== 1 && schemaVersion !== 2)) {
+    errors.push(`Unsupported or missing schemaVersion: expected 1 or 2, got ${bundle.schemaVersion}`);
+  }
+
+  // Checksum verification if manifest is provided
+  if (bundle.manifest?.checksum) {
+    const expected = bundle.manifest.checksum;
+    const computed = `sha256:${computeSnapshotChecksum(bundle)}`;
+    if (expected !== computed) {
+      errors.push(`Snapshot integrity checksum mismatch: expected ${expected}, got ${computed} (bundle may be corrupted or tampered)`);
+    }
+  }
+
+  // Spaces & pages
+  let spacesCount = 0;
+  let docsCount = 0;
+  if (bundle.spaces !== undefined) {
+    if (!Array.isArray(bundle.spaces)) {
+      errors.push('Field "spaces" must be an array');
+    } else {
+      spacesCount = bundle.spaces.length;
+      for (let i = 0; i < bundle.spaces.length; i++) {
+        const s = bundle.spaces[i];
+        if (!s || typeof s !== 'object' || !s.id || !s.name) {
+          errors.push(`Invalid space at index ${i}: missing "id" or "name"`);
+        }
+        if (s.pages) {
+          if (!Array.isArray(s.pages)) {
+            errors.push(`Space "${s?.id || i}" has invalid pages: expected array`);
+          } else {
+            docsCount += s.pages.length;
+            for (let j = 0; j < s.pages.length; j++) {
+              const p = s.pages[j];
+              if (!p || typeof p !== 'object' || !p.id || !p.title) {
+                errors.push(`Invalid document at space "${s?.id || i}" index ${j}: missing "id" or "title"`);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Document revisions
+  let revisionsCount = 0;
+  if (bundle.documentRevisions !== undefined) {
+    if (!Array.isArray(bundle.documentRevisions)) {
+      errors.push('Field "documentRevisions" must be an array');
+    } else {
+      revisionsCount = bundle.documentRevisions.length;
+      for (let i = 0; i < bundle.documentRevisions.length; i++) {
+        const r = bundle.documentRevisions[i];
+        if (!r || typeof r !== 'object' || !r.id || !r.documentId) {
+          errors.push(`Invalid revision at index ${i}: missing "id" or "documentId"`);
+        }
+      }
+    }
+  }
+
+  // Missions & tasks
+  let missionsCount = 0;
+  let tasksCount = 0;
+  const taskDependencyGraph = new Map<string, string[]>();
+
+  if (bundle.missions !== undefined) {
+    if (!Array.isArray(bundle.missions)) {
+      errors.push('Field "missions" must be an array');
+    } else {
+      missionsCount = bundle.missions.length;
+      for (let i = 0; i < bundle.missions.length; i++) {
+        const m = bundle.missions[i];
+        if (!m || typeof m !== 'object' || !m.id || !m.title) {
+          errors.push(`Invalid mission at index ${i}: missing "id" or "title"`);
+        }
+        if (m.tasks) {
+          if (!Array.isArray(m.tasks)) {
+            errors.push(`Mission "${m?.id || i}" tasks must be an array`);
+          } else {
+            tasksCount += m.tasks.length;
+            for (let j = 0; j < m.tasks.length; j++) {
+              const t = m.tasks[j];
+              if (!t || typeof t !== 'object' || !t.id || !t.title) {
+                errors.push(`Invalid task at mission "${m?.id || i}" index ${j}: missing "id" or "title"`);
+              } else {
+                const deps = Array.isArray(t.dependencies) ? t.dependencies : [];
+                taskDependencyGraph.set(t.id, deps);
+              }
+              if (t.approvalToken) {
+                warnings.push(`Task "${t.id}" contains an embedded approvalToken; it will be sanitized upon import`);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Check top-level tasks if present
+  if (bundle.tasks !== undefined && Array.isArray(bundle.tasks)) {
+    tasksCount += bundle.tasks.length;
+    for (const t of bundle.tasks) {
+      if (t?.id) {
+        const deps = Array.isArray(t.dependencies) ? t.dependencies : [];
+        taskDependencyGraph.set(t.id, deps);
+      }
+    }
+  }
+
+  // Detect cyclic dependencies in tasks
+  const visited = new Set<string>();
+  const recStack = new Set<string>();
+  function hasCycle(taskId: string): boolean {
+    visited.add(taskId);
+    recStack.add(taskId);
+    const deps = taskDependencyGraph.get(taskId) || [];
+    for (const dep of deps) {
+      if (!visited.has(dep)) {
+        if (hasCycle(dep)) return true;
+      } else if (recStack.has(dep)) {
+        return true;
+      }
+    }
+    recStack.delete(taskId);
+    return false;
+  }
+  for (const taskId of taskDependencyGraph.keys()) {
+    if (!visited.has(taskId)) {
+      if (hasCycle(taskId)) {
+        errors.push(`Cyclic dependency detected in task graph involving task "${taskId}"`);
+        break;
+      }
+    }
+  }
+
+  // Evidence
+  let evidenceCount = 0;
+  if (bundle.evidenceTimeline !== undefined) {
+    if (!Array.isArray(bundle.evidenceTimeline)) {
+      errors.push('Field "evidenceTimeline" must be an array');
+    } else {
+      evidenceCount = bundle.evidenceTimeline.length;
+    }
+  }
+
+  // Approvals
+  let approvalsCount = 0;
+  if (bundle.approvalsAudit !== undefined) {
+    if (!Array.isArray(bundle.approvalsAudit)) {
+      errors.push('Field "approvalsAudit" must be an array');
+    } else {
+      approvalsCount = bundle.approvalsAudit.length;
+      for (const appr of bundle.approvalsAudit) {
+        if (appr.singleUseToken || appr.single_use_token) {
+          warnings.push(`Approval record "${appr.id}" contains singleUseToken; it will be cleared upon import`);
+        }
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    schemaVersion: schemaVersion || 2,
+    manifest: bundle.manifest,
+    errors,
+    warnings,
+    summary: {
+      spacesCount,
+      docsCount,
+      revisionsCount,
+      missionsCount,
+      tasksCount,
+      evidenceCount,
+      approvalsCount,
+    },
+  };
+}
+
 export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
   nookVersion: string;
   exportedAt: string;
   schemaVersion: number;
+  manifest: SnapshotManifest;
   spaces: Array<{
     id: string;
     name: string;
@@ -1974,9 +2239,13 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
 
   const approvalsAudit = listApprovals(false);
 
-  return scrubSensitiveData({
+  const totalTasks = missions.reduce((acc, m) => acc + (m.tasks?.length || 0), 0);
+  const totalDocs = spaces.reduce((acc, s) => acc + (s.pages?.length || 0), 0);
+  const exportedAt = new Date().toISOString();
+
+  const coreBundle = scrubSensitiveData({
     nookVersion: '1.2.0',
-    exportedAt: new Date().toISOString(),
+    exportedAt,
     schemaVersion: 2,
     spaces,
     documentRevisions,
@@ -1984,6 +2253,26 @@ export function exportWorkspaceSnapshot(db: DatabaseSync = getDatabase()): {
     evidenceTimeline,
     approvalsAudit,
   });
+
+  const checksum = `sha256:${computeSnapshotChecksum(coreBundle)}`;
+  const manifest: SnapshotManifest = {
+    schemaVersion: 2,
+    nookVersion: '1.2.0',
+    exportedAt,
+    totalSpaces: spaces.length,
+    totalDocs,
+    totalRevisions: documentRevisions.length,
+    totalMissions: missions.length,
+    totalTasks,
+    totalEvidence: evidenceTimeline.length,
+    totalApprovals: approvalsAudit.length,
+    checksum,
+  };
+
+  return {
+    ...coreBundle,
+    manifest,
+  };
 }
 
 export function importWorkspaceSnapshot(
@@ -1991,6 +2280,7 @@ export function importWorkspaceSnapshot(
   db: DatabaseSync = getDatabase()
 ): {
   success: boolean;
+  validation: SnapshotValidationResult;
   importedSpacesCount: number;
   importedDocsCount: number;
   importedRevisionsCount: number;
@@ -1999,8 +2289,9 @@ export function importWorkspaceSnapshot(
   importedEvidenceCount: number;
   importedApprovalsCount: number;
 } {
-  if (!bundle || typeof bundle !== 'object' || !bundle.schemaVersion) {
-    throw new Error('Invalid workspace bundle: Missing schemaVersion');
+  const validation = validateWorkspaceSnapshot(bundle);
+  if (!validation.valid) {
+    throw new Error(`Invalid workspace bundle: ${validation.errors.join('; ')}`);
   }
 
   let importedSpacesCount = 0;
@@ -2352,6 +2643,7 @@ export function importWorkspaceSnapshot(
 
   return {
     success: true,
+    validation,
     importedSpacesCount,
     importedDocsCount,
     importedRevisionsCount,

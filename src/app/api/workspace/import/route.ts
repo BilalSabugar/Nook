@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { importWorkspaceSnapshot } from '@/lib/db';
+import { importWorkspaceSnapshot, validateWorkspaceSnapshot } from '@/lib/db';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -25,6 +25,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         error: 'Invalid workspace bundle. Missing schemaVersion.',
       }, { status: 400 });
+    }
+
+    const isDryRun = req.nextUrl.searchParams.get('dryRun') === 'true' || Boolean(bundle.dryRun);
+    if (isDryRun) {
+      const validation = validateWorkspaceSnapshot(bundle);
+      return NextResponse.json({
+        success: validation.valid,
+        dryRun: true,
+        validation,
+      }, { status: validation.valid ? 200 : 400 });
     }
 
     await fs.mkdir(STORAGE_DIR, { recursive: true });

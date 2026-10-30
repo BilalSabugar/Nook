@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiRequest, unauthorizedResponse } from '@/lib/auth';
-import { exportWorkspaceSnapshot, scrubSensitiveData, seedInitialSpaces } from '@/lib/db';
+import { exportWorkspaceSnapshot, scrubSensitiveData, seedInitialSpaces, computeSnapshotChecksum } from '@/lib/db';
 import { INITIAL_SPACES } from '@/lib/store';
 import fs from 'fs/promises';
 import fsSync from 'fs';
@@ -80,6 +80,10 @@ export async function GET(req: NextRequest) {
         settings: workspaceState.settings || undefined,
       },
     });
+
+    if (exportBundle.manifest) {
+      exportBundle.manifest.checksum = `sha256:${computeSnapshotChecksum(exportBundle)}`;
+    }
 
     return new NextResponse(JSON.stringify(exportBundle, null, 2), {
       status: 200,

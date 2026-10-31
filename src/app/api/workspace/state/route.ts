@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { validateApiRequest, unauthorizedResponse } from '../../../../lib/auth.ts';
 import {
+  getDatabase,
   saveSpace,
   saveDocumentWithRevision,
   listSpacesWithDocuments,
@@ -144,48 +145,56 @@ export async function GET(req: NextRequest) {
   }
 }
 
+export interface PersistWorkspaceStateOptions {
+  beforeRenameHook?: (ctx: { tmpPath: string; target: string }) => Promise<void> | void;
+}
+
 /**
- * POST /api/workspace/state
- * Durably saves agent states, living spaces, documents with revision logs, and sandboxes.
- * Critical security requirement: Strips all API keys from persisted settings.
+ * Atomically persists workspace state across SQLite and `.nook_storage/workspace-state.json`
+ * combining `O_NOFOLLOW` protection with a temporary-file write, `sync()` flush, and same-directory `rename`.
  */
-export async function POST(req: NextRequest) {
-  const auth = validateApiRequest(req);
-  if (!auth.authorized) {
-    return unauthorizedResponse(auth.error);
-  }
+export async function persistWorkspaceStatePayload(
+  payload: Record<string, any>,
+  options?: PersistWorkspaceStateOptions
+): Promise<{ status: number; body: Record<string, any> }> {
+  const { action, agents, spaces, computerStates, messages, settings, documentId, targetVersion } = payload || {};
 
-  try {
-    const payload = await req.json();
-    const { action, agents, spaces, computerStates, messages, settings, documentId, targetVersion } = payload;
-
-    // Handle document rollback to a previous version
-    if (action === 'rollback' && documentId && targetVersion) {
-      const rolledBack = rollbackDocumentToVersion(documentId, targetVersion);
-      return NextResponse.json({
+  // Handle document rollback to a previous version
+  if (action === 'rollback' && documentId && targetVersion) {
+    const rolledBack = rollbackDocumentToVersion(documentId, targetVersion);
+    return {
+      status: 200,
+      body: {
         success: true,
         message: `Successfully rolled back document to v${targetVersion}`,
         document: rolledBack,
-      });
-    }
+      },
+    };
+  }
 
-    // Validate client-supplied computerStates BEFORE any SQLite or filesystem writes
-    const csValidation = validateComputerStatesInput(computerStates);
-    if (!csValidation.valid) {
-      return NextResponse.json({ error: csValidation.error }, { status: 400 });
-    }
+  // Validate client-supplied computerStates BEFORE any SQLite or filesystem writes
+  const csValidation = validateComputerStatesInput(computerStates);
+  if (!csValidation.valid) {
+    return { status: 400, body: { error: csValidation.error } };
+  }
 
-    await ensureRealDirectoryWithin(process.cwd(), STORAGE_DIR);
+  await ensureRealDirectoryWithin(process.cwd(), STORAGE_DIR);
 
-    // Sanitize settings: strip private secrets from general workspace state
-    const sanitizedSettings = settings
-      ? {
-          provider: settings.provider,
-          model: settings.model,
-          ollamaEndpoint: settings.ollamaEndpoint,
-          // Explicitly omit geminiApiKey, openaiApiKey, anthropicApiKey
-        }
-      : undefined;
+  // Sanitize settings: strip private secrets from general workspace state
+  const sanitizedSettings = settings
+    ? {
+        provider: settings.provider,
+        model: settings.model,
+        ollamaEndpoint: settings.ollamaEndpoint,
+        // Explicitly omit geminiApiKey, openaiApiKey, anthropicApiKey
+      }
+    : undefined;
+
+  const db = getDatabase();
+  let savepointOpen = false;
+  try {
+    db.exec('SAVEPOINT nook_workspace_state_sync;');
+    savepointOpen = true;
 
     // Persist spaces and documents into transactional SQLite database with revision tracking
     if (Array.isArray(spaces)) {
@@ -214,7 +223,8 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Atomic no-follow write for workspace state JSON backup with sensitive data scrubbing
+    // Atomic no-follow temporary-file write + flush + same-directory rename for workspace-state.json
+    const savedAt = new Date().toISOString();
     const serialized = JSON.stringify(
       scrubSensitiveData({
         agents,
@@ -222,15 +232,17 @@ export async function POST(req: NextRequest) {
         computerStates,
         messages,
         settings: sanitizedSettings,
-        savedAt: new Date().toISOString(),
+        savedAt,
       }),
       null,
       2
     );
 
-    await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', serialized);
+    await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', serialized, 0o600, {
+      beforeRenameHook: options?.beforeRenameHook,
+    });
 
-    // Persist per-agent workspace files on durable server disk using strict realpath & O_NOFOLLOW confinement
+    // Persist per-agent workspace files on durable server disk using strict realpath & atomic O_NOFOLLOW confinement
     if (computerStates && typeof computerStates === 'object') {
       const sandboxesRoot = path.join(STORAGE_DIR, 'sandboxes');
       await ensureRealDirectoryWithin(STORAGE_DIR, sandboxesRoot);
@@ -249,13 +261,47 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    db.exec('RELEASE SAVEPOINT nook_workspace_state_sync;');
+    savepointOpen = false;
+
     logAuditEvent('WORKSPACE_SYNC', 'Synchronized workspace state, spaces, and sandboxes', 'success');
 
-    return NextResponse.json({
-      success: true,
-      savedAt: new Date().toISOString(),
-      storageDirectory: STORAGE_DIR,
-    });
+    return {
+      status: 200,
+      body: {
+        success: true,
+        savedAt,
+        storageDirectory: STORAGE_DIR,
+      },
+    };
+  } catch (err: any) {
+    if (savepointOpen) {
+      try {
+        db.exec('ROLLBACK TO SAVEPOINT nook_workspace_state_sync;');
+        db.exec('RELEASE SAVEPOINT nook_workspace_state_sync;');
+      } catch {
+        // ignore if savepoint already closed
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * POST /api/workspace/state
+ * Durably saves agent states, living spaces, documents with revision logs, and sandboxes.
+ * Critical security requirement: Strips all API keys from persisted settings.
+ */
+export async function POST(req: NextRequest) {
+  const auth = validateApiRequest(req);
+  if (!auth.authorized) {
+    return unauthorizedResponse(auth.error);
+  }
+
+  try {
+    const payload = await req.json();
+    const result = await persistWorkspaceStatePayload(payload);
+    return NextResponse.json(result.body, { status: result.status });
   } catch (err: any) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }

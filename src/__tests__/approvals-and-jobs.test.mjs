@@ -161,33 +161,157 @@ test('Durable Background Jobs Queue and State Recovery', async () => {
 });
 
 test('Durable Server Workspace State Atomic Persistence', async () => {
+  const { NextRequest } = await import('next/server.js');
+  const crypto = await import('node:crypto');
+  const {
+    GET: stateGet,
+    POST: statePost,
+    persistWorkspaceStatePayload,
+  } = await import('../app/api/workspace/state/route.ts');
+  const { getDocumentById } = await import('../lib/db.ts');
+
   await fs.mkdir(STORAGE_DIR, { recursive: true });
+  let originalStateRaw = null;
+  try {
+    originalStateRaw = await fs.readFile(STATE_FILE, 'utf8');
+  } catch {
+    originalStateRaw = null;
+  }
 
-  const testPayload = {
-    version: '1.0.0',
-    savedAt: new Date().toISOString(),
-    spaces: [
-      {
-        id: 'space-test',
-        name: 'Autonomous Space',
-        pages: [
-          {
-            id: 'page-1',
-            title: 'Robotics Comparison',
-            content: '# Robotics Simulators\n- Isaac Sim\n- Gazebo Sim\n- MuJoCo',
-            version: 1,
-          },
-        ],
+  const origApiKey = process.env.NOOK_API_KEY;
+  const apiKey = `atomic-state-test-${crypto.randomBytes(16).toString('hex')}`;
+  process.env.NOOK_API_KEY = apiKey;
+
+  try {
+    const initialPayload = {
+      agents: [{ id: 'agent-scout', name: 'Scout' }],
+      spaces: [
+        {
+          id: 'space-test-atomic',
+          name: 'Autonomous Space',
+          pages: [
+            {
+              id: 'page-atomic-1',
+              title: 'Robotics Comparison',
+              content: '# Robotics Simulators\n- Isaac Sim\n- Gazebo Sim\n- MuJoCo',
+              version: 1,
+            },
+          ],
+        },
+      ],
+      computerStates: {
+        'agent-scout': {
+          files: [{ name: 'notes.txt', content: 'initial-sandbox-file' }],
+        },
       },
-    ],
-  };
+      messages: { 'agent-scout': [{ id: 'm1', content: 'Committed message' }] },
+      settings: {
+        provider: 'ollama',
+        model: 'llama3.3',
+        ollamaEndpoint: 'http://127.0.0.1:11434',
+        openaiApiKey: 'should-be-stripped-on-persist',
+      },
+    };
 
-  const tempFile = `${STATE_FILE}.${Date.now()}.tmp`;
-  await fs.writeFile(tempFile, JSON.stringify(testPayload, null, 2), 'utf8');
-  await fs.rename(tempFile, STATE_FILE);
+    // 1. Exercise real POST /api/workspace/state API endpoint
+    const postReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': apiKey,
+      },
+      body: JSON.stringify(initialPayload),
+    });
+    const postRes = await statePost(postReq);
+    assert.equal(postRes.status, 200, 'POST /api/workspace/state must succeed with 200');
+    const postData = await postRes.json();
+    assert.equal(postData.success, true);
 
-  const restored = JSON.parse(await fs.readFile(STATE_FILE, 'utf8'));
-  assert.equal(restored.version, '1.0.0');
-  assert.equal(restored.spaces[0].id, 'space-test');
-  assert.equal(restored.spaces[0].pages[0].title, 'Robotics Comparison');
+    const committedRaw = await fs.readFile(STATE_FILE, 'utf8');
+    const committedJson = JSON.parse(committedRaw);
+    assert.equal(committedJson.spaces[0].id, 'space-test-atomic');
+    assert.equal(committedJson.spaces[0].pages[0].title, 'Robotics Comparison');
+    assert.equal(committedJson.settings.openaiApiKey, undefined, 'API keys must be stripped from persisted state');
+
+    // 2. Simulate an interrupted write mid-flight (after temp file is written/flushed, before atomic rename)
+    let observedTmpPath = null;
+    let targetUnchangedDuringTempWrite = false;
+    await assert.rejects(
+      async () => {
+        await persistWorkspaceStatePayload(
+          {
+            agents: [{ id: 'agent-scout', name: 'Corrupted Uncommitted Agent' }],
+            spaces: [
+              {
+                id: 'space-interrupted-rollback',
+                name: 'Interrupted Space That Must Roll Back',
+                pages: [
+                  {
+                    id: 'page-interrupted-rollback',
+                    title: 'Uncommitted Page',
+                    content: 'Should never persist on interrupted write',
+                  },
+                ],
+              },
+            ],
+            messages: { 'agent-scout': [{ id: 'm-corrupt', content: 'UNCOMMITTED_WRITE' }] },
+          },
+          {
+            beforeRenameHook: async ({ tmpPath, target }) => {
+              observedTmpPath = tmpPath;
+              // Verify temp file is in the same directory and already contains the staged bytes
+              assert.equal(path.dirname(tmpPath), path.dirname(target));
+              const tmpStat = await fs.stat(tmpPath);
+              assert.ok(tmpStat.size > 0, 'Temporary file must be written and flushed before rename');
+              // Verify live target file still contains the exact previous committed payload prior to rename
+              const liveRawDuringWrite = await fs.readFile(target, 'utf8');
+              targetUnchangedDuringTempWrite = liveRawDuringWrite === committedRaw;
+              throw new Error('Simulated process interruption before atomic rename');
+            },
+          }
+        );
+      },
+      /Simulated process interruption before atomic rename/
+    );
+
+    assert.equal(
+      targetUnchangedDuringTempWrite,
+      true,
+      'Live workspace-state.json must remain untouched while temporary file is being written'
+    );
+    assert.ok(observedTmpPath, 'beforeRenameHook must observe the temporary file');
+    await assert.rejects(
+      fs.stat(observedTmpPath),
+      { code: 'ENOENT' },
+      'Temporary file must be cleaned up when write is interrupted'
+    );
+
+    // 3. Verify live workspace-state.json, SQLite, and GET /api/workspace/state remain completely intact
+    const afterInterruptRaw = await fs.readFile(STATE_FILE, 'utf8');
+    assert.equal(
+      afterInterruptRaw,
+      committedRaw,
+      'Interrupted write must leave previous workspace-state.json 100% intact'
+    );
+    assert.equal(
+      getDocumentById('page-interrupted-rollback'),
+      null,
+      'SQLite document from interrupted state sync must be rolled back'
+    );
+
+    const getReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+      headers: { 'x-nook-api-key': apiKey },
+    });
+    const getRes = await stateGet(getReq);
+    assert.equal(getRes.status, 200);
+    const getData = await getRes.json();
+    assert.equal(getData.hasDurableState, true);
+    assert.equal(getData.data.messages['agent-scout'][0].content, 'Committed message');
+  } finally {
+    if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
+    else delete process.env.NOOK_API_KEY;
+    if (originalStateRaw !== null) {
+      await fs.writeFile(STATE_FILE, originalStateRaw, 'utf8');
+    }
+  }
 });

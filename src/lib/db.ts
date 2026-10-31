@@ -1012,8 +1012,8 @@ export function saveDocumentWithRevision(doc: {
 
   const newVersion = existing ? existing.version + 1 : 1;
 
-  // Transaction for atomic document update + revision log
-  db.exec('BEGIN TRANSACTION;');
+  // Savepoint for atomic document update + revision log (composable with outer transactions)
+  db.exec('SAVEPOINT nook_doc_revision;');
   try {
     // 1. Ensure space exists
     db.prepare(`
@@ -1065,9 +1065,14 @@ export function saveDocumentWithRevision(doc: {
       doc.changeSummary || `Version ${newVersion} created`
     );
 
-    db.exec('COMMIT;');
+    db.exec('RELEASE SAVEPOINT nook_doc_revision;');
   } catch (err) {
-    db.exec('ROLLBACK;');
+    try {
+      db.exec('ROLLBACK TO SAVEPOINT nook_doc_revision;');
+      db.exec('RELEASE SAVEPOINT nook_doc_revision;');
+    } catch {
+      // ignore if savepoint already closed
+    }
     throw err;
   }
 

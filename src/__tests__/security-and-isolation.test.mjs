@@ -3210,6 +3210,119 @@ test('Health & Model Provider E2E: Worker heartbeat readiness and live HTTP mode
   }
 });
 
+// =========================================================================
+// 64. UI SANDBOX EXECUTION PATH: VIRTUAL FILES FORWARDING
+// =========================================================================
+test('UI Sandbox Execution Path: POST /api/sandbox/exec forwards virtualFiles into task workspace and sandbox runner', async () => {
+  const { POST: sandboxExecPost } = await import('../app/api/sandbox/exec/route.ts');
+
+  const agentId = 'agent-cipher';
+  const command = 'cat ui_forwarded_sentinel.txt';
+  const appr = createApproval({
+    agentId,
+    agentName: 'Cipher',
+    type: 'run_command',
+    title: 'Verify UI virtualFiles forwarding',
+    payload: { command },
+  });
+  const decided = decideApproval(appr.id, 'approve', 'Approved for UI virtualFiles test');
+  assert.equal(decided.success, true);
+
+  let capturedRunnerPayload = null;
+  const mockRunner = http.createServer((req, res) => {
+    if (req.url === '/exec' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        capturedRunnerPayload = JSON.parse(body);
+        const targetFile = (capturedRunnerPayload.virtualFiles || []).find(
+          (f) => f.name === 'ui_forwarded_sentinel.txt'
+        );
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            stdout: targetFile ? targetFile.content : 'MISSING_VIRTUAL_FILE',
+            stderr: '',
+            exitCode: targetFile ? 0 : 1,
+            isolatedRuntime: 'docker_container',
+          })
+        );
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => mockRunner.listen(0, '127.0.0.1', resolve));
+  const runnerPort = mockRunner.address().port;
+  const origServiceUrl = process.env.SANDBOX_SERVICE_URL;
+  const origApiKey = process.env.NOOK_API_KEY;
+  try {
+    process.env.SANDBOX_SERVICE_URL = `http://127.0.0.1:${runnerPort}`;
+    process.env.NOOK_API_KEY = `ui-exec-key-${crypto.randomBytes(16).toString('hex')}`;
+
+    const execReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': process.env.NOOK_API_KEY,
+      },
+      body: JSON.stringify({
+        command,
+        agentId,
+        approvalId: appr.id,
+        approvalToken: decided.approval.singleUseToken,
+        virtualFiles: [
+          {
+            path: '/workspace/ui_forwarded_sentinel.txt',
+            name: 'ui_forwarded_sentinel.txt',
+            content: 'VERIFIED_UI_VIRTUAL_FILE_CONTENT_42',
+          },
+        ],
+      }),
+    });
+
+    const res = await sandboxExecPost(execReq);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.equal(data.exitCode, 0);
+    assert.equal(data.output, 'VERIFIED_UI_VIRTUAL_FILE_CONTENT_42');
+    assert.ok(data.availableFiles.includes('ui_forwarded_sentinel.txt'));
+
+    // Verify runner received the forwarded virtualFiles
+    assert.ok(capturedRunnerPayload, 'Sandbox runner must receive /exec request');
+    assert.ok(Array.isArray(capturedRunnerPayload.virtualFiles), 'virtualFiles must be forwarded to runner');
+    assert.ok(
+      capturedRunnerPayload.virtualFiles.some(
+        (f) => f.name === 'ui_forwarded_sentinel.txt' && f.content === 'VERIFIED_UI_VIRTUAL_FILE_CONTENT_42'
+      ),
+      'Forwarded virtualFiles must include the UI virtual file'
+    );
+
+    // Verify the per-task workspace directory on disk also received the file
+    const safeTaskId = String(appr.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const taskFilePath = path.resolve(
+      process.cwd(),
+      '.nook_sandboxes',
+      agentId,
+      'tasks',
+      safeTaskId,
+      'ui_forwarded_sentinel.txt'
+    );
+    assert.equal(fs.existsSync(taskFilePath), true, 'Task workspace directory must contain the forwarded virtual file');
+    assert.equal(fs.readFileSync(taskFilePath, 'utf8'), 'VERIFIED_UI_VIRTUAL_FILE_CONTENT_42');
+  } finally {
+    if (origServiceUrl !== undefined) process.env.SANDBOX_SERVICE_URL = origServiceUrl;
+    else delete process.env.SANDBOX_SERVICE_URL;
+    if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
+    else delete process.env.NOOK_API_KEY;
+    await new Promise((resolve) => mockRunner.close(resolve));
+  }
+});
+
 after(async () => {
   killProcessSafely(runnerProc);
   await closeAllBrowserSessions().catch(() => {});

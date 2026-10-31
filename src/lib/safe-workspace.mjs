@@ -6,6 +6,7 @@
 import fs from 'node:fs/promises';
 import { constants as fsc } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 export class WorkspaceSecurityError extends Error {
   constructor(message, code = 'WORKSPACE_VIOLATION') {
@@ -81,35 +82,83 @@ export async function removeSymlinksInTree(dir, { maxEntries = 20000, maxDepth =
 }
 
 /**
- * Writes a file inside `dir` without following symlinks and refusing hard-linked targets.
- * Does not truncate until the opened descriptor has been verified.
+ * Writes a file inside `dir` atomically without following symlinks and refusing hard-linked targets:
+ * 1. Verifies `dir` is a real directory (not a symlink) and `target` (if existing) is a regular, non-symlink, non-hardlinked file.
+ * 2. Opens a unique same-directory temporary file with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`.
+ * 3. Writes `content` and flushes (`handle.sync()`) to physical storage before closing the descriptor.
+ * 4. Re-verifies `lstat(target)` immediately prior to atomic same-directory `fs.rename(tmpPath, target)`.
+ * 5. Cleans up `tmpPath` if any step or optional `options.beforeRenameHook` throws, leaving the original `target` completely untouched.
  */
-export async function writeFileNoFollow(dir, name, content, mode = 0o600) {
+export async function writeFileNoFollow(dir, name, content, mode = 0o600, options = {}) {
   if (!name || name !== path.basename(name) || name === '.' || name === '..') {
     throw new WorkspaceSecurityError('Invalid file name', 'BAD_NAME');
   }
-  const target = path.join(dir, name);
-  const pre = await fs.lstat(target).catch((e) => (e.code === 'ENOENT' ? null : Promise.reject(e)));
-  if (pre && pre.isSymbolicLink()) {
-    throw new WorkspaceSecurityError(`Symbolic link rejected: ${name}`, 'SYMLINK_REJECTED');
+  const dirStat = await fs.lstat(dir).catch((e) => (e.code === 'ENOENT' ? null : Promise.reject(e)));
+  if (!dirStat) {
+    throw new WorkspaceSecurityError(`Target directory does not exist: ${dir}`, 'NOT_A_DIRECTORY');
   }
-  const flags = fsc.O_WRONLY | fsc.O_CREAT | (fsc.O_NOFOLLOW || 0);
+  if (dirStat.isSymbolicLink()) {
+    throw new WorkspaceSecurityError(`Symbolic link rejected on directory: ${dir}`, 'SYMLINK_REJECTED');
+  }
+  if (!dirStat.isDirectory()) {
+    throw new WorkspaceSecurityError(`Target parent is not a directory: ${dir}`, 'NOT_A_DIRECTORY');
+  }
+
+  const target = path.join(dir, name);
+  const verifyTargetStat = async () => {
+    const pre = await fs.lstat(target).catch((e) => (e.code === 'ENOENT' ? null : Promise.reject(e)));
+    if (pre) {
+      if (pre.isSymbolicLink()) {
+        throw new WorkspaceSecurityError(`Symbolic link rejected: ${name}`, 'SYMLINK_REJECTED');
+      }
+      if (!pre.isFile()) {
+        throw new WorkspaceSecurityError(`Not a regular file: ${name}`, 'NOT_A_FILE');
+      }
+      if (pre.nlink > 1) {
+        throw new WorkspaceSecurityError(`Hard-linked file rejected: ${name}`, 'HARDLINK_REJECTED');
+      }
+    }
+  };
+
+  await verifyTargetStat();
+
+  const nonce = `${process.pid}-${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+  const tmpName = `.${name}.${nonce}.tmp`;
+  const tmpPath = path.join(dir, tmpName);
+  const flags = fsc.O_WRONLY | fsc.O_CREAT | fsc.O_EXCL | (fsc.O_NOFOLLOW || 0);
+
   let handle;
   try {
-    handle = await fs.open(target, flags, mode);
-  } catch (e) {
-    if (e.code === 'ELOOP') {
-      throw new WorkspaceSecurityError(`Symbolic link rejected: ${name}`, 'SYMLINK_REJECTED');
+    try {
+      handle = await fs.open(tmpPath, flags, mode);
+    } catch (e) {
+      if (e.code === 'ELOOP') {
+        throw new WorkspaceSecurityError(`Symbolic link rejected: ${tmpName}`, 'SYMLINK_REJECTED');
+      }
+      throw e;
     }
-    throw e;
-  }
-  try {
-    const st = await handle.stat();
-    if (!st.isFile()) throw new WorkspaceSecurityError(`Not a regular file: ${name}`, 'NOT_A_FILE');
-    if (st.nlink > 1) throw new WorkspaceSecurityError(`Hard-linked file rejected: ${name}`, 'HARDLINK_REJECTED');
-    await handle.truncate(0);
-    await handle.writeFile(content, 'utf8');
-  } finally {
-    await handle.close();
+
+    try {
+      const st = await handle.stat();
+      if (!st.isFile()) throw new WorkspaceSecurityError(`Not a regular file: ${tmpName}`, 'NOT_A_FILE');
+      if (st.nlink > 1) throw new WorkspaceSecurityError(`Hard-linked file rejected: ${tmpName}`, 'HARDLINK_REJECTED');
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    if (typeof options?.beforeRenameHook === 'function') {
+      await options.beforeRenameHook({ tmpPath, target });
+    }
+
+    // Re-verify target immediately before same-directory atomic replacement
+    await verifyTargetStat();
+    await fs.rename(tmpPath, target);
+  } catch (err) {
+    await fs.unlink(tmpPath).catch(() => {});
+    throw err;
   }
 }
+
+export const writeFileAtomicNoFollow = writeFileNoFollow;

@@ -45,3 +45,7 @@ next-env.d.ts
 # nook runtime storage & sandboxes
 .nook_storage/
 .nook_sandboxes/
+
+# antigravity local agent skills & customizations
+.agents/
+.agent/

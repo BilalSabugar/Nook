@@ -7,20 +7,27 @@ const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const DB_PATH = path.join(STORAGE_DIR, 'nook.db');
 
 let _dbInstance: DatabaseSync | null = null;
-let _workspaceMutationQueue: Promise<unknown> = Promise.resolve();
+let _dbWriteQueue: Promise<unknown> = Promise.resolve();
 
 /**
- * Process-wide transaction coordinator that serializes asynchronous workspace mutations
- * (state saves and snapshot imports) so operations on the shared SQLite connection and
- * `.nook_storage` filesystem never interleave savepoints or disk replacements.
+ * Process-wide transaction coordinator that serializes all writes and asynchronous
+ * mutations on the shared SQLite database connection and `.nook_storage` filesystem.
+ * Ensures operations never interleave open transactions or savepoints across async boundaries.
  */
-export function withWorkspaceMutationLock<T>(fn: () => Promise<T> | T): Promise<T> {
-  const next = _workspaceMutationQueue.then(() => fn(), () => fn());
-  _workspaceMutationQueue = next.then(
+export function withDatabaseWriteLock<T>(fn: () => Promise<T> | T): Promise<T> {
+  const next = _dbWriteQueue.then(() => fn(), () => fn());
+  _dbWriteQueue = next.then(
     () => undefined,
     () => undefined
   );
   return next;
+}
+
+/**
+ * Backward-compatible alias for withDatabaseWriteLock.
+ */
+export function withWorkspaceMutationLock<T>(fn: () => Promise<T> | T): Promise<T> {
+  return withDatabaseWriteLock(fn);
 }
 
 export function getDatabase(): DatabaseSync {
@@ -1032,6 +1039,16 @@ export function getDocumentById(id: string): DbDocument | null {
     createdAt: d.created_at,
     updatedAt: d.updated_at,
   };
+}
+
+export function deleteDocument(id: string, db: DatabaseSync = getDatabase()): boolean {
+  const res = db.prepare(`DELETE FROM documents WHERE id = ?`).run(id);
+  return Number(res.changes ?? 0) > 0;
+}
+
+export function deleteSpace(id: string, db: DatabaseSync = getDatabase()): boolean {
+  const res = db.prepare(`DELETE FROM spaces WHERE id = ?`).run(id);
+  return Number(res.changes ?? 0) > 0;
 }
 
 export function seedInitialSpaces(
@@ -2256,9 +2273,11 @@ export function validateWorkspaceSnapshot(
     }
   }
 
-  // Provenance HMAC signature verification
+  // Provenance HMAC signature verification: server environment policy is authoritative.
+  // An uploaded bundle or caller options may request stricter verification, but can never weaken server policy.
+  const serverRequiresSignature = process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
   const requireSignature =
-    options?.requireSignature ?? process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
+    serverRequiresSignature || options?.requireSignature === true || Boolean(bundle?.requireSignature);
   let signatureStatus: 'verified' | 'unsigned' | 'invalid' = 'unsigned';
   if (bundle.manifest?.signature) {
     const expectedSig = computeSnapshotSignature(computed, options?.signingSecret);
@@ -2708,8 +2727,10 @@ export function importWorkspaceSnapshot(
   importedEvidenceCount: number;
   importedApprovalsCount: number;
 } {
+  const serverRequiresSignature = process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
   const validation = validateWorkspaceSnapshot(bundle, {
-    requireSignature: options?.requireSignature,
+    requireSignature:
+      serverRequiresSignature || options?.requireSignature === true || Boolean(bundle?.requireSignature),
     signingSecret: options?.signingSecret,
   });
   if (!validation.valid) {

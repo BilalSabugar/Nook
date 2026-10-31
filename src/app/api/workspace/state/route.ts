@@ -12,6 +12,7 @@ import {
   listSpacesWithDocuments,
   listDocumentRevisions,
   rollbackDocumentToVersion,
+  seedInitialSpaces,
   logAuditEvent,
   scrubSensitiveData,
   SAFE_SNAPSHOT_ID_PATTERN,
@@ -19,6 +20,13 @@ import {
   MAX_SNAPSHOT_SANDBOX_FILES_PER_AGENT,
   MAX_SNAPSHOT_SANDBOX_FILE_BYTES,
 } from '../../../../lib/db.ts';
+import {
+  INITIAL_AGENTS,
+  INITIAL_SPACES,
+  INITIAL_COMPUTER_STATES,
+  INITIAL_MESSAGES,
+  DEFAULT_LLM_SETTINGS,
+} from '../../../../lib/store.ts';
 import {
   ensureRealDirectoryWithin,
   writeFileNoFollow,
@@ -175,7 +183,7 @@ export async function persistWorkspaceStatePayload(
   const { action, agents, spaces, computerStates, messages, settings, documentId, targetVersion } = payload || {};
 
   // Validate client-supplied computerStates BEFORE acquiring lock or performing any SQLite / filesystem writes
-  if (!(action === 'rollback' && documentId && targetVersion)) {
+  if (!(action === 'rollback' && documentId && targetVersion) && action !== 'reset') {
     const csValidation = validateComputerStatesInput(computerStates);
     if (!csValidation.valid) {
       return { status: 400, body: { error: csValidation.error } };
@@ -183,7 +191,51 @@ export async function persistWorkspaceStatePayload(
   }
 
   return withWorkspaceMutationLock(async () => {
-    // Handle document rollback to a previous version inside the serialized mutation lock
+    // 1. Handle complete server-side workspace reset
+    if (action === 'reset') {
+      const db = getDatabase();
+      db.exec(`
+        DELETE FROM approvals;
+        DELETE FROM agent_tasks;
+        DELETE FROM evidence_records;
+        DELETE FROM missions;
+        DELETE FROM background_jobs;
+        DELETE FROM document_revisions;
+        DELETE FROM documents;
+        DELETE FROM spaces;
+      `);
+
+      seedInitialSpaces(INITIAL_SPACES);
+
+      const sandboxesRoot = path.join(STORAGE_DIR, 'sandboxes');
+      if (fsSync.existsSync(sandboxesRoot)) {
+        fsSync.rmSync(sandboxesRoot, { recursive: true, force: true });
+      }
+      fsSync.mkdirSync(sandboxesRoot, { recursive: true });
+
+      const resetState = {
+        agents: INITIAL_AGENTS,
+        spaces: INITIAL_SPACES,
+        computerStates: INITIAL_COMPUTER_STATES,
+        messages: INITIAL_MESSAGES,
+        settings: DEFAULT_LLM_SETTINGS,
+        savedAt: new Date().toISOString(),
+      };
+      await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', JSON.stringify(resetState, null, 2), 0o600);
+
+      logAuditEvent('WORKSPACE_RESET', 'Factory reset of workspace state, sandboxes, and database', 'success');
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          message: 'Workspace successfully reset to factory defaults',
+          state: resetState,
+        },
+      };
+    }
+
+    // 2. Handle document rollback to a previous version inside the serialized mutation lock
     if (action === 'rollback' && documentId && targetVersion) {
       const rolledBack = rollbackDocumentToVersion(documentId, targetVersion);
       return {
@@ -228,37 +280,9 @@ export async function persistWorkspaceStatePayload(
     const db = getDatabase();
     let savepointOpen = false;
     try {
-      db.exec(`SAVEPOINT ${savepointName};`);
-      savepointOpen = true;
-
-      // Persist spaces and documents into transactional SQLite database with revision tracking
-      if (Array.isArray(spaces)) {
-        for (const space of spaces) {
-          if (space?.id && space?.name) {
-            saveSpace({ id: space.id, name: space.name, icon: space.icon || 'folder' });
-
-            if (Array.isArray(space.pages)) {
-              for (const page of space.pages) {
-                if (page?.id && page?.title) {
-                  saveDocumentWithRevision({
-                    id: page.id,
-                    spaceId: space.id,
-                    title: page.title,
-                    content: page.content || '',
-                    excerpt: page.excerpt,
-                    icon: page.icon,
-                    authorAgentId: page.authorAgentId || 'unknown',
-                    tags: page.tags,
-                    changeSummary: `Updated from client sync`,
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-
-      // Atomic no-follow temporary-file write + flush + same-directory rename for workspace-state.json
+      // Step 1: Atomic no-follow temporary-file write + flush + same-directory rename for workspace-state.json
+      // IMPORTANT: SQLite savepoint is NOT held open across async I/O or test failure hooks,
+      // preventing rollback of concurrent unrelated database writes.
       const savedAt = new Date().toISOString();
       const serialized = JSON.stringify(
         scrubSensitiveData({
@@ -281,7 +305,7 @@ export async function persistWorkspaceStatePayload(
         await options.afterStateFileHook({ stateFile: STATE_FILE });
       }
 
-      // Persist per-agent workspace files on durable server disk using strict realpath & atomic O_NOFOLLOW confinement
+      // Step 2: Persist per-agent workspace files on durable server disk using strict realpath & atomic O_NOFOLLOW confinement
       if (hasComputerStates) {
         await ensureRealDirectoryWithin(STORAGE_DIR, sandboxesRoot);
         let sandboxFileIndex = 0;
@@ -309,8 +333,53 @@ export async function persistWorkspaceStatePayload(
         }
       }
 
-      db.exec(`RELEASE SAVEPOINT ${savepointName};`);
-      savepointOpen = false;
+      // Step 3: Now that all asynchronous filesystem writes and hooks succeeded, persist spaces and
+      // documents into SQLite synchronously without yielding to the event loop.
+      if (Array.isArray(spaces)) {
+        db.exec(`SAVEPOINT ${savepointName};`);
+        savepointOpen = true;
+
+        const suppliedSpaceIds = new Set<string>();
+        for (const space of spaces) {
+          if (space?.id && space?.name) {
+            suppliedSpaceIds.add(space.id);
+            saveSpace({ id: space.id, name: space.name, icon: space.icon || 'folder' });
+
+            const suppliedDocIds = new Set<string>();
+            if (Array.isArray(space.pages)) {
+              for (const page of space.pages) {
+                if (page?.id && page?.title) {
+                  suppliedDocIds.add(page.id);
+                  saveDocumentWithRevision({
+                    id: page.id,
+                    spaceId: space.id,
+                    title: page.title,
+                    content: page.content || '',
+                    excerpt: page.excerpt,
+                    icon: page.icon,
+                    authorAgentId: page.authorAgentId || 'unknown',
+                    tags: page.tags,
+                    changeSummary: `Updated from client sync`,
+                  });
+                }
+              }
+            }
+
+            // Prune documents in this space that were deleted by the client so they stay deleted after reload
+            const existingDocs = db
+              .prepare(`SELECT id FROM documents WHERE space_id = ?`)
+              .all(space.id) as Array<{ id: string }>;
+            for (const existingDoc of existingDocs) {
+              if (!suppliedDocIds.has(existingDoc.id)) {
+                db.prepare(`DELETE FROM documents WHERE id = ?`).run(existingDoc.id);
+              }
+            }
+          }
+        }
+
+        db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        savepointOpen = false;
+      }
 
       logAuditEvent('WORKSPACE_SYNC', 'Synchronized workspace state, spaces, and sandboxes', 'success');
 
@@ -323,7 +392,7 @@ export async function persistWorkspaceStatePayload(
         },
       };
     } catch (err: any) {
-      // 1. Roll back SQLite savepoint
+      // 1. Roll back SQLite savepoint if it was opened during the database phase
       if (savepointOpen) {
         try {
           db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);

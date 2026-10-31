@@ -77,6 +77,23 @@ export default function NookApp() {
   const [isSetupConfigured, setIsSetupConfigured] = useState<boolean>(true);
 
   // Load durable server state with LocalStorage fallback
+  const isWorkspaceLoadedRef = useRef<boolean>(false);
+  const saveDebounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const agentsRef = useRef(agents);
+  const spacesRef = useRef(spaces);
+  const computerStatesRef = useRef(computerStates);
+  const messagesRef = useRef(messages);
+  const llmSettingsRef = useRef(llmSettings);
+
+  useEffect(() => {
+    agentsRef.current = agents;
+    spacesRef.current = spaces;
+    computerStatesRef.current = computerStates;
+    messagesRef.current = messages;
+    llmSettingsRef.current = llmSettings;
+  }, [agents, spaces, computerStates, messages, llmSettings]);
+
   const loadWorkspaceState = () => {
     fetch('/api/workspace/state')
       .then((res) => (res.ok ? res.json() : null))
@@ -88,6 +105,7 @@ export default function NookApp() {
           if (sComps && typeof sComps === 'object') setComputerStates(sComps);
           if (sMsgs && typeof sMsgs === 'object') setMessages(sMsgs);
           if (sSettings) setLlmSettings(sSettings);
+          isWorkspaceLoadedRef.current = true;
           return;
         }
 
@@ -95,6 +113,20 @@ export default function NookApp() {
         try {
           const storedSettings = localStorage.getItem('nook_settings');
           if (storedSettings) setLlmSettings(JSON.parse(storedSettings));
+
+          const storedMsgs = localStorage.getItem('nook_messages');
+          if (storedMsgs) {
+            try {
+              setMessages(JSON.parse(storedMsgs));
+            } catch {}
+          }
+
+          const storedComps = localStorage.getItem('nook_computer_states');
+          if (storedComps) {
+            try {
+              setComputerStates(JSON.parse(storedComps));
+            } catch {}
+          }
 
           const storedAgents = localStorage.getItem('nook_agents');
           if (storedAgents) {
@@ -133,8 +165,11 @@ export default function NookApp() {
         } catch {
           // ignore
         }
+        isWorkspaceLoadedRef.current = true;
       })
-      .catch(() => {});
+      .catch(() => {
+        isWorkspaceLoadedRef.current = true;
+      });
   };
 
   // Check owner session authentication status on mount
@@ -184,11 +219,11 @@ export default function NookApp() {
   }) => {
     try {
       const requestBody = JSON.stringify({
-        agents: payload.agents || agents,
-        spaces: payload.spaces || spaces,
-        computerStates: payload.computerStates || computerStates,
-        messages: payload.messages || messages,
-        settings: payload.settings || llmSettings,
+        agents: payload.agents || agentsRef.current,
+        spaces: payload.spaces || spacesRef.current,
+        computerStates: payload.computerStates || computerStatesRef.current,
+        messages: payload.messages || messagesRef.current,
+        settings: payload.settings || llmSettingsRef.current,
       });
       persistenceQueueRef.current = persistenceQueueRef.current
         .then(() =>
@@ -201,6 +236,53 @@ export default function NookApp() {
         .catch(() => {});
     } catch {}
   };
+
+  const debounceSyncServerPersistence = (payload: {
+    agents?: Agent[];
+    spaces?: Space[];
+    computerStates?: Record<string, ComputerState>;
+    messages?: Record<string, Message[]>;
+    settings?: LLMSettings;
+  }) => {
+    if (saveDebounceTimeoutRef.current) {
+      clearTimeout(saveDebounceTimeoutRef.current);
+    }
+    saveDebounceTimeoutRef.current = setTimeout(() => {
+      syncServerPersistence(payload);
+    }, 400);
+  };
+
+  // Automatically and durably persist chat messages and computer state / virtual file changes
+  useEffect(() => {
+    if (!isWorkspaceLoadedRef.current) return;
+    try {
+      localStorage.setItem('nook_messages', JSON.stringify(messages));
+    } catch {}
+    debounceSyncServerPersistence({ messages });
+  }, [messages]);
+
+  useEffect(() => {
+    if (!isWorkspaceLoadedRef.current) return;
+    try {
+      localStorage.setItem('nook_computer_states', JSON.stringify(computerStates));
+    } catch {}
+    debounceSyncServerPersistence({ computerStates });
+  }, [computerStates]);
+
+  // Flush any pending debounced state save prior to page reload / unload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (saveDebounceTimeoutRef.current) {
+        clearTimeout(saveDebounceTimeoutRef.current);
+        syncServerPersistence({
+          messages: messagesRef.current,
+          computerStates: computerStatesRef.current,
+        });
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // State persistence helpers
   const persistAgents = (updated: Agent[]) => {
@@ -868,35 +950,48 @@ export default function NookApp() {
         settings={llmSettings}
         onSaveSettings={persistSettings}
         onLogout={handleLogout}
-        onExportWorkspace={() => {
-          const backup = {
-            version: '1.0.0',
-            exportedAt: new Date().toISOString(),
-            agents,
-            spaces,
-            computerStates,
-            mcpTools,
-            llmSettings,
-          };
-          const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `nook-workspace-backup-${new Date().toISOString().slice(0, 10)}.json`;
-          a.click();
-          URL.revokeObjectURL(url);
-        }}
-        onResetWorkspace={() => {
+        onExportWorkspace={async () => {
           try {
-            localStorage.removeItem('nook_agents');
-            localStorage.removeItem('nook_spaces');
-            localStorage.removeItem('nook_settings');
-          } catch {}
-          setAgents(INITIAL_AGENTS);
-          setSpaces(INITIAL_SPACES);
-          setComputerStates(INITIAL_COMPUTER_STATES);
-          setLlmSettings(DEFAULT_LLM_SETTINGS);
-          setIsSettingsModalOpen(false);
+            const res = await fetch('/api/workspace/export');
+            if (!res.ok) throw new Error(`Export failed with HTTP ${res.status}`);
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `nook-workspace-backup-${new Date().toISOString().slice(0, 10)}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+          } catch (err) {
+            console.error('Workspace export failed', err);
+          }
+        }}
+        onResetWorkspace={async () => {
+          const confirmed = window.confirm(
+            'Are you sure you want to reset your workspace? This will permanently remove all missions, task histories, documents, chat messages, and sandbox files on the server and restore factory defaults.'
+          );
+          if (!confirmed) return;
+          try {
+            await fetch('/api/workspace/state', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'reset' }),
+            });
+            try {
+              localStorage.removeItem('nook_agents');
+              localStorage.removeItem('nook_spaces');
+              localStorage.removeItem('nook_settings');
+              localStorage.removeItem('nook_messages');
+              localStorage.removeItem('nook_computer_states');
+            } catch {}
+            setAgents(INITIAL_AGENTS);
+            setSpaces(INITIAL_SPACES);
+            setComputerStates(INITIAL_COMPUTER_STATES);
+            setMessages(INITIAL_MESSAGES);
+            setLlmSettings(DEFAULT_LLM_SETTINGS);
+            setIsSettingsModalOpen(false);
+          } catch (err) {
+            console.error('Failed to reset workspace on server', err);
+          }
         }}
       />
 

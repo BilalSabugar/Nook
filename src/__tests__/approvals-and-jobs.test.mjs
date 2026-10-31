@@ -168,7 +168,13 @@ test('Durable Server Workspace State Atomic Persistence', async () => {
     POST: statePost,
     persistWorkspaceStatePayload,
   } = await import('../app/api/workspace/state/route.ts');
-  const { getDocumentById } = await import('../lib/db.ts');
+  const {
+    getDocumentById,
+    createApproval,
+    getApprovalById,
+    createMission,
+    getMissionById,
+  } = await import('../lib/db.ts');
 
   await fs.mkdir(STORAGE_DIR, { recursive: true });
   let originalStateRaw = null;
@@ -581,6 +587,180 @@ test('Durable Server Workspace State Atomic Persistence', async () => {
     const getData = await getRes.json();
     assert.equal(getData.hasDurableState, true);
     assert.equal(getData.data.messages['agent-scout'][0].content, 'Committed message');
+
+    // 7. Unrelated database writes survive a deliberately failing state save
+    // (Verifies shared SQLite connection isolation when state save fails and rolls back filesystem)
+    const unrelatedApprovalTitle = 'Unrelated Approval That Must Survive Failed Save';
+    const unrelatedMissionTitle = 'Unrelated Mission That Must Survive Failed Save';
+    let unrelatedApprovalId = null;
+    let unrelatedMissionId = null;
+
+    await assert.rejects(
+      async () => {
+        await persistWorkspaceStatePayload(
+          {
+            agents: [{ id: 'agent-scout', name: 'Failing Unrelated Save Agent' }],
+            spaces: [
+              {
+                id: 'space-failing-unrelated',
+                name: 'Failing Space',
+                pages: [
+                  {
+                    id: 'page-failing-unrelated',
+                    title: 'Failing Page Must Not Persist',
+                    content: 'Should be rolled back',
+                  },
+                ],
+              },
+            ],
+            messages: { 'agent-scout': [{ id: 'm-unrelated-fail', content: 'FAIL' }] },
+          },
+          {
+            afterStateFileHook: async () => {
+              // During this hook, an independent request creates an approval and a mission on the shared connection
+              const appr = createApproval({
+                agentId: 'agent-scout',
+                agentName: 'Scout',
+                type: 'run_command',
+                title: unrelatedApprovalTitle,
+                payload: { command: 'echo survive' },
+              });
+              unrelatedApprovalId = appr.id;
+
+              const msn = createMission({
+                title: unrelatedMissionTitle,
+                objective: 'Verify independent mission survives failing state save',
+                spaceId: 'space-test-atomic',
+              });
+              unrelatedMissionId = msn.id;
+
+              throw new Error('Deliberate state save failure to test concurrent write survival');
+            },
+          }
+        );
+      },
+      /Deliberate state save failure to test concurrent write survival/
+    );
+
+    // Verify failing save document was NOT committed
+    assert.equal(getDocumentById('page-failing-unrelated'), null, 'Failing save page must not exist in SQLite');
+
+    // Verify unrelated approval and mission SURVIVED and were not rolled back
+    assert.ok(unrelatedApprovalId, 'unrelatedApprovalId must have been assigned');
+    const survivingApproval = getApprovalById(unrelatedApprovalId);
+    assert.ok(survivingApproval, 'Unrelated approval created during failing save must survive');
+    assert.equal(survivingApproval.title, unrelatedApprovalTitle);
+
+    assert.ok(unrelatedMissionId, 'unrelatedMissionId must have been assigned');
+    const survivingMission = getMissionById(unrelatedMissionId);
+    assert.ok(survivingMission, 'Unrelated mission created during failing save must survive');
+    assert.equal(survivingMission.title, unrelatedMissionTitle);
+
+    // 8. Deleted documents stay deleted across reloads
+    // (Verifies that removing a page from a space prunes it from SQLite documents table)
+    const initialPagesPayload = {
+      agents: [{ id: 'agent-scout', name: 'Scout' }],
+      spaces: [
+        {
+          id: 'space-deletion-test',
+          name: 'Deletion Space',
+          pages: [
+            { id: 'page-del-keep', title: 'Page To Keep', content: 'Kept' },
+            { id: 'page-del-remove', title: 'Page To Delete', content: 'Deleted' },
+          ],
+        },
+      ],
+    };
+    await persistWorkspaceStatePayload(initialPagesPayload);
+    assert.ok(getDocumentById('page-del-keep'), 'Page to keep must exist');
+    assert.ok(getDocumentById('page-del-remove'), 'Page to remove must exist initially');
+
+    // Client syncs space with page-del-remove omitted (simulating handleDeletePage)
+    const afterDeletePayload = {
+      agents: [{ id: 'agent-scout', name: 'Scout' }],
+      spaces: [
+        {
+          id: 'space-deletion-test',
+          name: 'Deletion Space',
+          pages: [{ id: 'page-del-keep', title: 'Page To Keep', content: 'Kept' }],
+        },
+      ],
+    };
+    await persistWorkspaceStatePayload(afterDeletePayload);
+
+    // Verify page-del-remove is deleted from SQLite
+    assert.equal(getDocumentById('page-del-remove'), null, 'Deleted document must be removed from SQLite');
+    assert.ok(getDocumentById('page-del-keep'), 'Kept document must still exist');
+
+    // Verify GET /api/workspace/state does NOT resurrect the deleted page
+    const getAfterDeleteReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+      headers: { 'x-nook-api-key': apiKey },
+    });
+    const getAfterDeleteRes = await stateGet(getAfterDeleteReq);
+    const getAfterDeleteData = await getAfterDeleteRes.json();
+    const deletionSpace = getAfterDeleteData.data.spaces.find((s) => s.id === 'space-deletion-test');
+    assert.ok(deletionSpace, 'Deletion space must be returned');
+    assert.equal(deletionSpace.pages.length, 1);
+    assert.equal(deletionSpace.pages[0].id, 'page-del-keep');
+
+    // 9. Chat history & virtual computer files durability and reload
+    const chatAndComputerPayload = {
+      agents: [{ id: 'agent-scout', name: 'Scout' }],
+      spaces: [{ id: 'space-deletion-test', name: 'Deletion Space', pages: [] }],
+      computerStates: {
+        'agent-scout': {
+          files: [
+            { name: 'solution.py', content: 'def solve(): return 42\n' },
+            { name: 'data.json', content: '{"status":"ready"}' },
+          ],
+        },
+      },
+      messages: {
+        'agent-scout': [
+          { id: 'msg-u1', sender: 'user', content: 'Write a python script' },
+          { id: 'msg-a1', sender: 'agent', content: 'I have written solution.py' },
+        ],
+      },
+    };
+    await persistWorkspaceStatePayload(chatAndComputerPayload);
+
+    // Verify files on durable server disk
+    const solutionDiskPath = path.join(STORAGE_DIR, 'sandboxes', 'agent-scout', 'workspace', 'solution.py');
+    assert.equal(await fs.readFile(solutionDiskPath, 'utf8'), 'def solve(): return 42\n');
+
+    // Verify GET returns messages and virtual files on reload without making unrelated changes
+    const getChatReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+      headers: { 'x-nook-api-key': apiKey },
+    });
+    const getChatRes = await stateGet(getChatReq);
+    const getChatData = await getChatRes.json();
+    assert.equal(getChatData.data.messages['agent-scout'].length, 2);
+    assert.equal(getChatData.data.messages['agent-scout'][1].content, 'I have written solution.py');
+    assert.equal(getChatData.data.computerStates['agent-scout'].files.length, 2);
+    assert.equal(getChatData.data.computerStates['agent-scout'].files[0].name, 'solution.py');
+
+    // 10. Deliberate server-side workspace reset operation
+    const resetReq = new NextRequest('http://localhost:3000/api/workspace/state', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': apiKey,
+      },
+      body: JSON.stringify({ action: 'reset' }),
+    });
+    const resetRes = await statePost(resetReq);
+    assert.equal(resetRes.status, 200);
+    const resetData = await resetRes.json();
+    assert.equal(resetData.success, true);
+    assert.equal(resetData.message, 'Workspace successfully reset to factory defaults');
+
+    // Verify custom document and custom sandbox file are wiped
+    assert.equal(getDocumentById('page-del-keep'), null, 'Custom document must be cleared after reset');
+    assert.equal(
+      await fs.stat(solutionDiskPath).catch(() => null),
+      null,
+      'Sandbox files must be cleaned up on disk after reset'
+    );
   } finally {
     if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
     else delete process.env.NOOK_API_KEY;

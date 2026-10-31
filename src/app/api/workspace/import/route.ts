@@ -188,9 +188,13 @@ export async function restoreWorkspaceBundleAtomically(
       db.exec(`SAVEPOINT ${savepointName};`);
       savepointActive = true;
 
+      const serverRequiresSignature = process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
+      const effectiveRequireSignature =
+        serverRequiresSignature || options?.requireSignature === true || Boolean(bundle?.requireSignature);
+
       const importStats = importWorkspaceSnapshot(bundle, db, {
         conflictStrategy,
-        requireSignature: options?.requireSignature ?? Boolean(bundle?.requireSignature),
+        requireSignature: effectiveRequireSignature,
         signingSecret: options?.signingSecret,
       });
 
@@ -317,8 +321,11 @@ export async function POST(req: NextRequest) {
     // Dry-run preflight validation support (?dryRun=true or bundle.dryRun === true)
     const isDryRun = req.nextUrl.searchParams.get('dryRun') === 'true' || bundle.dryRun === true;
     if (isDryRun) {
+      const serverRequiresSignature = process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE === 'true';
+      const effectiveRequireSignature =
+        serverRequiresSignature || Boolean(bundle.requireSignature);
       const validation = validateWorkspaceSnapshot(bundle, {
-        requireSignature: Boolean(bundle.requireSignature),
+        requireSignature: effectiveRequireSignature,
       });
       return NextResponse.json(
         {

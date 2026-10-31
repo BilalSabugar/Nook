@@ -2838,6 +2838,48 @@ test('Snapshot Import Security: Path traversal containment, atomic rollback, pro
     countMismatchBundle.manifest.totalSpaces = 9999;
     const countCheck = validateWorkspaceSnapshot(countMismatchBundle);
     assert.equal(countCheck.valid, false, 'Manifest count mismatch must fail validation');
+
+    // 3b. Authoritative server signature enforcement: NOOK_REQUIRE_SNAPSHOT_SIGNATURE=true
+    // An unsigned snapshot MUST be rejected even if the bundle omits requireSignature or supplies false
+    const origReqSigEnv = process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE;
+    try {
+      process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE = 'true';
+      const unsignedBundle = {
+        schemaVersion: 2,
+        workspace: { sentinel: 'unsigned-bundle' },
+        spaces: [{ id: 'space-unsigned', name: 'Unsigned Space', description: 'Testing server signature enforcement' }],
+        missions: [],
+      };
+
+      // Direct validation: client option requireSignature: false must not weaken server policy
+      const directUnsignedCheck = validateWorkspaceSnapshot(unsignedBundle, {
+        requireSignature: false,
+      });
+      assert.equal(
+        directUnsignedCheck.valid,
+        false,
+        'Server policy NOOK_REQUIRE_SNAPSHOT_SIGNATURE=true must NOT be overridden by requireSignature: false'
+      );
+      assert.equal(directUnsignedCheck.signatureStatus, 'invalid');
+      assert.ok(
+        directUnsignedCheck.errors.some((e) => e.includes('Snapshot provenance signature is required by policy')),
+        'Error must state provenance signature is required by policy'
+      );
+
+      // Route-level import attempt with requireSignature: false or omitted in bundle
+      const routeRes = await restoreWorkspaceBundleAtomically(unsignedBundle, {
+        requireSignature: false,
+      });
+      assert.equal(routeRes.ok, false);
+      assert.equal(routeRes.status, 400);
+      assert.ok(
+        routeRes.body.error.includes('Snapshot provenance signature is required by policy'),
+        'Import route must strictly enforce server signature policy'
+      );
+    } finally {
+      if (origReqSigEnv !== undefined) process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE = origReqSigEnv;
+      else delete process.env.NOOK_REQUIRE_SNAPSHOT_SIGNATURE;
+    }
   } finally {
     if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
     else delete process.env.NOOK_API_KEY;

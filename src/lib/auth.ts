@@ -547,32 +547,42 @@ export function isServerAuthSetupComplete(): boolean {
  * Uses constant-time comparison to prevent timing side-channel attacks.
  */
 export function verifyOwnerCredentials(candidate: string): boolean {
-  const configured = (
-    process.env.NOOK_API_KEY ||
-    process.env.NOOK_PASSWORD ||
-    process.env.NOOK_SECRET_TOKEN ||
-    ''
-  ).trim();
-
-  // Fail closed if unconfigured, insecurely short (< 8 chars), or a known public example secret
-  if (!configured || configured.length < 8 || isKnownWeakOrExampleSecret(configured)) {
-    return false;
-  }
-
   if (!candidate || typeof candidate !== 'string') {
     return false;
   }
 
-  const candBuf = Buffer.from(candidate.trim(), 'utf8');
-  const confBuf = Buffer.from(configured, 'utf8');
-
-  if (candBuf.length !== confBuf.length) {
-    // Constant-time dummy comparison to prevent timing leak on string length
-    crypto.timingSafeEqual(confBuf, confBuf);
+  const trimmedCandidate = candidate.trim();
+  if (!trimmedCandidate) {
     return false;
   }
 
-  return crypto.timingSafeEqual(candBuf, confBuf);
+  const validSecrets = [
+    process.env.NOOK_API_KEY,
+    process.env.NOOK_PASSWORD,
+    process.env.NOOK_SECRET_TOKEN,
+  ]
+    .map((s) => (s || '').trim())
+    .filter((s) => s.length >= 8 && !isKnownWeakOrExampleSecret(s));
+
+  // Fail closed if unconfigured, insecurely short (< 8 chars), or a known public example secret
+  if (validSecrets.length === 0) {
+    return false;
+  }
+
+  const candBuf = Buffer.from(trimmedCandidate, 'utf8');
+  let matched = false;
+
+  for (const secret of validSecrets) {
+    const confBuf = Buffer.from(secret, 'utf8');
+    if (candBuf.length !== confBuf.length) {
+      // Constant-time dummy comparison to prevent timing leak on string length
+      crypto.timingSafeEqual(confBuf, confBuf);
+    } else if (crypto.timingSafeEqual(candBuf, confBuf)) {
+      matched = true;
+    }
+  }
+
+  return matched;
 }
 
 export interface ProductionSecurityCheck {

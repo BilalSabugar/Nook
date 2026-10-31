@@ -28,7 +28,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { command, agentId, virtualFiles, approvalId, approvalToken } = body;
+    const { command, agentId, virtualFiles, approvalId, approvalToken, executionGrant } = body;
+    const presentedToken = executionGrant || approvalToken;
 
     if (!command || typeof command !== 'string') {
       return NextResponse.json({ error: 'Command string is required' }, { status: 400 });
@@ -37,9 +38,9 @@ export async function POST(req: NextRequest) {
     const cleanCmd = command.trim();
     const safeAgentId = (agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
 
-    // 2. Mandatory Server-Side Approval and Single-Use Token Verification
+    // 2. Mandatory Server-Side Approval and Single-Use Token / Execution Grant Verification
     // Every mutating or privileged shell execution strictly requires an active, matching, unexpired server approval.
-    if (!approvalId || !approvalToken) {
+    if (!approvalId || !presentedToken) {
       logAuditEvent('SHELL_EXEC_DENIED', `Attempted execution without approval token: "${cleanCmd}"`, 'denied', safeAgentId);
       return NextResponse.json({
         error: 'Execution denied: Mandatory server-side approval and single-use authorization token required for shell execution.',
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
       }, { status: 403 });
     }
 
-    // Atomic consumption from transactional database bound to the execution taskId
+    // Atomic consumption from transactional database bound to the execution taskId and caller session
     const existingApproval = getApprovalById(approvalId);
     const effectiveTaskId =
       (typeof body.taskId === 'string' && body.taskId.trim()) ||
@@ -55,10 +56,11 @@ export async function POST(req: NextRequest) {
       approvalId;
     const verification = verifyAndConsumeApproval(
       approvalId,
-      approvalToken,
+      presentedToken,
       cleanCmd,
       safeAgentId,
-      effectiveTaskId
+      effectiveTaskId,
+      auth.sessionId
     );
     if (!verification.authorized) {
       logAuditEvent('SHELL_EXEC_DENIED', `Approval rejected (${verification.error}) for: "${cleanCmd}"`, 'denied', safeAgentId);

@@ -1688,7 +1688,7 @@ test('Runner Privilege Boundary: Rejects direct host Docker socket exposure and 
 // =========================================================================
 // 41. REAL DOCKER EXECUTION: VERIFIED WORKSPACE MAPPING WITHOUT MOCK FALLBACK
 // =========================================================================
-test('Real Docker: Verified workspace-volume mapping executes genuine container with task files', async () => {
+test('Real Docker: Verified workspace-volume mapping executes genuine container with task files', async (t) => {
   // Check if a real, live Docker daemon is available
   const hasRealDocker = await new Promise((resolve) => {
     const p = spawn('docker', ['version'], { stdio: 'ignore' });
@@ -1698,7 +1698,7 @@ test('Real Docker: Verified workspace-volume mapping executes genuine container 
 
   if (!hasRealDocker) {
     // In local environments without Docker daemon (e.g. Windows desktop without daemon), skip gracefully
-    console.log('  ℹ Skipping real Docker test: Docker daemon not available on local host.');
+    t.diagnostic('Skipping real Docker test: Docker daemon not available on local host.');
     return;
   }
 
@@ -3320,6 +3320,514 @@ test('UI Sandbox Execution Path: POST /api/sandbox/exec forwards virtualFiles in
     if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
     else delete process.env.NOOK_API_KEY;
     await new Promise((resolve) => mockRunner.close(resolve));
+  }
+});
+
+// =========================================================================
+// 65. BROWSER APPROVAL LIFECYCLE: DIRECT TERMINAL & REVIEW CARD E2E
+// =========================================================================
+test('Browser Approval Lifecycle: Direct Terminal (create_and_approve) and Review Card (create -> decide) E2E with /api/sandbox/exec', async () => {
+  const { POST: approvalsPost } = await import('../app/api/approvals/route.ts');
+  const { POST: sandboxExecPost } = await import('../app/api/sandbox/exec/route.ts');
+
+  const origApiKey = process.env.NOOK_API_KEY;
+  const origApproverPwd = process.env.NOOK_APPROVER_PASSWORD;
+  const origServiceUrl = process.env.SANDBOX_SERVICE_URL;
+
+  const mockRunner = http.createServer((req, res) => {
+    if (req.url === '/exec' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+      });
+      req.on('end', () => {
+        const parsed = JSON.parse(body);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            stdout: `EXECUTED_FOR_${parsed.agentId}:${parsed.command}`,
+            stderr: '',
+            exitCode: 0,
+            isolatedRuntime: 'docker_container',
+          })
+        );
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  await new Promise((resolve) => mockRunner.listen(0, '127.0.0.1', resolve));
+  const runnerPort = mockRunner.address().port;
+
+  try {
+    process.env.SANDBOX_SERVICE_URL = `http://127.0.0.1:${runnerPort}`;
+    process.env.NOOK_API_KEY = `machine-key-${crypto.randomBytes(16).toString('hex')}`;
+    process.env.NOOK_APPROVER_PASSWORD = `approver-pwd-${crypto.randomBytes(16).toString('hex')}`;
+
+    const humanSessionToken = createSessionToken(APPROVER_SESSION_ID);
+    const otherSessionToken = createSessionToken('nook-owner');
+    const humanHeaders = {
+      'content-type': 'application/json',
+      cookie: `nook_session=${humanSessionToken}`,
+      origin: 'http://localhost:3000',
+    };
+    const machineHeaders = {
+      'content-type': 'application/json',
+      'x-nook-api-key': process.env.NOOK_API_KEY,
+    };
+
+    // ---------------------------------------------------------------------
+    // A. DIRECT TERMINAL FLOW (action: "create_and_approve" -> /api/sandbox/exec)
+    // ---------------------------------------------------------------------
+    const terminalCmd = 'node run_terminal_script.mjs';
+    const createAndApproveReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'create_and_approve',
+        agentId: 'agent-cipher',
+        agentName: 'Terminal Session',
+        type: 'run_command',
+        title: `Interactive Execute: ${terminalCmd}`,
+        payload: { command: terminalCmd },
+      }),
+    });
+    const createAndApproveRes = await approvalsPost(createAndApproveReq);
+    assert.equal(createAndApproveRes.status, 201, 'Direct terminal create_and_approve with agentId must return 201');
+    const createAndApproveData = await createAndApproveRes.json();
+    assert.equal(createAndApproveData.success, true);
+    assert.equal(createAndApproveData.approval.agentId, 'agent-cipher');
+    assert.equal(createAndApproveData.approval.status, 'approved');
+    assert.equal(
+      'singleUseToken' in createAndApproveData.approval,
+      false,
+      'singleUseToken must remain redacted in create_and_approve approval object'
+    );
+    assert.ok(
+      typeof createAndApproveData.executionGrant === 'string' &&
+        createAndApproveData.executionGrant.startsWith('grant.'),
+      'create_and_approve must return a session-bound HMAC executionGrant'
+    );
+
+    // Denial 1: Machine API key cannot call create_and_approve
+    const machineBypassReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: machineHeaders,
+      body: JSON.stringify({
+        action: 'create_and_approve',
+        agentId: 'agent-cipher',
+        type: 'run_command',
+        payload: { command: terminalCmd },
+      }),
+    });
+    const machineBypassRes = await approvalsPost(machineBypassReq);
+    assert.equal(machineBypassRes.status, 403, 'Machine API key must be denied on create_and_approve');
+
+    // Denial 2: Autonomous missionId cannot use create_and_approve
+    const missionBypassReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'create_and_approve',
+        agentId: 'agent-cipher',
+        missionId: 'msn-auto-bypass',
+        type: 'run_command',
+        payload: { command: terminalCmd },
+      }),
+    });
+    const missionBypassRes = await approvalsPost(missionBypassReq);
+    assert.equal(missionBypassRes.status, 403, 'Autonomous missionId must be denied on create_and_approve');
+
+    // Denial 3: Different session cannot use the session-bound executionGrant
+    const wrongSessionExecReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: `nook_session=${otherSessionToken}`,
+        origin: 'http://localhost:3000',
+      },
+      body: JSON.stringify({
+        command: terminalCmd,
+        agentId: 'agent-cipher',
+        approvalId: createAndApproveData.approval.id,
+        executionGrant: createAndApproveData.executionGrant,
+      }),
+    });
+    const wrongSessionExecRes = await sandboxExecPost(wrongSessionExecReq);
+    assert.equal(wrongSessionExecRes.status, 403, 'Different session must be rejected when presenting session-bound executionGrant');
+
+    // Authorized terminal execution with the matching human session succeeds
+    const terminalExecReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: terminalCmd,
+        agentId: 'agent-cipher',
+        approvalId: createAndApproveData.approval.id,
+        executionGrant: createAndApproveData.executionGrant,
+        virtualFiles: [{ name: 'run_terminal_script.mjs', content: 'console.log("ok");' }],
+      }),
+    });
+    const terminalExecRes = await sandboxExecPost(terminalExecReq);
+    assert.equal(terminalExecRes.status, 200, 'Direct terminal execution must succeed with 200');
+    const terminalExecBody = await terminalExecRes.json();
+    assert.equal(terminalExecBody.exitCode, 0);
+    assert.equal(terminalExecBody.output, `EXECUTED_FOR_agent-cipher:${terminalCmd}`);
+
+    // Replay of the consumed terminal executionGrant must be rejected with 403
+    const terminalReplayReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: terminalCmd,
+        agentId: 'agent-cipher',
+        approvalId: createAndApproveData.approval.id,
+        executionGrant: createAndApproveData.executionGrant,
+      }),
+    });
+    const terminalReplayRes = await sandboxExecPost(terminalReplayReq);
+    assert.equal(terminalReplayRes.status, 403, 'Replaying consumed terminal executionGrant must be rejected with 403');
+
+    // ---------------------------------------------------------------------
+    // B. REVIEW CARD FLOW (action: "create" -> action: "decide" -> /api/sandbox/exec)
+    // ---------------------------------------------------------------------
+    const reviewCmd = 'node run_review_card_script.mjs';
+    const reviewCreateReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'create',
+        agentId: 'agent-cipher',
+        agentName: 'Cipher',
+        type: 'run_command',
+        title: `Execute Sandbox Command: ${reviewCmd}`,
+        payload: { command: reviewCmd },
+      }),
+    });
+    const reviewCreateRes = await approvalsPost(reviewCreateReq);
+    assert.equal(reviewCreateRes.status, 201);
+    const reviewCreateData = await reviewCreateRes.json();
+    const reviewId = reviewCreateData.approval.id;
+    assert.equal(reviewCreateData.approval.status, 'pending');
+    assert.equal('singleUseToken' in reviewCreateData.approval, false, 'singleUseToken must be redacted on create');
+    assert.equal('executionGrant' in reviewCreateData, false, 'Pending approval must not include executionGrant');
+
+    // Attempting /api/sandbox/exec while approval is still pending -> 403
+    const pendingExecReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: reviewCmd,
+        agentId: 'agent-cipher',
+        approvalId: reviewId,
+        executionGrant: 'grant.pending.fake',
+      }),
+    });
+    const pendingExecRes = await sandboxExecPost(pendingExecReq);
+    assert.equal(pendingExecRes.status, 403, 'Pending approval must be rejected by /api/sandbox/exec');
+
+    // Human approves the Review Card via action: "decide"
+    const reviewDecideReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'decide',
+        approvalId: reviewId,
+        decision: 'approve',
+      }),
+    });
+    const reviewDecideRes = await approvalsPost(reviewDecideReq);
+    assert.equal(reviewDecideRes.status, 200);
+    const reviewDecideData = await reviewDecideRes.json();
+    assert.equal(reviewDecideData.approval.status, 'approved');
+    assert.equal('singleUseToken' in reviewDecideData.approval, false, 'singleUseToken must remain redacted on decide');
+    assert.ok(
+      typeof reviewDecideData.executionGrant === 'string' &&
+        reviewDecideData.executionGrant.startsWith('grant.'),
+      'decide(approve) must return session-bound executionGrant'
+    );
+
+    // Command mismatch or agent mismatch on /api/sandbox/exec -> 403 without consuming approval
+    const tamperedCmdReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: 'node tampered_other_script.mjs',
+        agentId: 'agent-cipher',
+        approvalId: reviewId,
+        executionGrant: reviewDecideData.executionGrant,
+      }),
+    });
+    const tamperedCmdRes = await sandboxExecPost(tamperedCmdReq);
+    assert.equal(tamperedCmdRes.status, 403, 'Tampered command must be rejected with 403');
+
+    const wrongAgentReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: reviewCmd,
+        agentId: 'agent-scout',
+        approvalId: reviewId,
+        executionGrant: reviewDecideData.executionGrant,
+      }),
+    });
+    const wrongAgentRes = await sandboxExecPost(wrongAgentReq);
+    assert.equal(wrongAgentRes.status, 403, 'Wrong agentId must be rejected with 403');
+
+    // Legitimate Review Card execution succeeds
+    const reviewExecReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: reviewCmd,
+        agentId: 'agent-cipher',
+        approvalId: reviewId,
+        executionGrant: reviewDecideData.executionGrant,
+      }),
+    });
+    const reviewExecRes = await sandboxExecPost(reviewExecReq);
+    assert.equal(reviewExecRes.status, 200, 'Approved Review Card execution must succeed with 200');
+    const reviewExecBody = await reviewExecRes.json();
+    assert.equal(reviewExecBody.output, `EXECUTED_FOR_agent-cipher:${reviewCmd}`);
+
+    // Replaying the Review Card execution -> 403
+    const reviewReplayReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: reviewCmd,
+        agentId: 'agent-cipher',
+        approvalId: reviewId,
+        executionGrant: reviewDecideData.executionGrant,
+      }),
+    });
+    const reviewReplayRes = await sandboxExecPost(reviewReplayReq);
+    assert.equal(reviewReplayRes.status, 403, 'Replaying consumed Review Card executionGrant must fail with 403');
+
+    // Declined Review Card -> no executionGrant returned and execution rejected with 403
+    const declineCreateReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'create',
+        agentId: 'agent-cipher',
+        agentName: 'Cipher',
+        type: 'run_command',
+        title: 'Command to Decline',
+        payload: { command: 'node declined.mjs' },
+      }),
+    });
+    const declineCreateData = await (await approvalsPost(declineCreateReq)).json();
+    const declineDecideReq = new NextRequest('http://localhost:3000/api/approvals', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        action: 'decide',
+        approvalId: declineCreateData.approval.id,
+        decision: 'decline',
+        reason: 'Rejected by reviewer',
+      }),
+    });
+    const declineDecideRes = await approvalsPost(declineDecideReq);
+    assert.equal(declineDecideRes.status, 200);
+    const declineDecideData = await declineDecideRes.json();
+    assert.equal(declineDecideData.approval.status, 'declined');
+    assert.equal('executionGrant' in declineDecideData, false, 'Declined approval must not issue executionGrant');
+
+    const declinedExecReq = new NextRequest('http://localhost:3000/api/sandbox/exec', {
+      method: 'POST',
+      headers: humanHeaders,
+      body: JSON.stringify({
+        command: 'node declined.mjs',
+        agentId: 'agent-cipher',
+        approvalId: declineCreateData.approval.id,
+        executionGrant: reviewDecideData.executionGrant,
+      }),
+    });
+    const declinedExecRes = await sandboxExecPost(declinedExecReq);
+    assert.equal(declinedExecRes.status, 403, 'Declined approval must be rejected by /api/sandbox/exec');
+  } finally {
+    if (origServiceUrl !== undefined) process.env.SANDBOX_SERVICE_URL = origServiceUrl;
+    else delete process.env.SANDBOX_SERVICE_URL;
+    if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
+    else delete process.env.NOOK_API_KEY;
+    if (origApproverPwd !== undefined) process.env.NOOK_APPROVER_PASSWORD = origApproverPwd;
+    else delete process.env.NOOK_APPROVER_PASSWORD;
+    await new Promise((resolve) => mockRunner.close(resolve));
+  }
+});
+
+// =========================================================================
+// 66. POPULATED FULL-STACK SOVEREIGN BACKUP & RESTORE E2E VIA HTTP ROUTES
+// =========================================================================
+test('Populated Full-Stack Backup & Restore: HTTP export/import round-trip preserves Missions, task histories, evidence records, revisions, and sandboxes', async () => {
+  const { GET: exportRouteGet } = await import('../app/api/workspace/export/route.ts');
+  const { POST: importRoutePost } = await import('../app/api/workspace/import/route.ts');
+  const { POST: missionsPost, GET: missionsGet } = await import('../app/api/missions/route.ts');
+  const { persistWorkspaceStatePayload } = await import('../app/api/workspace/state/route.ts');
+
+  const origApiKey = process.env.NOOK_API_KEY;
+  const apiKey = `populated-backup-key-${crypto.randomBytes(16).toString('hex')}`;
+  process.env.NOOK_API_KEY = apiKey;
+
+  try {
+    // 1. Persist spaces, multi-revision document, and agent sandbox files
+    const spaceId = `space-fullstack-${Date.now()}`;
+    const docId = `doc-fullstack-${Date.now()}`;
+    await persistWorkspaceStatePayload({
+      agents: [{ id: 'agent-cipher', name: 'Cipher' }],
+      spaces: [
+        {
+          id: spaceId,
+          name: 'Full-Stack Backup Space',
+          pages: [
+            {
+              id: docId,
+              title: 'Architecture Spec v1',
+              content: '# Spec v1\nInitial content',
+            },
+          ],
+        },
+      ],
+      computerStates: {
+        'agent-cipher': {
+          files: [{ name: 'fullstack_artifact.txt', content: 'FULLSTACK_SANDBOX_ARTIFACT_V1' }],
+        },
+      },
+    });
+    // Save revision v2 of the document
+    await persistWorkspaceStatePayload({
+      agents: [{ id: 'agent-cipher', name: 'Cipher' }],
+      spaces: [
+        {
+          id: spaceId,
+          name: 'Full-Stack Backup Space',
+          pages: [
+            {
+              id: docId,
+              title: 'Architecture Spec v2',
+              content: '# Spec v2\nUpdated second revision content',
+            },
+          ],
+        },
+      ],
+      computerStates: {
+        'agent-cipher': {
+          files: [{ name: 'fullstack_artifact.txt', content: 'FULLSTACK_SANDBOX_ARTIFACT_V2' }],
+        },
+      },
+    });
+
+    // 2. Plan and tick a real Mission via POST /api/missions so tasks & evidence records are populated
+    const planReq = new NextRequest('http://localhost:3000/api/missions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        action: 'plan',
+        title: 'Full-Stack Populated Backup Mission',
+        objective: 'Implement and verify an in-memory priority queue with TTL expiration',
+        priority: 'high',
+        requiresCodeExecution: true,
+      }),
+    });
+    const planRes = await missionsPost(planReq);
+    assert.equal(planRes.status, 201);
+    const planData = await planRes.json();
+    const missionId = planData.mission.id;
+    assert.ok(missionId);
+
+    // Tick mission twice so Scout and Quill tasks complete with observations and evidence records
+    for (let i = 0; i < 2; i++) {
+      const tickReq = new NextRequest('http://localhost:3000/api/missions', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-nook-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          action: 'tick',
+          missionId,
+        }),
+      });
+      const tickRes = await missionsPost(tickReq);
+      assert.equal(tickRes.status, 200);
+    }
+
+    // 3. Export populated bundle over HTTP GET /api/workspace/export
+    const exportReq = new NextRequest('http://localhost:3000/api/workspace/export', {
+      headers: { 'x-nook-api-key': apiKey },
+    });
+    const exportRes = await exportRouteGet(exportReq);
+    assert.equal(exportRes.status, 200);
+    const bundle = await exportRes.json();
+
+    const exportedMission = bundle.missions.find((m) => m.id === missionId);
+    assert.ok(exportedMission, 'Exported bundle must contain the planned mission');
+    assert.ok(Array.isArray(exportedMission.tasks) && exportedMission.tasks.length >= 3, 'Exported mission must contain its task histories');
+    assert.ok(
+      exportedMission.tasks.some((t) => Array.isArray(t.observations) && t.observations.length > 0),
+      'Exported task histories must include recorded observations'
+    );
+    assert.ok(
+      bundle.evidenceTimeline.some((ev) => ev.missionId === missionId),
+      'Exported bundle must include evidence records for the mission'
+    );
+    assert.ok(
+      bundle.documentRevisions.filter((r) => r.documentId === docId).length >= 2,
+      'Exported bundle must include document revision history'
+    );
+
+    // 4. Mutate/delete mission and sandbox file from live storage, then restore from bundle via POST /api/workspace/import
+    const db = getDatabase();
+    db.prepare('DELETE FROM evidence_records WHERE mission_id = ?').run(missionId);
+    db.prepare('DELETE FROM agent_tasks WHERE mission_id = ?').run(missionId);
+    db.prepare('DELETE FROM missions WHERE id = ?').run(missionId);
+    assert.equal(getMissionById(missionId), null, 'Mission must be deleted prior to restore');
+
+    const importReq = new NextRequest('http://localhost:3000/api/workspace/import', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-nook-api-key': apiKey,
+      },
+      body: JSON.stringify(bundle),
+    });
+    const importRes = await importRoutePost(importReq);
+    assert.equal(importRes.status, 200, 'POST /api/workspace/import must succeed with 200');
+    const importData = await importRes.json();
+    assert.equal(importData.status, 'success');
+    assert.ok(importData.importedMissionsCount >= 1);
+    assert.ok(importData.importedTasksCount >= 3);
+    assert.ok(importData.importedEvidenceCount >= 1);
+    assert.ok(importData.importedRevisionsCount >= 2);
+    assert.equal(importData.integrity.healthy, true);
+
+    // 5. Verify restored mission, task histories, and evidence via GET /api/missions?id=<missionId>
+    const verifyMissionReq = new NextRequest(`http://localhost:3000/api/missions?id=${encodeURIComponent(missionId)}`, {
+      headers: { 'x-nook-api-key': apiKey },
+    });
+    const verifyMissionRes = await missionsGet(verifyMissionReq);
+    assert.equal(verifyMissionRes.status, 200);
+    const verifyMissionData = await verifyMissionRes.json();
+    assert.equal(verifyMissionData.mission.id, missionId);
+    assert.equal(verifyMissionData.mission.title, 'Full-Stack Populated Backup Mission');
+    assert.ok(verifyMissionData.mission.tasks.length >= 3, 'Restored mission must have all task histories');
+    assert.ok(
+      verifyMissionData.mission.tasks.some((t) => Array.isArray(t.observations) && t.observations.length > 0),
+      'Restored task histories must preserve task observations'
+    );
+    assert.ok(
+      verifyMissionData.mission.evidenceTimeline.length >= 1,
+      'Restored mission must preserve evidence timeline records'
+    );
+  } finally {
+    if (origApiKey !== undefined) process.env.NOOK_API_KEY = origApiKey;
+    else delete process.env.NOOK_API_KEY;
   }
 });
 

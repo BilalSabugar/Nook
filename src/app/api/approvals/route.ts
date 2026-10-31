@@ -1,13 +1,14 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { validateApiRequest, validateHumanApproverRequest, unauthorizedResponse } from '@/lib/auth';
+import { NextRequest, NextResponse } from 'next/server.js';
+import { validateApiRequest, validateHumanApproverRequest, unauthorizedResponse } from '../../../lib/auth.ts';
 import {
   createApproval,
   listApprovals,
   decideApproval,
   verifyAndConsumeApproval,
+  createApprovalExecutionGrant,
   logAuditEvent,
   redactApproval,
-} from '@/lib/db';
+} from '../../../lib/db.ts';
 
 /**
  * GET /api/approvals
@@ -88,9 +89,15 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: outcome.error }, { status });
       }
 
+      const executionGrant =
+        outcome.approval && outcome.approval.status === 'approved'
+          ? createApprovalExecutionGrant(outcome.approval, human.auth?.sessionId || 'nook-owner')
+          : undefined;
+
       return NextResponse.json({
         success: true,
         approval: redactApproval(outcome.approval),
+        ...(executionGrant ? { executionGrant } : {}),
       });
     }
 
@@ -101,46 +108,73 @@ export async function POST(req: NextRequest) {
         logAuditEvent('APPROVAL_DECISION_DENIED', human.error || 'Not a human approver', 'denied');
         return unauthorizedResponse(human.error, human.status || 403);
       }
-      const { agentId, type, title, description, targetSpaceId, payload, missionId } = body;
+      const { agentId, type, title, description, targetSpaceId, payload, missionId, autonomous } = body;
 
-      // Strict security boundary: autonomous agents and missions CANNOT auto-approve privileged operations!
-      if (agentId || missionId) {
-        logAuditEvent('APPROVAL_BYPASS_ATTEMPT', `Blocked automated self-approval attempt: agent/mission parameters detected`, 'denied', agentId || 'unknown');
+      // Strict security boundary: autonomous missions CANNOT auto-approve privileged operations!
+      if (missionId || autonomous === true) {
+        logAuditEvent('APPROVAL_BYPASS_ATTEMPT', `Blocked automated self-approval attempt: mission parameters detected`, 'denied', agentId || 'unknown');
         return NextResponse.json({
           error: 'Security violation: Autonomous agents and missions cannot auto-approve privileged commands. Review card human approval required.',
         }, { status: 403 });
       }
 
-      // Server-established actor identity: ignore any client-supplied agent identity
+      const targetType = type || 'run_command';
+      const rawCommand = typeof payload?.command === 'string' ? payload.command.trim() : '';
+      if (targetType === 'run_command' && !rawCommand) {
+        return NextResponse.json({ error: 'Command string is required in payload.command for run_command approval' }, { status: 400 });
+      }
+
+      const safeTargetAgentId = (typeof agentId === 'string' && agentId.trim() ? agentId.trim() : 'default').replace(
+        /[^a-zA-Z0-9_-]/g,
+        '_'
+      );
+
+      // Bind the interactive approval to the authenticated human session, intended target agent sandbox, and exact command
       const record = createApproval({
-        agentId: 'authenticated-human-owner',
+        agentId: safeTargetAgentId,
         agentName: 'Human Owner (Interactive Terminal)',
-        type: type || 'run_command',
+        type: targetType,
         title: title || 'User Interactive Execution',
         description: description || 'Executed directly by authenticated human owner in interactive terminal',
         targetSpaceId,
-        payload: payload || {},
+        payload: {
+          ...(payload || {}),
+          ...(rawCommand ? { command: rawCommand } : {}),
+        },
       });
 
       const outcome = decideApproval(record.id, 'approve', 'Authorized directly by authenticated human owner session');
+      const executionGrant = outcome.approval
+        ? createApprovalExecutionGrant(outcome.approval, human.auth?.sessionId || 'nook-owner')
+        : undefined;
+
       return NextResponse.json({
         success: true,
         approval: redactApproval(outcome.approval),
+        ...(executionGrant ? { executionGrant } : {}),
       }, { status: 201 });
     }
 
     // 4. Verify & Atomically Consume (called by server-side execution services)
     if (action === 'verify_and_consume') {
-      const { approvalId, token, command, agentId, taskId } = body;
+      const { approvalId, token, executionGrant, command, agentId, taskId } = body;
+      const presentedToken = executionGrant || token;
 
-      if (!approvalId || !token) {
+      if (!approvalId || !presentedToken) {
         return NextResponse.json({
           authorized: false,
           error: 'Execution denied: Mandatory approvalId and single-use authorization token required.',
         }, { status: 403 });
       }
 
-      const outcome = verifyAndConsumeApproval(approvalId, token, command, agentId, typeof taskId === 'string' ? taskId : undefined);
+      const outcome = verifyAndConsumeApproval(
+        approvalId,
+        presentedToken,
+        command,
+        agentId,
+        typeof taskId === 'string' ? taskId : undefined,
+        auth.sessionId
+      );
       if (!outcome.authorized) {
         return NextResponse.json({
           authorized: false,

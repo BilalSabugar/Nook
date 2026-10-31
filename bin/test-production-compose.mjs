@@ -675,20 +675,159 @@ console.log('LINK_PLANTED');`,
     virtualFiles: approvedFiles,
   });
   assert.equal(secondTicketRun.status, 403, 'A second ticket for an already used approval must be rejected');
-  console.log('✔ Step 7g: Single-use approval cannot authorize a second execution (403)\n');
+  console.log('✔ Step 7g: Single-use approval cannot authorize a second execution (403)');
 
-  // Step 8: Sovereign Workspace Round-Trip Export/Import
-  console.log('Testing Sovereign Workspace Round-Trip Export and Import...');
+  // 7h. Browser Direct Terminal Flow: create_and_approve with agentId -> /api/sandbox/exec -> replay rejected
+  const terminalCmd = 'node terminal_direct_check.mjs';
+  const terminalApprRes = await fetch(`${WEB_URL}/api/approvals`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      action: 'create_and_approve',
+      agentId: 'agent-cipher',
+      agentName: 'Terminal Session',
+      type: 'run_command',
+      title: `Interactive Execute: ${terminalCmd}`,
+      payload: { command: terminalCmd },
+    }),
+  });
+  assert.equal(terminalApprRes.status, 201, 'Browser terminal create_and_approve with agentId must succeed with 201');
+  const terminalApprData = await terminalApprRes.json();
+  assert.ok(terminalApprData.approval?.id, 'create_and_approve must return approval ID');
+  assert.equal('singleUseToken' in terminalApprData.approval, false, 'singleUseToken must remain redacted in approval payload');
+  assert.ok(terminalApprData.executionGrant?.startsWith('grant.'), 'create_and_approve must return session-bound executionGrant');
+
+  const terminalExecRes = await fetch(`${WEB_URL}/api/sandbox/exec`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      command: terminalCmd,
+      agentId: 'agent-cipher',
+      approvalId: terminalApprData.approval.id,
+      executionGrant: terminalApprData.executionGrant,
+      virtualFiles: [
+        {
+          name: 'terminal_direct_check.mjs',
+          content: 'console.log("VERIFIED_BROWSER_DIRECT_TERMINAL_EXEC_OK");',
+        },
+      ],
+    }),
+  });
+  assert.equal(terminalExecRes.status, 200, 'Browser terminal /api/sandbox/exec must succeed with 200');
+  const terminalExecData = await terminalExecRes.json();
+  assert.equal(terminalExecData.exitCode, 0);
+  assert.ok(terminalExecData.output.includes('VERIFIED_BROWSER_DIRECT_TERMINAL_EXEC_OK'));
+
+  const terminalReplayRes = await fetch(`${WEB_URL}/api/sandbox/exec`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      command: terminalCmd,
+      agentId: 'agent-cipher',
+      approvalId: terminalApprData.approval.id,
+      executionGrant: terminalApprData.executionGrant,
+    }),
+  });
+  assert.equal(terminalReplayRes.status, 403, 'Replaying consumed terminal executionGrant must be rejected with 403');
+  console.log('✔ Step 7h: Browser direct terminal flow (create_and_approve -> /api/sandbox/exec -> replay 403) verified');
+
+  // 7i. Browser Review Card Flow: create -> decide(approve) -> /api/sandbox/exec -> replay 403 & decline 403
+  const reviewCmd = 'node review_card_check.mjs';
+  const reviewCreateRes = await fetch(`${WEB_URL}/api/approvals`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      action: 'create',
+      agentId: 'agent-cipher',
+      agentName: 'Cipher',
+      type: 'run_command',
+      title: `Review Card Execute: ${reviewCmd}`,
+      payload: { command: reviewCmd },
+    }),
+  });
+  assert.equal(reviewCreateRes.status, 201);
+  const reviewCreateData = await reviewCreateRes.json();
+  const reviewApprovalId = reviewCreateData.approval?.id;
+  assert.equal('singleUseToken' in reviewCreateData.approval, false, 'singleUseToken must be redacted on create');
+
+  const reviewDecideRes = await fetch(`${WEB_URL}/api/approvals`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      action: 'decide',
+      approvalId: reviewApprovalId,
+      decision: 'approve',
+    }),
+  });
+  assert.equal(reviewDecideRes.status, 200);
+  const reviewDecideData = await reviewDecideRes.json();
+  assert.equal('singleUseToken' in reviewDecideData.approval, false, 'singleUseToken must be redacted on decide');
+  assert.ok(reviewDecideData.executionGrant?.startsWith('grant.'), 'decide(approve) must return session-bound executionGrant');
+
+  const reviewExecRes = await fetch(`${WEB_URL}/api/sandbox/exec`, {
+    method: 'POST',
+    headers: humanHeaders,
+    body: JSON.stringify({
+      command: reviewCmd,
+      agentId: 'agent-cipher',
+      approvalId: reviewApprovalId,
+      executionGrant: reviewDecideData.executionGrant,
+      virtualFiles: [
+        {
+          name: 'review_card_check.mjs',
+          content: 'console.log("VERIFIED_BROWSER_REVIEW_CARD_EXEC_OK");',
+        },
+      ],
+    }),
+  });
+  assert.equal(reviewExecRes.status, 200, 'Review card /api/sandbox/exec must succeed with 200');
+  const reviewExecData = await reviewExecRes.json();
+  assert.equal(reviewExecData.exitCode, 0);
+  assert.ok(reviewExecData.output.includes('VERIFIED_BROWSER_REVIEW_CARD_EXEC_OK'));
+  console.log('✔ Step 7i: Browser Review Card flow (create -> decide -> /api/sandbox/exec) verified\n');
+
+  // Step 8: Populated Full-Stack Sovereign Workspace Round-Trip Export/Import
+  console.log('Testing Populated Sovereign Workspace Round-Trip Export and Import (Spaces, Docs, Missions, Tasks, Evidence)...');
+  const planMissionRes = await fetch(`${WEB_URL}/api/missions`, {
+    method: 'POST',
+    headers: apiHeaders,
+    body: JSON.stringify({
+      action: 'plan',
+      title: 'Compose Backup Verification Mission',
+      objective: 'Implement and verify an in-memory priority queue with TTL expiration',
+      priority: 'high',
+      requiresCodeExecution: true,
+    }),
+  });
+  assert.equal(planMissionRes.status, 201, 'Mission planning must succeed with 201');
+  const plannedMissionData = await planMissionRes.json();
+  const composeMissionId = plannedMissionData.mission?.id;
+  assert.ok(composeMissionId, 'Planned mission ID must be returned');
+
+  // Tick the mission so task observations and evidence records are populated
+  await fetch(`${WEB_URL}/api/missions`, {
+    method: 'POST',
+    headers: apiHeaders,
+    body: JSON.stringify({
+      action: 'tick',
+      missionId: composeMissionId,
+    }),
+  });
+
   const exportRes = await fetch(`${WEB_URL}/api/workspace/export`, {
     headers: apiHeaders,
   });
   assert.equal(exportRes.status, 200, 'Workspace export must succeed with 200');
   const bundle = await exportRes.json();
   assert.equal(bundle.schemaVersion, 2, 'Schema version must be 2');
-  assert.ok(Array.isArray(bundle.spaces), 'Export bundle must contain spaces array');
-  assert.ok(Array.isArray(bundle.missions), 'Export bundle must contain missions array');
-  assert.ok(Array.isArray(bundle.evidenceTimeline), 'Export bundle must contain evidenceTimeline array');
-  console.log(`✔ Step 8a: Exported workspace bundle with ${bundle.spaces.length} spaces, ${bundle.missions.length} missions`);
+  assert.ok(Array.isArray(bundle.spaces) && bundle.spaces.length >= 1, 'Export bundle must contain spaces');
+  assert.ok(Array.isArray(bundle.missions) && bundle.missions.length >= 1, 'Export bundle must contain populated missions');
+  assert.ok(
+    bundle.missions.some((m) => m.id === composeMissionId && Array.isArray(m.tasks) && m.tasks.length >= 1),
+    'Export bundle mission must include populated task histories'
+  );
+  assert.ok(Array.isArray(bundle.evidenceTimeline) && bundle.evidenceTimeline.length >= 1, 'Export bundle must contain populated evidence records');
+  console.log(`✔ Step 8a: Exported populated workspace bundle with ${bundle.spaces.length} spaces, ${bundle.missions.length} missions, ${bundle.evidenceTimeline.length} evidence records`);
 
   const importRes = await fetch(`${WEB_URL}/api/workspace/import`, {
     method: 'POST',
@@ -697,8 +836,11 @@ console.log('LINK_PLANTED');`,
   });
   assert.equal(importRes.status, 200, 'Workspace import must succeed with 200');
   const importData = await importRes.json();
-  assert.equal(importData.success, true);
-  console.log(`✔ Step 8b: Restored workspace (${importData.importedSpacesCount || 0} spaces, ${importData.importedDocsCount || 0} docs, ${importData.importedMissionsCount || 0} missions, ${importData.importedEvidenceCount || 0} evidence logs)\n`);
+  assert.equal(importData.status, 'success');
+  assert.ok(importData.importedMissionsCount >= 1, 'Import must restore at least 1 mission');
+  assert.ok(importData.importedTasksCount >= 1, 'Import must restore task histories');
+  assert.ok(importData.importedEvidenceCount >= 1, 'Import must restore evidence records');
+  console.log(`✔ Step 8b: Restored workspace (${importData.importedSpacesCount || 0} spaces, ${importData.importedDocsCount || 0} docs, ${importData.importedMissionsCount || 0} missions, ${importData.importedTasksCount || 0} tasks, ${importData.importedEvidenceCount || 0} evidence logs)\n`);
 
   console.log('=================================================================');
   console.log('ALL PRODUCTION DOCKER COMPOSE INTEGRATION TESTS PASSED (100%)');

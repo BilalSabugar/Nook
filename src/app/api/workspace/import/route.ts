@@ -6,6 +6,7 @@ import {
   verifyDatabaseIntegrity,
   logAuditEvent,
   getDatabase,
+  withWorkspaceMutationLock,
   SAFE_SNAPSHOT_ID_PATTERN,
   SAFE_SNAPSHOT_FILENAME_PATTERN,
 } from '../../../../lib/db.ts';
@@ -56,9 +57,10 @@ export async function restoreWorkspaceBundleAtomically(
     beforeCommitHook?: () => void;
   }
 ) {
-  const storageDir = options?.storageDir ? path.resolve(/*turbopackIgnore: true*/ options.storageDir) : DEFAULT_STORAGE_DIR;
-  const db = options?.db || getDatabase();
-  const conflictStrategy = options?.conflictStrategy || bundle?.conflictStrategy || 'merge';
+  return withWorkspaceMutationLock(async () => {
+    const storageDir = options?.storageDir ? path.resolve(/*turbopackIgnore: true*/ options.storageDir) : DEFAULT_STORAGE_DIR;
+    const db = options?.db || getDatabase();
+    const conflictStrategy = options?.conflictStrategy || bundle?.conflictStrategy || 'merge';
 
   // 1. Preflight validation (zero side effects on disk or DB)
   const preflight = validateWorkspaceSnapshot(bundle, {
@@ -179,10 +181,11 @@ export async function restoreWorkspaceBundleAtomically(
     }
 
     let savepointActive = false;
+    const savepointName = `nook_atomic_restore_${opId.replace(/[^a-zA-Z0-9_]/g, '_')}`;
     try {
       // 4. Open outer SQLite savepoint spanning both database import and filesystem swap
       // so that if any filesystem write, hook, or integrity check fails, SQLite changes are rolled back too.
-      db.exec('SAVEPOINT nook_atomic_restore;');
+      db.exec(`SAVEPOINT ${savepointName};`);
       savepointActive = true;
 
       const importStats = importWorkspaceSnapshot(bundle, db, {
@@ -231,7 +234,7 @@ export async function restoreWorkspaceBundleAtomically(
       }
 
       // 7. Commit outer SQLite savepoint now that both SQLite and filesystem changes have succeeded
-      db.exec('RELEASE SAVEPOINT nook_atomic_restore;');
+      db.exec(`RELEASE SAVEPOINT ${savepointName};`);
       savepointActive = false;
 
       return {
@@ -249,8 +252,8 @@ export async function restoreWorkspaceBundleAtomically(
       // Roll back uncommitted SQLite mutations inside outer savepoint
       if (savepointActive) {
         try {
-          db.exec('ROLLBACK TO SAVEPOINT nook_atomic_restore;');
-          db.exec('RELEASE SAVEPOINT nook_atomic_restore;');
+          db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
+          db.exec(`RELEASE SAVEPOINT ${savepointName};`);
         } catch {
           // ignore if savepoint already closed
         }
@@ -292,6 +295,7 @@ export async function restoreWorkspaceBundleAtomically(
       fs.rmSync(backupDir, { recursive: true, force: true });
     }
   }
+  });
 }
 
 export async function POST(req: NextRequest) {

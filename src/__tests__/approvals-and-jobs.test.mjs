@@ -299,6 +299,280 @@ test('Durable Server Workspace State Atomic Persistence', async () => {
       'SQLite document from interrupted state sync must be rolled back'
     );
 
+    // 4. Failure injection AFTER workspace-state.json has been atomically replaced on disk (afterStateFileHook)
+    let stateFileWasReplacedBeforeRollback = false;
+    await assert.rejects(
+      async () => {
+        await persistWorkspaceStatePayload(
+          {
+            agents: [{ id: 'agent-scout', name: 'Post-JSON-Replace Failure Agent' }],
+            spaces: [
+              {
+                id: 'space-post-json-rollback',
+                name: 'Post-JSON Space That Must Roll Back',
+                pages: [
+                  {
+                    id: 'page-post-json-rollback',
+                    title: 'Post-JSON Uncommitted Page',
+                    content: 'Must roll back when failure happens after workspace-state.json rename',
+                  },
+                ],
+              },
+            ],
+            messages: { 'agent-scout': [{ id: 'm-post-json', content: 'UNCOMMITTED_POST_JSON' }] },
+          },
+          {
+            afterStateFileHook: async ({ stateFile }) => {
+              const currentDiskJson = JSON.parse(await fs.readFile(stateFile, 'utf8'));
+              stateFileWasReplacedBeforeRollback =
+                currentDiskJson.messages?.['agent-scout']?.[0]?.content === 'UNCOMMITTED_POST_JSON';
+              throw new Error('Simulated failure after workspace-state.json atomic replacement');
+            },
+          }
+        );
+      },
+      /Simulated failure after workspace-state\.json atomic replacement/
+    );
+    assert.equal(
+      stateFileWasReplacedBeforeRollback,
+      true,
+      'afterStateFileHook must run after workspace-state.json was replaced on disk'
+    );
+    assert.equal(
+      await fs.readFile(STATE_FILE, 'utf8'),
+      committedRaw,
+      'workspace-state.json must be restored to exact previous committed bytes when failure occurs after JSON replacement'
+    );
+    assert.equal(
+      getDocumentById('page-post-json-rollback'),
+      null,
+      'SQLite document must be rolled back when failure occurs after JSON replacement'
+    );
+
+    // 5. Failure injection AFTER workspace-state.json replacement AND AFTER the first sandbox file write (afterSandboxFileHook)
+    const scoutNotesPath = path.join(STORAGE_DIR, 'sandboxes', 'agent-scout', 'workspace', 'notes.txt');
+    const scoutExtraPath = path.join(STORAGE_DIR, 'sandboxes', 'agent-scout', 'workspace', 'uncommitted_extra.txt');
+    const transientAgentDir = path.join(STORAGE_DIR, 'sandboxes', 'agent-transient-rollback');
+    assert.equal(await fs.readFile(scoutNotesPath, 'utf8'), 'initial-sandbox-file');
+
+    let firstSandboxFileWasWritten = false;
+    await assert.rejects(
+      async () => {
+        await persistWorkspaceStatePayload(
+          {
+            agents: [{ id: 'agent-scout', name: 'Post-Sandbox-Write Failure Agent' }],
+            spaces: [
+              {
+                id: 'space-post-sandbox-rollback',
+                name: 'Post-Sandbox Space That Must Roll Back',
+                pages: [
+                  {
+                    id: 'page-post-sandbox-rollback',
+                    title: 'Post-Sandbox Uncommitted Page',
+                    content: 'Must roll back when failure happens after first sandbox file write',
+                  },
+                ],
+              },
+            ],
+            computerStates: {
+              'agent-scout': {
+                files: [
+                  { name: 'notes.txt', content: 'OVERWRITTEN_UNCOMMITTED_NOTES' },
+                  { name: 'uncommitted_extra.txt', content: 'SECOND_FILE_SHOULD_FAIL' },
+                ],
+              },
+              'agent-transient-rollback': {
+                files: [{ name: 'transient.txt', content: 'SHOULD_NOT_EXIST' }],
+              },
+            },
+            messages: { 'agent-scout': [{ id: 'm-post-sbx', content: 'UNCOMMITTED_POST_SANDBOX' }] },
+          },
+          {
+            afterSandboxFileHook: async ({ fileName, filePath, fileIndex }) => {
+              if (fileIndex === 0) {
+                assert.equal(fileName, 'notes.txt');
+                const diskContent = await fs.readFile(filePath, 'utf8');
+                firstSandboxFileWasWritten = diskContent === 'OVERWRITTEN_UNCOMMITTED_NOTES';
+                throw new Error('Simulated failure after first sandbox file write');
+              }
+            },
+          }
+        );
+      },
+      /Simulated failure after first sandbox file write/
+    );
+    assert.equal(firstSandboxFileWasWritten, true, 'First sandbox file must have been written before hook threw');
+    assert.equal(
+      await fs.readFile(STATE_FILE, 'utf8'),
+      committedRaw,
+      'workspace-state.json must roll back after mid-sandbox-write failure'
+    );
+    assert.equal(
+      await fs.readFile(scoutNotesPath, 'utf8'),
+      'initial-sandbox-file',
+      'Overwritten first sandbox file (notes.txt) must be restored to prior committed content on rollback'
+    );
+    await assert.rejects(fs.stat(scoutExtraPath), { code: 'ENOENT' });
+    await assert.rejects(fs.stat(transientAgentDir), { code: 'ENOENT' });
+    assert.equal(
+      getDocumentById('page-post-sandbox-rollback'),
+      null,
+      'SQLite document must roll back after mid-sandbox-write failure'
+    );
+
+    // 6. Concurrent saves serialization: two simultaneous saves where one succeeds and the other fails
+    // Case 6a: Save A (delayed, then fails & rolls back) + Save B (succeeds) launched simultaneously
+    const [res6aFail, res6aOk] = await Promise.allSettled([
+      persistWorkspaceStatePayload(
+        {
+          agents: [{ id: 'agent-scout', name: 'Concurrent Failing Agent A' }],
+          spaces: [
+            {
+              id: 'space-concurrent-fail-a',
+              name: 'Concurrent Failing Space A',
+              pages: [
+                {
+                  id: 'page-concurrent-fail-a',
+                  title: 'Failing Concurrent Page A',
+                  content: 'Must never commit',
+                },
+              ],
+            },
+          ],
+          computerStates: {
+            'agent-scout': {
+              files: [{ name: 'notes.txt', content: 'CORRUPTED_BY_CONCURRENT_FAIL_A' }],
+            },
+          },
+          messages: { 'agent-scout': [{ id: 'm-fail-a', content: 'FAILED_CONCURRENT_A' }] },
+        },
+        {
+          afterStateFileHook: async () => {
+            await new Promise((r) => setTimeout(r, 40));
+            throw new Error('Concurrent Save A failed after delay');
+          },
+        }
+      ),
+      persistWorkspaceStatePayload({
+        agents: [{ id: 'agent-scout', name: 'Concurrent Committed Agent B' }],
+        spaces: [
+          {
+            id: 'space-concurrent-ok-b',
+            name: 'Concurrent Committed Space B',
+            pages: [
+              {
+                id: 'page-concurrent-ok-b',
+                title: 'Committed Concurrent Page B',
+                content: 'Committed content from Save B',
+              },
+            ],
+          },
+        ],
+        computerStates: {
+          'agent-scout': {
+            files: [{ name: 'notes.txt', content: 'committed-by-save-b' }],
+          },
+        },
+        messages: { 'agent-scout': [{ id: 'm-ok-b', content: 'COMMITTED_CONCURRENT_B' }] },
+      }),
+    ]);
+
+    assert.equal(res6aFail.status, 'rejected');
+    assert.equal(res6aOk.status, 'fulfilled');
+    assert.equal(res6aOk.value.status, 200);
+    assert.equal(getDocumentById('page-concurrent-fail-a'), null, 'Failed concurrent Save A must be rolled back');
+    assert.equal(
+      getDocumentById('page-concurrent-ok-b')?.title,
+      'Committed Concurrent Page B',
+      'Successful concurrent Save B must remain committed in SQLite'
+    );
+    assert.equal(
+      await fs.readFile(scoutNotesPath, 'utf8'),
+      'committed-by-save-b',
+      'Successful concurrent Save B sandbox file must remain committed'
+    );
+
+    // Case 6b: Reverse order — Save C (delayed, then succeeds) + Save D (fails & rolls back) launched simultaneously
+    const [res6bOk, res6bFail] = await Promise.allSettled([
+      persistWorkspaceStatePayload(
+        {
+          agents: [{ id: 'agent-scout', name: 'Scout' }],
+          spaces: [
+            {
+              id: 'space-test-atomic',
+              name: 'Autonomous Space',
+              pages: [
+                {
+                  id: 'page-concurrent-ok-c',
+                  title: 'Committed Concurrent Page C',
+                  content: 'Committed content from Save C',
+                },
+              ],
+            },
+          ],
+          computerStates: {
+            'agent-scout': {
+              files: [{ name: 'notes.txt', content: 'initial-sandbox-file' }],
+            },
+          },
+          messages: { 'agent-scout': [{ id: 'm1', content: 'Committed message' }] },
+        },
+        {
+          afterStateFileHook: async () => {
+            await new Promise((r) => setTimeout(r, 40));
+          },
+        }
+      ),
+      persistWorkspaceStatePayload(
+        {
+          agents: [{ id: 'agent-scout', name: 'Concurrent Failing Agent D' }],
+          spaces: [
+            {
+              id: 'space-concurrent-fail-d',
+              name: 'Concurrent Failing Space D',
+              pages: [
+                {
+                  id: 'page-concurrent-fail-d',
+                  title: 'Failing Concurrent Page D',
+                  content: 'Must roll back without undoing Save C',
+                },
+              ],
+            },
+          ],
+          computerStates: {
+            'agent-scout': {
+              files: [{ name: 'notes.txt', content: 'CORRUPTED_BY_CONCURRENT_FAIL_D' }],
+            },
+          },
+          messages: { 'agent-scout': [{ id: 'm-fail-d', content: 'FAILED_CONCURRENT_D' }] },
+        },
+        {
+          afterSandboxFileHook: async () => {
+            throw new Error('Concurrent Save D failed after sandbox write');
+          },
+        }
+      ),
+    ]);
+
+    assert.equal(res6bOk.status, 'fulfilled');
+    assert.equal(res6bFail.status, 'rejected');
+    assert.equal(
+      getDocumentById('page-concurrent-ok-c')?.title,
+      'Committed Concurrent Page C',
+      'Earlier committed Save C must NOT be rolled back when subsequent concurrent Save D fails'
+    );
+    assert.equal(
+      getDocumentById('page-concurrent-ok-b')?.title,
+      'Committed Concurrent Page B',
+      'Earlier committed Save B must remain committed in SQLite'
+    );
+    assert.equal(getDocumentById('page-concurrent-fail-d'), null, 'Failed Save D must be rolled back');
+    assert.equal(
+      await fs.readFile(scoutNotesPath, 'utf8'),
+      'initial-sandbox-file',
+      'Sandbox file must reflect committed Save C after Save D rolled back'
+    );
+
     const getReq = new NextRequest('http://localhost:3000/api/workspace/state', {
       headers: { 'x-nook-api-key': apiKey },
     });

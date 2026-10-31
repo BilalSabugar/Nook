@@ -7,6 +7,21 @@ const STORAGE_DIR = path.join(process.cwd(), '.nook_storage');
 const DB_PATH = path.join(STORAGE_DIR, 'nook.db');
 
 let _dbInstance: DatabaseSync | null = null;
+let _workspaceMutationQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Process-wide transaction coordinator that serializes asynchronous workspace mutations
+ * (state saves and snapshot imports) so operations on the shared SQLite connection and
+ * `.nook_storage` filesystem never interleave savepoints or disk replacements.
+ */
+export function withWorkspaceMutationLock<T>(fn: () => Promise<T> | T): Promise<T> {
+  const next = _workspaceMutationQueue.then(() => fn(), () => fn());
+  _workspaceMutationQueue = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
 
 export function getDatabase(): DatabaseSync {
   if (_dbInstance) return _dbInstance;
@@ -524,16 +539,97 @@ export function decideApproval(id: string, decision: 'approve' | 'decline', reas
   return { success: true, approval: updated || undefined };
 }
 
+function getApprovalGrantSigningKey(): string {
+  return (
+    process.env.SANDBOX_RUNNER_SECRET ||
+    process.env.NOOK_API_KEY ||
+    process.env.NOOK_PASSWORD ||
+    process.env.NOOK_SECRET_TOKEN ||
+    'nook-ephemeral-grant-signing-key'
+  );
+}
+
+/**
+ * Mints a one-time HMAC execution grant bound to:
+ * - approval ID
+ * - intended agent ID
+ * - approved command string
+ * - internal singleUseToken (without exposing the raw token in API responses)
+ * - authenticated human session ID
+ */
+export function createApprovalExecutionGrant(
+  record: DbApprovalRecord,
+  sessionId: string = 'nook-owner'
+): string {
+  const cleanAgentId = (record.agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanCommand = String(record.payload?.command || '').trim();
+  const effectiveSession = sessionId || 'nook-owner';
+  const sessionB64 = Buffer.from(effectiveSession, 'utf8').toString('base64url');
+  const message = `nook-exec-grant-v1:${record.id}:${cleanAgentId}:${cleanCommand}:${record.singleUseToken}:${effectiveSession}`;
+  const mac = crypto.createHmac('sha256', getApprovalGrantSigningKey()).update(message).digest('hex');
+  return `grant.${sessionB64}.${mac}`;
+}
+
+export function verifyApprovalExecutionGrant(
+  record: DbApprovalRecord,
+  presentedGrant: string,
+  expectedAgentId?: string,
+  expectedCommand?: string,
+  callerSessionId?: string
+): { valid: boolean; error?: string } {
+  if (!presentedGrant || !presentedGrant.startsWith('grant.')) {
+    return { valid: false, error: 'Invalid or missing single-use authorization token.' };
+  }
+  const parts = presentedGrant.split('.');
+  if (parts.length !== 3) {
+    return { valid: false, error: 'Malformed execution grant structure.' };
+  }
+  const [, sessionB64, presentedMac] = parts;
+  if (!/^[0-9a-fA-F]{64}$/.test(presentedMac)) {
+    return { valid: false, error: 'Invalid execution grant signature format.' };
+  }
+  let grantSessionId = '';
+  try {
+    grantSessionId = Buffer.from(sessionB64, 'base64url').toString('utf8');
+  } catch {
+    return { valid: false, error: 'Invalid execution grant session encoding.' };
+  }
+
+  // Enforce human session binding when caller is authenticated via a session
+  if (callerSessionId && callerSessionId !== 'api-key-owner' && grantSessionId !== callerSessionId) {
+    return {
+      valid: false,
+      error: `Execution grant session mismatch: bound to session '${grantSessionId}', not '${callerSessionId}'.`,
+    };
+  }
+
+  const cleanAgentId = (expectedAgentId || record.agentId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanCommand = String(
+    expectedCommand !== undefined ? expectedCommand : record.payload?.command || ''
+  ).trim();
+  const message = `nook-exec-grant-v1:${record.id}:${cleanAgentId}:${cleanCommand}:${record.singleUseToken}:${grantSessionId}`;
+  const expectedMac = crypto.createHmac('sha256', getApprovalGrantSigningKey()).update(message).digest('hex');
+
+  const a = Buffer.from(presentedMac.toLowerCase(), 'utf8');
+  const b = Buffer.from(expectedMac.toLowerCase(), 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { valid: false, error: 'Invalid or tampered execution grant signature.' };
+  }
+  return { valid: true };
+}
+
 /**
  * Concurrency-safe atomic consumption:
- * Strictly matches command and token. Updates status to 'consumed'.
+ * Strictly matches agent, command, and token (either internal singleUseToken or session-bound HMAC executionGrant).
+ * Updates status to 'consumed'.
  */
 export function verifyAndConsumeApproval(
   id: string,
   token: string,
   expectedCommand?: string,
   expectedAgentId?: string,
-  taskId?: string
+  taskId?: string,
+  callerSessionId?: string
 ): { authorized: boolean; error?: string; approval?: DbApprovalRecord } {
   const db = getDatabase();
   const record = getApprovalById(id);
@@ -544,11 +640,6 @@ export function verifyAndConsumeApproval(
 
   if (record.status !== 'approved') {
     return { authorized: false, error: `Approval is in '${record.status}' state. Must be 'approved'.` };
-  }
-
-  // Token match
-  if (!token || record.singleUseToken !== token) {
-    return { authorized: false, error: 'Invalid or missing single-use authorization token.' };
   }
 
   // Agent match
@@ -566,6 +657,25 @@ export function verifyAndConsumeApproval(
     }
   }
 
+  // Token or HMAC executionGrant verification
+  if (!token || typeof token !== 'string') {
+    return { authorized: false, error: 'Invalid or missing single-use authorization token.' };
+  }
+  if (token.startsWith('grant.')) {
+    const grantCheck = verifyApprovalExecutionGrant(
+      record,
+      token,
+      expectedAgentId || record.agentId,
+      expectedCommand,
+      callerSessionId
+    );
+    if (!grantCheck.valid) {
+      return { authorized: false, error: grantCheck.error || 'Invalid or missing single-use authorization token.' };
+    }
+  } else if (record.singleUseToken !== token) {
+    return { authorized: false, error: 'Invalid or missing single-use authorization token.' };
+  }
+
   // Check TTL
   if (Date.now() > Date.parse(record.expiresAt)) {
     db.prepare(`UPDATE approvals SET status = 'declined', decision_reason = 'Expired authorization' WHERE id = ?`).run(id);
@@ -577,7 +687,7 @@ export function verifyAndConsumeApproval(
     UPDATE approvals
     SET status = 'consumed', consumed_task_id = ?
     WHERE id = ? AND status = 'approved' AND single_use_token = ?
-  `).run(taskId || null, id, token);
+  `).run(taskId || null, id, record.singleUseToken);
 
   if (result.changes === 0) {
     return { authorized: false, error: 'Approval token was already consumed or race condition detected.' };

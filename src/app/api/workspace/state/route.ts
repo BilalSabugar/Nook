@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server.js';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { validateApiRequest, unauthorizedResponse } from '../../../../lib/auth.ts';
 import {
   getDatabase,
+  withWorkspaceMutationLock,
   saveSpace,
   saveDocumentWithRevision,
   listSpacesWithDocuments,
@@ -147,11 +150,23 @@ export async function GET(req: NextRequest) {
 
 export interface PersistWorkspaceStateOptions {
   beforeRenameHook?: (ctx: { tmpPath: string; target: string }) => Promise<void> | void;
+  afterStateFileHook?: (ctx: { stateFile: string }) => Promise<void> | void;
+  afterSandboxFileHook?: (ctx: {
+    agentId: string;
+    fileName: string;
+    filePath: string;
+    fileIndex: number;
+  }) => Promise<void> | void;
 }
 
 /**
- * Atomically persists workspace state across SQLite and `.nook_storage/workspace-state.json`
- * combining `O_NOFOLLOW` protection with a temporary-file write, `sync()` flush, and same-directory `rename`.
+ * Atomically persists workspace state across SQLite, `.nook_storage/workspace-state.json`, and
+ * per-agent `.nook_storage/sandboxes/<agentId>/workspace/*` files.
+ * - Serializes concurrent workspace mutations via `withWorkspaceMutationLock` so shared SQLite
+ *   savepoints and filesystem writes never interleave across overlapping requests.
+ * - Combines `O_NOFOLLOW` protection with temporary-file write, `sync()` flush, and same-directory `rename`.
+ * - Restores SQLite, `workspace-state.json`, and any modified/created sandbox files if an error occurs
+ *   at any stage (before rename, after JSON replacement, or after sandbox file writes).
  */
 export async function persistWorkspaceStatePayload(
   payload: Record<string, any>,
@@ -159,132 +174,209 @@ export async function persistWorkspaceStatePayload(
 ): Promise<{ status: number; body: Record<string, any> }> {
   const { action, agents, spaces, computerStates, messages, settings, documentId, targetVersion } = payload || {};
 
-  // Handle document rollback to a previous version
-  if (action === 'rollback' && documentId && targetVersion) {
-    const rolledBack = rollbackDocumentToVersion(documentId, targetVersion);
-    return {
-      status: 200,
-      body: {
-        success: true,
-        message: `Successfully rolled back document to v${targetVersion}`,
-        document: rolledBack,
-      },
-    };
+  // Validate client-supplied computerStates BEFORE acquiring lock or performing any SQLite / filesystem writes
+  if (!(action === 'rollback' && documentId && targetVersion)) {
+    const csValidation = validateComputerStatesInput(computerStates);
+    if (!csValidation.valid) {
+      return { status: 400, body: { error: csValidation.error } };
+    }
   }
 
-  // Validate client-supplied computerStates BEFORE any SQLite or filesystem writes
-  const csValidation = validateComputerStatesInput(computerStates);
-  if (!csValidation.valid) {
-    return { status: 400, body: { error: csValidation.error } };
-  }
+  return withWorkspaceMutationLock(async () => {
+    // Handle document rollback to a previous version inside the serialized mutation lock
+    if (action === 'rollback' && documentId && targetVersion) {
+      const rolledBack = rollbackDocumentToVersion(documentId, targetVersion);
+      return {
+        status: 200,
+        body: {
+          success: true,
+          message: `Successfully rolled back document to v${targetVersion}`,
+          document: rolledBack,
+        },
+      };
+    }
 
-  await ensureRealDirectoryWithin(process.cwd(), STORAGE_DIR);
+    await ensureRealDirectoryWithin(process.cwd(), STORAGE_DIR);
 
-  // Sanitize settings: strip private secrets from general workspace state
-  const sanitizedSettings = settings
-    ? {
-        provider: settings.provider,
-        model: settings.model,
-        ollamaEndpoint: settings.ollamaEndpoint,
-        // Explicitly omit geminiApiKey, openaiApiKey, anthropicApiKey
-      }
-    : undefined;
+    // Sanitize settings: strip private secrets from general workspace state
+    const sanitizedSettings = settings
+      ? {
+          provider: settings.provider,
+          model: settings.model,
+          ollamaEndpoint: settings.ollamaEndpoint,
+          // Explicitly omit geminiApiKey, openaiApiKey, anthropicApiKey
+        }
+      : undefined;
 
-  const db = getDatabase();
-  let savepointOpen = false;
-  try {
-    db.exec('SAVEPOINT nook_workspace_state_sync;');
-    savepointOpen = true;
+    const opId = `${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const savepointName = `nook_ws_sync_${opId}`;
+    const backupDir = path.join(STORAGE_DIR, `.state_backup_${opId}`);
+    const sandboxesRoot = path.join(STORAGE_DIR, 'sandboxes');
+    const hasComputerStates = Boolean(computerStates && typeof computerStates === 'object');
 
-    // Persist spaces and documents into transactional SQLite database with revision tracking
-    if (Array.isArray(spaces)) {
-      for (const space of spaces) {
-        if (space?.id && space?.name) {
-          saveSpace({ id: space.id, name: space.name, icon: space.icon || 'folder' });
+    // Snapshot pre-transaction filesystem state for complete cross-store rollback on any failure
+    fsSync.mkdirSync(backupDir, { recursive: true });
+    const hadStateFile = fsSync.existsSync(STATE_FILE);
+    if (hadStateFile) {
+      fsSync.cpSync(STATE_FILE, path.join(backupDir, 'workspace-state.json'));
+    }
+    const hadSandboxes = fsSync.existsSync(sandboxesRoot);
+    if (hasComputerStates && hadSandboxes) {
+      fsSync.cpSync(sandboxesRoot, path.join(backupDir, 'sandboxes'), { recursive: true });
+    }
 
-          if (Array.isArray(space.pages)) {
-            for (const page of space.pages) {
-              if (page?.id && page?.title) {
-                saveDocumentWithRevision({
-                  id: page.id,
-                  spaceId: space.id,
-                  title: page.title,
-                  content: page.content || '',
-                  excerpt: page.excerpt,
-                  icon: page.icon,
-                  authorAgentId: page.authorAgentId || 'unknown',
-                  tags: page.tags,
-                  changeSummary: `Updated from client sync`,
-                });
+    const db = getDatabase();
+    let savepointOpen = false;
+    try {
+      db.exec(`SAVEPOINT ${savepointName};`);
+      savepointOpen = true;
+
+      // Persist spaces and documents into transactional SQLite database with revision tracking
+      if (Array.isArray(spaces)) {
+        for (const space of spaces) {
+          if (space?.id && space?.name) {
+            saveSpace({ id: space.id, name: space.name, icon: space.icon || 'folder' });
+
+            if (Array.isArray(space.pages)) {
+              for (const page of space.pages) {
+                if (page?.id && page?.title) {
+                  saveDocumentWithRevision({
+                    id: page.id,
+                    spaceId: space.id,
+                    title: page.title,
+                    content: page.content || '',
+                    excerpt: page.excerpt,
+                    icon: page.icon,
+                    authorAgentId: page.authorAgentId || 'unknown',
+                    tags: page.tags,
+                    changeSummary: `Updated from client sync`,
+                  });
+                }
               }
             }
           }
         }
       }
-    }
 
-    // Atomic no-follow temporary-file write + flush + same-directory rename for workspace-state.json
-    const savedAt = new Date().toISOString();
-    const serialized = JSON.stringify(
-      scrubSensitiveData({
-        agents,
-        spaces,
-        computerStates,
-        messages,
-        settings: sanitizedSettings,
-        savedAt,
-      }),
-      null,
-      2
-    );
+      // Atomic no-follow temporary-file write + flush + same-directory rename for workspace-state.json
+      const savedAt = new Date().toISOString();
+      const serialized = JSON.stringify(
+        scrubSensitiveData({
+          agents,
+          spaces,
+          computerStates,
+          messages,
+          settings: sanitizedSettings,
+          savedAt,
+        }),
+        null,
+        2
+      );
 
-    await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', serialized, 0o600, {
-      beforeRenameHook: options?.beforeRenameHook,
-    });
+      await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', serialized, 0o600, {
+        beforeRenameHook: options?.beforeRenameHook,
+      });
 
-    // Persist per-agent workspace files on durable server disk using strict realpath & atomic O_NOFOLLOW confinement
-    if (computerStates && typeof computerStates === 'object') {
-      const sandboxesRoot = path.join(STORAGE_DIR, 'sandboxes');
-      await ensureRealDirectoryWithin(STORAGE_DIR, sandboxesRoot);
+      if (typeof options?.afterStateFileHook === 'function') {
+        await options.afterStateFileHook({ stateFile: STATE_FILE });
+      }
 
-      for (const [agentId, compState] of Object.entries<any>(computerStates)) {
-        if (compState?.files && Array.isArray(compState.files)) {
-          const agentDiskDir = path.join(sandboxesRoot, agentId, 'workspace');
-          await ensureRealDirectoryWithin(sandboxesRoot, agentDiskDir);
+      // Persist per-agent workspace files on durable server disk using strict realpath & atomic O_NOFOLLOW confinement
+      if (hasComputerStates) {
+        await ensureRealDirectoryWithin(STORAGE_DIR, sandboxesRoot);
+        let sandboxFileIndex = 0;
 
-          for (const file of compState.files) {
-            if (file?.name && typeof file?.content === 'string') {
-              await writeFileNoFollow(agentDiskDir, file.name, file.content);
+        for (const [agentId, compState] of Object.entries<any>(computerStates)) {
+          if (compState?.files && Array.isArray(compState.files)) {
+            const agentDiskDir = path.join(sandboxesRoot, agentId, 'workspace');
+            await ensureRealDirectoryWithin(sandboxesRoot, agentDiskDir);
+
+            for (const file of compState.files) {
+              if (file?.name && typeof file?.content === 'string') {
+                await writeFileNoFollow(agentDiskDir, file.name, file.content);
+                if (typeof options?.afterSandboxFileHook === 'function') {
+                  await options.afterSandboxFileHook({
+                    agentId,
+                    fileName: file.name,
+                    filePath: path.join(agentDiskDir, file.name),
+                    fileIndex: sandboxFileIndex,
+                  });
+                }
+                sandboxFileIndex += 1;
+              }
             }
           }
         }
       }
-    }
 
-    db.exec('RELEASE SAVEPOINT nook_workspace_state_sync;');
-    savepointOpen = false;
+      db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+      savepointOpen = false;
 
-    logAuditEvent('WORKSPACE_SYNC', 'Synchronized workspace state, spaces, and sandboxes', 'success');
+      logAuditEvent('WORKSPACE_SYNC', 'Synchronized workspace state, spaces, and sandboxes', 'success');
 
-    return {
-      status: 200,
-      body: {
-        success: true,
-        savedAt,
-        storageDirectory: STORAGE_DIR,
-      },
-    };
-  } catch (err: any) {
-    if (savepointOpen) {
-      try {
-        db.exec('ROLLBACK TO SAVEPOINT nook_workspace_state_sync;');
-        db.exec('RELEASE SAVEPOINT nook_workspace_state_sync;');
-      } catch {
-        // ignore if savepoint already closed
+      return {
+        status: 200,
+        body: {
+          success: true,
+          savedAt,
+          storageDirectory: STORAGE_DIR,
+        },
+      };
+    } catch (err: any) {
+      // 1. Roll back SQLite savepoint
+      if (savepointOpen) {
+        try {
+          db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
+          db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        } catch {
+          // ignore if savepoint already closed
+        }
+        savepointOpen = false;
       }
+
+      // 2. Roll back workspace-state.json to exact pre-transaction state
+      try {
+        const backupStateFile = path.join(backupDir, 'workspace-state.json');
+        if (hadStateFile && fsSync.existsSync(backupStateFile)) {
+          const priorContent = fsSync.readFileSync(backupStateFile, 'utf8');
+          await writeFileNoFollow(STORAGE_DIR, 'workspace-state.json', priorContent, 0o600);
+        } else if (!hadStateFile && fsSync.existsSync(STATE_FILE)) {
+          fsSync.rmSync(STATE_FILE, { force: true });
+        }
+      } catch {
+        // best-effort fallback copy
+        try {
+          const backupStateFile = path.join(backupDir, 'workspace-state.json');
+          if (hadStateFile && fsSync.existsSync(backupStateFile)) {
+            fsSync.cpSync(backupStateFile, STATE_FILE, { force: true });
+          }
+        } catch {}
+      }
+
+      // 3. Roll back sandbox files and directories if computerStates was part of this transaction
+      if (hasComputerStates) {
+        try {
+          if (fsSync.existsSync(sandboxesRoot)) {
+            fsSync.rmSync(sandboxesRoot, { recursive: true, force: true });
+          }
+          const backupSandboxes = path.join(backupDir, 'sandboxes');
+          if (hadSandboxes && fsSync.existsSync(backupSandboxes)) {
+            fsSync.cpSync(backupSandboxes, sandboxesRoot, { recursive: true });
+          }
+        } catch {
+          // ignore rollback cleanup error
+        }
+      }
+
+      throw err;
+    } finally {
+      try {
+        if (fsSync.existsSync(backupDir)) {
+          fsSync.rmSync(backupDir, { recursive: true, force: true });
+        }
+      } catch {}
     }
-    throw err;
-  }
+  });
 }
 
 /**

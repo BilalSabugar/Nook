@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Agent, 
   Space, 
@@ -172,7 +172,9 @@ export default function NookApp() {
     setIsSettingsModalOpen(false);
   };
 
-  // Sync state to durable server disk & localStorage
+  // Sync state to durable server disk & localStorage (serialized via client queue)
+  const persistenceQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+
   const syncServerPersistence = (payload: {
     agents?: Agent[];
     spaces?: Space[];
@@ -181,17 +183,22 @@ export default function NookApp() {
     settings?: LLMSettings;
   }) => {
     try {
-      fetch('/api/workspace/state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          agents: payload.agents || agents,
-          spaces: payload.spaces || spaces,
-          computerStates: payload.computerStates || computerStates,
-          messages: payload.messages || messages,
-          settings: payload.settings || llmSettings,
-        }),
-      }).catch(() => {});
+      const requestBody = JSON.stringify({
+        agents: payload.agents || agents,
+        spaces: payload.spaces || spaces,
+        computerStates: payload.computerStates || computerStates,
+        messages: payload.messages || messages,
+        settings: payload.settings || llmSettings,
+      });
+      persistenceQueueRef.current = persistenceQueueRef.current
+        .then(() =>
+          fetch('/api/workspace/state', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: requestBody,
+          })
+        )
+        .catch(() => {});
     } catch {}
   };
 
@@ -365,7 +372,7 @@ export default function NookApp() {
       });
       if (resp.ok) {
         const data = await resp.json();
-        approvalToken = data.approval?.singleUseToken;
+        approvalToken = data.executionGrant || data.approval?.singleUseToken;
       }
     } catch {
       // Local fallback handled gracefully
@@ -556,7 +563,7 @@ export default function NookApp() {
       let activeApprovalId = approvalId;
       let activeApprovalToken = approvalToken;
 
-      if (!activeApprovalId || !activeApprovalToken) {
+      if (!activeApprovalId) {
         try {
           const apprRes = await fetch('/api/approvals', {
             method: 'POST',
@@ -573,7 +580,7 @@ export default function NookApp() {
           if (apprRes.ok) {
             const apprData = await apprRes.json();
             activeApprovalId = apprData.approval?.id;
-            activeApprovalToken = apprData.approval?.singleUseToken;
+            activeApprovalToken = apprData.executionGrant || apprData.approval?.singleUseToken;
           }
         } catch {
           // handled below if exec denies
@@ -589,6 +596,7 @@ export default function NookApp() {
           agentId,
           virtualFiles: activeFiles,
           approvalId: activeApprovalId,
+          executionGrant: activeApprovalToken,
           approvalToken: activeApprovalToken,
         }),
       });
